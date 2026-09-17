@@ -1,0 +1,7 @@
+/target/
+/.tools/
+*.hex
+*.elf
+*.bin
+*.map
+.DS_Store

@@ -1,0 +1,23 @@
+[package]
+name = "teensy-usb-scan"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+teensy4-bsp = { version = "0.6.0", features = ["rt"] }
+cortex-m = "0.7"
+imxrt-log = { version = "0.2.0", default-features = false, features = ["log", "usbd"] }
+log = "0.4"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+debug = 2
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
