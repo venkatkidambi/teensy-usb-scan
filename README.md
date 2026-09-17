@@ -58,6 +58,38 @@ The upload script builds, converts the ELF with `cargo objcopy` to
 `teensy_loader_cli --mcu=TEENSY41 -w -v` with that file. It discovers the Cargo
 artifact rather than assuming a binary filename. USB software reboot is not implemented.
 
+### Windows upload
+
+Use Windows PowerShell 5.1 or PowerShell 7 with `upload.ps1`. Install Rust
+(including its Visual Studio C++ build prerequisites), the ARM Rust target,
+`llvm-tools-preview`, and `cargo-binutils` using the commands above. Install the
+Windows **arm-none-eabi** Arm GNU Toolchain and put its `bin` directory on PATH.
+Do not copy the macOS `.tools` directory to Windows.
+
+The script requires **teensy_loader_cli.exe**, not the graphical `teensy.exe`.
+PJRC provides the [command-line loader source and build instructions](https://www.pjrc.com/teensy/loader_cli.html)
+(Windows builds use MinGW). Put the CLI executable on PATH, or supply its path:
+
+```powershell
+.\upload.ps1
+# Or, when the loader is not on PATH:
+.\upload.ps1 -TeensyLoader 'C:\Tools\Teensy\teensy_loader_cli.exe'
+```
+
+If your execution policy blocks the script, you can allow it for this invocation
+without changing the persistent policy:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\upload.ps1
+```
+
+The script builds, creates `target/firmware/firmware.hex`, then flashes using the
+same options as `upload.sh`. It stops on any failed command, handles paths with
+spaces, works from another directory, and restores the caller's working directory.
+After upload, find the Teensy's COM port in Device Manager and open it in a serial
+terminal at 115200 baud, 8-N-1, with no flow control. The Windows upload script has
+not yet been executed on Windows.
+
 ## Validation and limits
 
 Release build, Cargo check, HEX conversion, native bridge tests, interrupt vectors,
