@@ -1,8 +1,29 @@
 # Teensy Panel desktop application
 
-Tauri 2 + plain HTML/CSS/JavaScript, with serial IO in Rust. No Python, browser,
-web server, Vite, or JavaScript build tool is needed. UI assets are embedded by
-Tauri at compile time and loaded through its internal asset protocol.
+Tauri 2 + plain HTML/CSS/JavaScript, with serial IO in Rust. The release app
+embeds its UI and needs no Python, Node, browser tab, or HTTP server.
+
+## Local development
+
+Install Node 22.12+ and the platform Rust/Tauri prerequisites, then from the
+repository root:
+
+```sh
+npm install
+npm run dev
+```
+
+This opens the native desktop window with Vite on `127.0.0.1:1420`. CSS changes
+update in place; HTML/JavaScript edits reload the UI (reconnect the serial port
+after reload). Rust changes rebuild and restart the app. No browser tab opens.
+The launcher detects the native Rust host target on Windows, macOS, and Linux.
+If PowerShell blocks npm.ps1, use `npm.cmd install` and `npm.cmd run dev`.
+
+`npm run build` embeds the optimized Vite assets in the release executable.
+`npm test` runs the JavaScript protocol tests. Vite and the Tauri CLI are dev-only
+dependencies; there is no frontend framework or additional runtime.
+
+## Cargo-only launch
 
 Run `desktop\start.cmd` on Windows or `./desktop/start.sh` on macOS/Linux.
 These select the Rust **host target**, overriding the parent firmware's target.
@@ -62,7 +83,7 @@ node --test desktop/tests/protocol.test.mjs
 cargo run --manifest-path desktop/Cargo.toml --target HOST --features smoke-test --locked
 ```
 
-Node 22+ is only needed for the optional JavaScript tests. The native smoke test
+Node 22.12+ is needed for npm development and JavaScript tests. The native smoke test
 opens the real desktop window, exercises native IPC/port listing and demo rendering,
 then exits with a success/failure status. It never opens a physical serial device.
 Normal launchers do not enable it.

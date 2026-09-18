@@ -105,6 +105,18 @@ fn main() {
             serial_poll,
             serial_disconnect
         ])
+        .on_page_load(|window, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                // A full Vite reload discards the JS session that owned this port.
+                if let Ok(mut connection) = window.state::<Arc<Backend>>().connection.lock() {
+                    connection.take();
+                }
+            }
+            #[cfg(feature = "smoke-test")]
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                let _ = window.eval(smoke::SCRIPT);
+            }
+        })
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 if let Ok(mut connection) = window.state::<Arc<Backend>>().connection.lock() {
@@ -130,11 +142,6 @@ fn main() {
                 handle.exit(2);
             });
             Ok(())
-        })
-        .on_page_load(|window, payload| {
-            if payload.event() == tauri::webview::PageLoadEvent::Finished {
-                let _ = window.eval(smoke::SCRIPT);
-            }
         });
     builder
         .run(tauri::generate_context!())

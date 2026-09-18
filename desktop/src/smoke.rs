@@ -10,6 +10,8 @@ pub const SCRIPT: &str = r#"
   try {
     for (let i=0; i<100 && (!document.querySelector('#demo') || document.querySelector('#port').textContent.includes('Scanning')); i++) await new Promise(r=>setTimeout(r,50));
     const invoke=window.__TAURI__.core.invoke;
+    if(document.querySelector('.brand, .mark, .device-icon'))throw Error('Decorative branding remains');
+    if(document.querySelector('h1')?.textContent!=='Teensy Panel')throw Error('Panel heading missing');
     const ports=await invoke('serial_ports');
     if(!Array.isArray(ports))throw Error('Native port listing failed');
     let rejected=false;

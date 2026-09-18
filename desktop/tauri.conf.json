@@ -3,11 +3,41 @@
   "productName": "Teensy Panel",
   "version": "0.1.0",
   "identifier": "local.teensy.instrument-panel",
-  "build": { "frontendDist": "ui" },
+  "build": {
+    "frontendDist": "ui",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": {
+      "script": "npm run dev:ui",
+      "cwd": ".."
+    },
+    "beforeBuildCommand": {
+      "script": "npm run build:ui",
+      "cwd": ".."
+    }
+  },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "label": "main", "title": "Teensy · Instrument panel", "width": 1260, "height": 930, "minWidth": 780, "minHeight": 650, "backgroundColor": "#f5f7f4" }],
-    "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'" }
+    "windows": [
+      {
+        "label": "main",
+        "title": "Teensy Panel",
+        "width": 1100,
+        "height": 860,
+        "minWidth": 780,
+        "minHeight": 650,
+        "backgroundColor": "#fafafa"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:1420; object-src 'none'; base-uri 'none'; frame-src 'none'"
+    }
   },
-  "bundle": { "active": false, "icon": ["icons/icon.png", "icons/icon.ico"] }
+  "bundle": {
+    "active": false,
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
+  }
 }

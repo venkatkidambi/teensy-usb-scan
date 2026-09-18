@@ -1,0 +1,14 @@
+{
+  "name": "teensy-panel-dev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node desktop/scripts/tauri.mjs dev",
+    "dev:ui": "vite --config desktop/vite.config.mjs",
+    "build": "node desktop/scripts/tauri.mjs build",
+    "build:ui": "vite build --config desktop/vite.config.mjs",
+    "test": "node --test desktop/tests/*.test.mjs"
+  },
+  "devDependencies": { "@tauri-apps/cli": "^2.11.0", "vite": "^7.3.0" },
+  "engines": { "node": ">=22.12.0" }
+}

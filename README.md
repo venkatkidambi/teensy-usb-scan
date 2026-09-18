@@ -18,7 +18,11 @@ from the Xeryon XD-C (`04d8:ef4a`). The onboard LED still toggles every 500 ms.
 5. Connect the XD-C to the USB2 host header to see its live feedback.
 
 This is a **Tauri 2 desktop app** with native Rust serial access. There is no Python,
-HTTP server, browser tab, Web Serial, Vite, npm install, or Node runtime dependency.
+browser tab, Web Serial, or Node runtime dependency in the release app.
+For development, install Node 22.12+ and run `npm install`, then `npm run dev`
+from this repository root. Vite serves the UI on loopback inside the Tauri window;
+CSS updates live, while JavaScript/HTML edits reload the UI and require reconnecting.
+Rust edits rebuild and restart the app. `npm run build` produces a release executable.
 Plain JavaScript/CSS assets are embedded in the executable. Tauri uses the system
 webview rather than bundling a browser engine; the UI still uses web technologies
 inside its native desktop window. [Tauri architecture](https://v2.tauri.app/start/)
@@ -206,8 +210,8 @@ cargo test --manifest-path desktop/Cargo.toml --target HOST --locked
 node --test desktop/tests/protocol.test.mjs
 ```
 
-Node is optional and used only for JavaScript development tests, never to build
-or run the app. Native UI smoke test (opens a temporary window, tests, then exits):
+Node is used for the npm/Vite development workflow and JavaScript tests.
+The Cargo-only launchers and release executable do not require Node. Native UI smoke test (opens a temporary window, tests, then exits):
 
 ```sh
 cargo run --manifest-path desktop/Cargo.toml --target HOST --features smoke-test --locked

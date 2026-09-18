@@ -8,3 +8,5 @@
 /desktop/target/
 /desktop/gen/
 __pycache__/
+/node_modules/
+/desktop/dist/
