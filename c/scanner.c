@@ -1,5 +1,19 @@
 #include "tusb.h"
 #include "host/hcd.h"
+#ifndef SCANNER_NATIVE_TEST
+#include "portable/chipidea/ci_hs/ci_hs_type.h"
+#include "portable/chipidea/ci_hs/ci_hs_imxrt.h"
+
+// Read-only snapshots: never acknowledge status bits owned by TinyUSB.
+void scanner_registers(uint32_t *command, uint32_t *status, uint32_t *port,
+                       uint32_t *mode) {
+  ci_hs_regs_t *regs = CI_HS_REG(1);
+  *command = regs->USBCMD;
+  *status = regs->USBSTS;
+  *port = regs->PORTSC1;
+  *mode = regs->USBMODE;
+}
+#endif
 
 // Callbacks into Rust run in main context, except scanner_bus_event, which
 // only updates an atomic counter. No logging or allocation in the USB ISR.

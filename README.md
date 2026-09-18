@@ -93,8 +93,35 @@ not yet been executed on Windows.
 ## Validation and limits
 
 Release build, Cargo check, HEX conversion, native bridge tests, interrupt vectors,
-and DMA-buffer placement were checked. **No hardware has been flashed or tested.**
-Enumeration, electrical behavior, and timing still need verification on the board.
+and DMA-buffer placement were checked. The onboard LED blink has been confirmed
+on hardware. USB1 CDC logging and USB2 enumeration still need board verification.
+
+### USB bring-up checklist
+
+1. Upload this firmware with `./upload.sh` (macOS) or `./upload.ps1` (Windows).
+   Leave the host header empty initially.
+2. Open the primary connector's CDC port. Within five seconds, expect
+   `Scanner alive`, a `USB2 connected=false` register snapshot, and
+   `No device descriptor available yet`. The LED should continue blinking.
+3. Connect a known-working USB device directly to the host cable. Expect
+   `USB2 connection detected`, VID/PID with `configured=false`, then
+   `configured=true`. Optional strings may follow. A keyboard or mouse can be
+   used to test enumeration; this firmware does not process input reports.
+4. Unplug it and check for disconnection and removal messages, then reconnect
+   and confirm it configures again. Repeat with the intended actuator.
+5. Save the serial output from attachment through at least two five-second
+   reports, including VID/PID and the raw register snapshots.
+
+If no CDC port appears, first check the primary USB data cable and that this
+firmware was uploaded. If the heartbeat reports arrive but `connected` stays
+false with a device attached, check the host cable orientation, device power,
+and host VBUS. `connected` reflects the controller's connection-status bit;
+it does not prove configuration succeeded. If connected is true but there is
+no descriptor, retain the IRQ count and register snapshots for diagnosis.
+An IRQ count of zero alone is normal before any device is attached.
+If VID/PID appears but `configured=true` never follows, enumeration has not
+completed. A stopped LED indicates the main loop is no longer progressing.
+The snapshots are read-only and do not clear controller status flags.
 
 ```sh
 ./tests/run.sh                   # native C bridge tests; needs a host C compiler

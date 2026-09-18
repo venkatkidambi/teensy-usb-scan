@@ -9,12 +9,14 @@ use teensy4_bsp::{board, hal, ral};
 static MILLIS: AtomicU32 = AtomicU32::new(0);
 static ATTACHES: AtomicU32 = AtomicU32::new(0);
 static REMOVES: AtomicU32 = AtomicU32::new(0);
+static INTERRUPTS: AtomicU32 = AtomicU32::new(0);
 
 unsafe extern "C" {
     fn scanner_init() -> bool;
     fn scanner_task();
     fn scanner_interrupt();
     fn scanner_report() -> bool;
+    fn scanner_registers(command: *mut u32, status: *mut u32, port: *mut u32, mode: *mut u32);
 }
 
 pub fn millis() -> u32 {
@@ -96,6 +98,18 @@ pub fn poll() {
 }
 
 pub fn report() {
+    let (mut command, mut status, mut port, mut mode) = (0, 0, 0, 0);
+    // SAFETY: initialized USB2 registers are read only, into live local values.
+    unsafe { scanner_registers(&mut command, &mut status, &mut port, &mut mode) };
+    log::info!(
+        "USB2 connected={} irqs={} USBCMD={:08x} USBSTS={:08x} PORTSC1={:08x} USBMODE={:08x}",
+        port & 1 != 0,
+        INTERRUPTS.load(Ordering::Relaxed),
+        command,
+        status,
+        port,
+        mode
+    );
     // SAFETY: shared C scanner state is only touched from main context.
     if !unsafe { scanner_report() } {
         log::info!("No device descriptor available yet");
@@ -104,6 +118,7 @@ pub fn report() {
 
 #[unsafe(no_mangle)]
 extern "C" fn USB_OTG2() {
+    INTERRUPTS.fetch_add(1, Ordering::Relaxed);
     // SAFETY: TinyUSB enables this interrupt only after initializing its state.
     unsafe { scanner_interrupt() };
 }
