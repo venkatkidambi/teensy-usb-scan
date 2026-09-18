@@ -17,7 +17,12 @@ This opens the native desktop window with Vite on `127.0.0.1:1420`. CSS changes
 update in place; HTML/JavaScript edits reload the UI (reconnect the serial port
 after reload). Rust changes rebuild and restart the app. No browser tab opens.
 The launcher detects the native Rust host target on Windows, macOS, and Linux.
-If PowerShell blocks npm.ps1, use `npm.cmd install` and `npm.cmd run dev`.
+On Windows, run `.\dev.cmd` from the repository root for a single-command setup
+and launch. It runs an incremental dependency install, then starts development
+using `npm.cmd`, avoiding PowerShell's blocked `npm.ps1` launcher. No administrator
+access or execution-policy changes are needed. Extra arguments are forwarded to
+the development command. You can also use `npm.cmd install` and `npm.cmd run dev`
+directly. The bare `npm` command may still be blocked by PowerShell's policy.
 
 `npm run build` embeds the optimized Vite assets in the release executable.
 `npm test` runs the JavaScript protocol tests. Vite and the Tauri CLI are dev-only
