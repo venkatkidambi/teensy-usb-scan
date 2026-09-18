@@ -12,12 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bbqueue"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd3baa8859d1a4c7411039a75c0599a4640ef1c9a8fc811e4325b00e6cfe0a55"
-
-[[package]]
 name = "bitfield"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -271,21 +265,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e49e4e4a4f2c73284ec46cd459a9c4eb7d93b8876a8a6cf5cd379e36e677bc83"
 
 [[package]]
-name = "imxrt-log"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07c9471c5cc440e0d83609aacb49b49d28f0511bc796c1b7c3ffd95a69c6c769"
-dependencies = [
- "bbqueue",
- "critical-section",
- "imxrt-usbd",
- "log",
- "static_cell",
- "usb-device",
- "usbd-serial",
-]
-
-[[package]]
 name = "imxrt-ral"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -447,9 +426,11 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "cortex-m",
- "imxrt-log",
  "log",
+ "static_cell",
  "teensy4-bsp",
+ "usb-device",
+ "usbd-serial",
 ]
 
 [[package]]

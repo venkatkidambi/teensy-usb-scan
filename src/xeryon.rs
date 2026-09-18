@@ -60,6 +60,14 @@ impl Decoder {
 }
 
 impl Record {
+    pub fn tag(&self) -> &[u8] {
+        &self.tag[..self.tag_len]
+    }
+
+    pub fn value(&self) -> i64 {
+        self.value
+    }
+
     fn parse(line: &[u8]) -> Result<Self, Error> {
         let equal = line
             .iter()

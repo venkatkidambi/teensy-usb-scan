@@ -11,3 +11,5 @@ target/tests/usb-serial-test
 # rustc defaults to the native host, independent of Cargo's embedded target.
 rustc --edition=2024 --test src/xeryon.rs -o target/tests/xeryon-test
 target/tests/xeryon-test
+rustc --edition=2024 --test src/protocol.rs -o target/tests/protocol-test
+target/tests/protocol-test

@@ -2,6 +2,8 @@
 #![no_main]
 
 use teensy4_bsp::{self as bsp, board, hal::pit::Channel};
+mod console;
+mod protocol;
 mod usb_host;
 mod xeryon;
 
@@ -24,7 +26,7 @@ fn main() -> ! {
 
     let mut core = cortex_m::Peripherals::take().unwrap();
     usb_host::start_tick(&mut core.SYST);
-    let mut logger = imxrt_log::log::usbd(usb, imxrt_log::Interrupts::Disabled).unwrap();
+    let mut console = console::Console::new(usb);
     usb_host::init(&mut ccm, &mut ccm_analog, &mut gpio3, &mut iomuxc_gpr);
     log::info!("Teensy USB2 host scanner ready; connect one device to the host header");
     let mut last_report = usb_host::millis();
@@ -34,7 +36,7 @@ fn main() -> ! {
     pit.set_load_timer_value(channel, board::PERCLK_FREQUENCY / 2);
     pit.enable(channel);
     loop {
-        logger.poll();
+        console.poll(usb_host::millis());
         usb_host::poll();
         if pit.is_elapsed(channel) {
             pit.clear_elapsed(channel);

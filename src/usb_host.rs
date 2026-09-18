@@ -14,6 +14,12 @@ static INTERRUPTS: AtomicU32 = AtomicU32::new(0);
 static XD_C: AtomicBool = AtomicBool::new(false);
 static TELEMETRY: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::Decoder>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::Decoder::new()));
+static CACHE: cortex_m::interrupt::Mutex<RefCell<crate::protocol::Telemetry>> =
+    cortex_m::interrupt::Mutex::new(RefCell::new(crate::protocol::Telemetry::new()));
+
+pub fn telemetry() -> crate::protocol::Telemetry {
+    cortex_m::interrupt::free(|cs| *CACHE.borrow(cs).borrow())
+}
 
 fn reset_telemetry() {
     cortex_m::interrupt::free(|cs| {
@@ -176,6 +182,15 @@ extern "C" fn scanner_device(
     // Confirmed descriptor identity of the user's XD-C. Other CDC devices
     // retain escaped raw logging instead of receiving Xeryon interpretations.
     XD_C.store(vid == 0x04d8 && pid == 0xef4a, Ordering::Relaxed);
+    cortex_m::interrupt::free(|cs| {
+        let mut cache = CACHE.borrow(cs).borrow_mut();
+        if !mounted {
+            cache.reset();
+        }
+        cache.vid = vid;
+        cache.pid = pid;
+        cache.mounted = mounted;
+    });
     log::info!(
         "addr={} VID={:04x} PID={:04x} class={:02x} subclass={:02x} protocol={:02x} configured={}",
         address,
@@ -192,12 +207,26 @@ extern "C" fn scanner_device(
 extern "C" fn scanner_removed(address: u8) {
     XD_C.store(false, Ordering::Relaxed);
     reset_telemetry();
+    cortex_m::interrupt::free(|cs| CACHE.borrow(cs).borrow_mut().reset());
     log::info!("Device removed: address={}", address);
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn scanner_serial_event(event: u8, address: u8, interface: u8) {
     reset_telemetry();
+    cortex_m::interrupt::free(|cs| {
+        let mut cache = CACHE.borrow(cs).borrow_mut();
+        cache.cdc = match event {
+            0 => 1,
+            1 => 2,
+            2 => 0,
+            3 => 3,
+            _ => 4,
+        };
+        if event == 2 {
+            cache.samples.fill(crate::protocol::Sample::default());
+        }
+    });
     let message = match event {
         0 => "CDC ACM detected",
         1 => "CDC ACM open: 115200 8-N-1, DTR asserted; receiving only",
@@ -231,16 +260,20 @@ unsafe extern "C" fn scanner_serial_rx(data: *const u8, len: u32) {
     // SAFETY: C supplies a live stack buffer for this main-context callback.
     let bytes = unsafe { core::slice::from_raw_parts(data, len as usize) };
     if XD_C.load(Ordering::Relaxed) {
-        for &byte in bytes {
-            let result =
-                cortex_m::interrupt::free(|cs| TELEMETRY.borrow(cs).borrow_mut().push(byte));
-            // Format/log outside the critical section; the result owns its data.
-            match result {
-                Some(Ok(record)) => log::info!("XD-C {}", record),
-                Some(Err(error)) => log::warn!("XD-C ignored feedback line: {:?}", error),
-                None => {}
+        // One bounded critical section per received chunk, no string formatting
+        // or USB IO inside it. Foreground USB1 serializes a copy at 10 Hz.
+        let now = millis();
+        cortex_m::interrupt::free(|cs| {
+            let mut decoder = TELEMETRY.borrow(cs).borrow_mut();
+            let mut cache = CACHE.borrow(cs).borrow_mut();
+            for &byte in bytes {
+                match decoder.push(byte) {
+                    Some(Ok(record)) => cache.record(record.tag(), record.value(), now),
+                    Some(Err(_)) => cache.malformed = cache.malformed.wrapping_add(1),
+                    None => {}
+                }
             }
-        }
+        });
     } else {
         log::info!("USB2 CDC RX: {}", SerialBytes(bytes));
     }
