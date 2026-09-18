@@ -68,16 +68,27 @@ Do not copy the macOS `.tools` directory to Windows.
 
 The script requires **teensy_loader_cli.exe**, not the graphical `teensy.exe`.
 PJRC provides the [command-line loader source and build instructions](https://www.pjrc.com/teensy/loader_cli.html)
-(Windows builds use MinGW). Put the CLI executable on PATH, or supply its path:
+(Windows builds use MinGW). `upload.config.json` stores the loader path and is
+already set to `C:\msys64\home\vek19004\teensy_loader_cli\teensy_loader_cli.exe`.
+Edit its `TeensyLoader` value if the executable moves (JSON requires doubled
+backslashes). For normal uploads from PowerShell or Command Prompt, run:
 
 ```powershell
-.\upload.ps1
-# Or, when the loader is not on PATH:
-.\upload.ps1 -TeensyLoader 'C:\Tools\Teensy\teensy_loader_cli.exe'
+.\upload.cmd
 ```
 
-If your execution policy blocks the script, you can allow it for this invocation
-without changing the persistent policy:
+The launcher invokes `upload.ps1` with an execution-policy bypass scoped to that
+PowerShell process, so there is no repeated policy setup or persistent policy
+change. Organization-enforced Group Policy still takes precedence.
+
+An explicit loader argument overrides the config. If the config file is absent,
+the script searches PATH for `teensy_loader_cli.exe`:
+
+```powershell
+.\upload.cmd -TeensyLoader 'C:\Tools\Teensy\teensy_loader_cli.exe'
+```
+
+You can also invoke PowerShell directly (equivalent to the launcher):
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\upload.ps1
@@ -87,18 +98,20 @@ The script builds, creates `target/firmware/firmware.hex`, then flashes using th
 same options as `upload.sh`. It stops on any failed command, handles paths with
 spaces, works from another directory, and restores the caller's working directory.
 After upload, find the Teensy's COM port in Device Manager and open it in a serial
-terminal at 115200 baud, 8-N-1, with no flow control. The Windows upload script has
-not yet been executed on Windows.
+terminal at 115200 baud, 8-N-1, with no flow control. Windows upload and actuator
+recognition have been confirmed by the user; the new config and `.cmd` launcher
+still need a Windows run.
 
 ## Validation and limits
 
 Release build, Cargo check, HEX conversion, native bridge tests, interrupt vectors,
 and DMA-buffer placement were checked. The onboard LED blink has been confirmed
-on hardware. USB1 CDC logging and USB2 enumeration still need board verification.
+on hardware. The user also confirmed USB1 CDC logging on COM6 and recognition
+of the Xeryon actuator through USB2. Actuator motion/control is not implemented.
 
 ### USB bring-up checklist
 
-1. Upload this firmware with `./upload.sh` (macOS) or `./upload.ps1` (Windows).
+1. Upload this firmware with `./upload.sh` (macOS) or `.\upload.cmd` (Windows).
    Leave the host header empty initially.
 2. Open the primary connector's CDC port. Within five seconds, expect
    `Scanner alive`, a `USB2 connected=false` register snapshot, and

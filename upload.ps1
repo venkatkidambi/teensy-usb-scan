@@ -2,11 +2,29 @@
 [CmdletBinding()]
 param(
     # An executable on PATH, or the full path to teensy_loader_cli.exe.
-    [string]$TeensyLoader = 'teensy_loader_cli.exe'
+    [string]$TeensyLoader
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# An explicit argument wins over the project configuration, then PATH.
+if (-not $PSBoundParameters.ContainsKey('TeensyLoader')) {
+    $configPath = Join-Path $PSScriptRoot 'upload.config.json'
+    if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+        $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+        if ($null -eq $config -or
+            $null -eq $config.PSObject.Properties['TeensyLoader'] -or
+            $config.TeensyLoader -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($config.TeensyLoader)) {
+            throw "Expected a nonempty TeensyLoader string in '$configPath'."
+        }
+        $TeensyLoader = $config.TeensyLoader
+    }
+    else {
+        $TeensyLoader = 'teensy_loader_cli.exe'
+    }
+}
 
 function Get-RequiredApplication {
     param([string]$Name, [string]$Hint)
