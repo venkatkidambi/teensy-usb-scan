@@ -1,0 +1,142 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod serial;
+#[cfg(feature = "smoke-test")]
+mod smoke;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU32, Ordering},
+};
+use tauri::Manager;
+
+#[derive(Default)]
+struct Backend {
+    connection: Mutex<Option<serial::Connection>>,
+    next: AtomicU32,
+}
+
+#[tauri::command]
+async fn serial_ports() -> Result<Vec<serial::Port>, String> {
+    tauri::async_runtime::spawn_blocking(serial::ports)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn serial_connect(
+    port: String,
+    state: tauri::State<'_, Arc<Backend>>,
+) -> Result<u32, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut connection = state.connection.lock().map_err(|e| e.to_string())?;
+        if connection.is_some() {
+            return Err("Disconnect the current port first".into());
+        }
+        let id = state.next.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        *connection = Some(serial::Connection::open(&port, id)?);
+        Ok(id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn serial_send(
+    session: u32,
+    command: String,
+    state: tauri::State<'_, Arc<Backend>>,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection = state.connection.lock().map_err(|e| e.to_string())?;
+        let connection = connection
+            .as_ref()
+            .filter(|c| c.id == session)
+            .ok_or("Serial session expired")?;
+        connection.send(command)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn serial_poll(
+    session: u32,
+    state: tauri::State<'_, Arc<Backend>>,
+) -> Result<serial::Batch, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection = state.connection.lock().map_err(|e| e.to_string())?;
+        let connection = connection
+            .as_ref()
+            .filter(|c| c.id == session)
+            .ok_or("Serial session expired")?;
+        Ok(connection.poll())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn serial_disconnect(
+    session: u32,
+    state: tauri::State<'_, Arc<Backend>>,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut connection = state.connection.lock().map_err(|e| e.to_string())?;
+        if connection.as_ref().is_some_and(|c| c.id == session) {
+            connection.take();
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn main() {
+    let builder = tauri::Builder::default()
+        .manage(Arc::new(Backend::default()))
+        .invoke_handler(tauri::generate_handler![
+            serial_ports,
+            serial_connect,
+            serial_send,
+            serial_poll,
+            serial_disconnect
+        ])
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Ok(mut connection) = window.state::<Arc<Backend>>().connection.lock() {
+                    connection.take();
+                }
+            }
+        });
+    #[cfg(feature = "smoke-test")]
+    let builder = builder
+        .invoke_handler(tauri::generate_handler![
+            serial_ports,
+            serial_connect,
+            serial_send,
+            serial_poll,
+            serial_disconnect,
+            smoke::smoke_report
+        ])
+        .setup(|app| {
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(20));
+                eprintln!("NATIVE_SMOKE timed out");
+                handle.exit(2);
+            });
+            Ok(())
+        })
+        .on_page_load(|window, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                let _ = window.eval(smoke::SCRIPT);
+            }
+        });
+    builder
+        .run(tauri::generate_context!())
+        .expect("Could not start Teensy Panel");
+}

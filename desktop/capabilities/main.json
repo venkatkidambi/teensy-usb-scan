@@ -1,0 +1,6 @@
+{
+  "identifier": "main-window",
+  "description": "The local instrument window. Serial access is limited to application commands.",
+  "windows": ["main"],
+  "permissions": []
+}

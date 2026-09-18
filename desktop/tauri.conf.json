@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Teensy Panel",
+  "version": "0.1.0",
+  "identifier": "local.teensy.instrument-panel",
+  "build": { "frontendDist": "ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "label": "main", "title": "Teensy · Instrument panel", "width": 1260, "height": 930, "minWidth": 780, "minHeight": 650, "backgroundColor": "#f5f7f4" }],
+    "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'" }
+  },
+  "bundle": { "active": false, "icon": ["icons/icon.png", "icons/icon.ico"] }
+}

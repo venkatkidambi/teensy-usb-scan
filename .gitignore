@@ -5,3 +5,6 @@
 *.bin
 *.map
 .DS_Store
+/desktop/target/
+/desktop/gen/
+__pycache__/

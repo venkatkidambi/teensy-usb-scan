@@ -5,34 +5,51 @@ Cargo builds everything; no Arduino, PlatformIO, or operating system is used.
 The Rust `teensy4-bsp` supplies startup, clocks, pins, and the linker script.
 
 The primary **USB1 connector** provides bidirectional CDC communication with a
-local browser dashboard. The separate **USB2 host header** receives feedback
+local Tauri desktop application. The separate **USB2 host header** receives feedback
 from the Xeryon XD-C (`04d8:ef4a`). The onboard LED still toggles every 500 ms.
 
-## Dashboard quick start
+## Desktop app quick start
 
-1. Flash the updated firmware: `.\upload.cmd` on Windows, or `./upload.sh` on macOS.
-2. Close your serial terminal so the browser can open the port.
-3. On Windows, run `.\frontend\start.cmd` (requires Python 3). On macOS/Linux,
-   run `python3 frontend/serve.py`. No pip/npm packages or frontend build are needed.
-4. Open **http://127.0.0.1:8000** in desktop Chrome or Edge.
-5. Click **Connect Teensy** and select its primary USB serial port (previously COM6;
-   Windows may assign another number after the USB product name changes).
-6. Connect the XD-C to the host header. Position, frequency, status flags, and
-   controller identity populate as its existing broadcasts arrive.
+1. Flash the firmware with `.\upload.cmd` on Windows (`./upload.sh` on macOS).
+2. Close any serial terminal using the Teensy's port.
+3. Run **`.\desktop\start.cmd`** on Windows. This builds and opens a desktop
+   window. On macOS/Linux use **`./desktop/start.sh`**.
+4. Select the Teensy's primary USB port (COM6 on your setup) and click **Connect Teensy**.
+5. Connect the XD-C to the USB2 host header to see its live feedback.
 
-The interface includes a 60-second position plot, sample ages, decoded flags,
-Ping/Read snapshot/Pause stream requests, and a bounded activity log. Pause
-only stops USB1 snapshots; actuator reception keeps running. Pressure is shown
-as **Not configured**, and motion commands are not implemented. A clearly labeled
-**demo preview** works without a board and sends no USB traffic.
+This is a **Tauri 2 desktop app** with native Rust serial access. There is no Python,
+HTTP server, browser tab, Web Serial, Vite, npm install, or Node runtime dependency.
+Plain JavaScript/CSS assets are embedded in the executable. Tauri uses the system
+webview rather than bundling a browser engine; the UI still uses web technologies
+inside its native desktop window. [Tauri architecture](https://v2.tauri.app/start/)
 
-The frontend is plain HTML/CSS/JavaScript with system fonts, local assets, and
-Canvas plotting (about 33 KB uncompressed). Python only serves static files on
-127.0.0.1; it never opens the serial port. There is no backend API, framework,
-package install, analytics, CDN, or network connection required after loading.
-[Web Serial](https://developer.chrome.com/docs/capabilities/serial) requires a
-supported browser and a secure context such as localhost. Do not open index.html
-as a file; JavaScript modules need the local HTTP server. Ctrl+C stops the server.
+First-build prerequisites on Windows: Rust's MSVC toolchain, Microsoft C++ Build
+Tools with Desktop development with C++, and the WebView2 runtime. These are
+[Tauri's platform prerequisites](https://v2.tauri.app/start/prerequisites/).
+Rust/C++ may already be installed for firmware development. The first build
+fetches Cargo dependencies and takes longer; the pinned desktop Cargo.lock is
+included. Once built, you can launch the executable directly without Cargo:
+
+`desktop\target\x86_64-pc-windows-msvc\release\teensy-panel.exe`
+
+That path is for x64 Windows; ARM64 Windows uses its native target directory.
+The launchers explicitly select the host target so this app is never compiled
+for the repository's default Teensy ARM target. The desktop and firmware crates
+have separate lockfiles and dependencies. Build-time desktop dependencies never
+run on or link into the Teensy firmware.
+
+The dashboard includes positions, frequency, decoded status flags, a 60-second
+plot, sample ages, a bounded activity log, and Ping / Read snapshot / Pause stream.
+Pause only stops USB1 snapshots; actuator reception continues. Pressure sensing
+is labeled **Not configured**. No motion commands are enabled. **Preview demo**
+renders simulated readings without opening a serial port.
+
+The desktop serial worker has a 20 ms read timeout, bounded command/response/log
+queues, and coalesces unsolicited snapshots if the UI is slow. The UI polls local
+IPC at up to 20 Hz. Request IDs, reply types, protocol version, and timeouts are
+checked; device disconnects close the session and clear displayed values. Closing
+the app releases the port. A host-side command allowlist rejects arbitrary serial
+writes. Hardware throughput and latency have not been benchmarked.
 
 ### Bare-metal data path
 
@@ -70,7 +87,7 @@ USB2 supports one standard CDC ACM interface, opened at 115200 8-N-1 with DTR.
 Other USB protocols (including CANopen/SLCAN) are not implemented. A three-second
 CDC setup timeout or failed setup requires unplugging/reconnecting to retry.
 No motion, configuration, or query commands are sent to the XD-C. The PC command
-protocol is documented in [frontend/PROTOCOL.md](frontend/PROTOCOL.md).
+protocol is documented in [desktop/PROTOCOL.md](desktop/PROTOCOL.md).
 
 ## Tools and build
 
@@ -107,7 +124,7 @@ version control. The normal ELF path is
 2. Run `./upload.sh`, then press the Teensy's Program button when the loader waits.
 3. Start the dashboard using the quick-start steps above. For manual inspection,
    a serial terminal at 115200 can read newline-delimited JSON and `#` diagnostics.
-   Use either the terminal or the browser, not both at once.
+   Use either the terminal or the desktop app, not both at once.
 4. Attach the actuator to the separate five-pin host header using the correct
    Teensy 4.1 USB host cable. For this first scanner, connect directly, without a hub.
 
@@ -166,34 +183,46 @@ still need a Windows run.
 
 ## Validation and limits
 
-The user confirmed the LED heartbeat, enumeration, and USB2 reception of XD-C
-EPOS/STAT on hardware. The new USB1 command transport and dashboard have passed
-release compilation, native C/Rust tests, frontend protocol tests, and desktop/mobile
-Chrome smoke tests using simulated serial IO. Actual bidirectional USB1 behavior
-still requires a Teensy/Windows run. An upstream CDC-only unused-function warning
-remains in TinyUSB; the build succeeds.
+The user confirmed the LED heartbeat, USB host enumeration, and XD-C EPOS/STAT
+reception on hardware. Desktop Rust/JavaScript tests cover framing, bounded queues,
+command allowlisting, reply matching, timeouts, and disconnect cleanup. A native
+macOS Tauri smoke test verifies embedded UI rendering, native port discovery,
+invalid-port rejection, demo telemetry, status flags, and clearing on disconnect.
+Windows packaging and actual native COM6 communication still need a Windows/Teensy run.
+
+Firmware tests and build:
 
 ```sh
-./tests/run.sh                   # native C bridge, decoder, protocol tests
-node --test tests/frontend.test.mjs   # Node 22+; development tests only
+./tests/run.sh
 cargo fmt --check
 cargo build --release --locked
 ```
 
-Optional browser smoke tests: run the local server and start an isolated Chrome
-with `--headless --remote-debugging-port=9222 --user-data-dir=<temporary-directory>`,
-then run `node tests/browser-smoke.mjs`. Screenshots go to `target/tests/`.
-The test simulates Web Serial; it does not access a physical actuator.
+Desktop tests (replace HOST with the host from `rustc -vV`, such as
+`x86_64-pc-windows-msvc` or `aarch64-apple-darwin`):
 
-On the board, verify Connect/Ping/Read snapshot, pause/resume, and actuator unplug/
-reconnect. Check that positions and flags clear on unplug and repopulate on reconnect,
-and that the heartbeat continues with the browser closed. Repeat after unplugging
-and reconnecting the Teensy's primary USB cable. If a terminal works but Connect
-fails, close the terminal and check that the updated firmware is flashed. Firmware
-from the earlier logging-only stage cannot answer the dashboard handshake.
+```sh
+cargo test --manifest-path desktop/Cargo.toml --target HOST --locked
+node --test desktop/tests/protocol.test.mjs
+```
+
+Node is optional and used only for JavaScript development tests, never to build
+or run the app. Native UI smoke test (opens a temporary window, tests, then exits):
+
+```sh
+cargo run --manifest-path desktop/Cargo.toml --target HOST --features smoke-test --locked
+```
+
+The smoke-test feature is off in the normal launcher/release app. It does not
+open any physical serial port. See [desktop/README.md](desktop/README.md).
+
+On hardware, verify Connect/Ping/Read snapshot, pause/resume, actuator unplug and
+reconnect, and primary USB unplug/reconnect. Check that displayed data clears on
+disconnect and the LED continues blinking when the desktop app is closed. If the
+handshake times out, verify the correct port and current firmware. The earlier
+logging-only firmware cannot answer these requests.
 
 Only one directly attached device and one CDC ACM interface are supported, with
-a configuration descriptor up to 1024 bytes. Strings are optional and best-effort.
-Host control-transfer timeout support is incomplete; a nonresponsive device may
-require unplugging/reconnecting or resetting the board to retry. No motion or I²C
-pressure-sensor driver is implemented in this telemetry phase.
+a configuration descriptor up to 1024 bytes. Host control-transfer timeout support
+is incomplete; an unresponsive device may require unplugging or resetting the board.
+Motion and I²C pressure sensing are not implemented in this telemetry phase.
