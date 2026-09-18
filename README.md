@@ -10,29 +10,42 @@ device class/subclass/protocol, and optional manufacturer/product/serial strings
 The **primary USB1 connector** provides CDC serial logging to your Mac.
 Descriptors are repeated every five seconds so you can open the terminal later.
 This enumerates devices; it does not send actuator-specific control commands.
-CDC ACM devices are also opened at 115200 8-N-1 with DTR asserted. Incoming
-bytes are logged as `USB2 CDC RX: ...` in chunks of up to 64 bytes; newlines,
-control bytes, and non-ASCII bytes are escaped. USB packet/chunk boundaries
-are not message boundaries. This is a receive-only transport bring-up step,
-not yet an implementation of Xeryon information queries.
+CDC ACM devices are also opened at 115200 8-N-1 with DTR asserted. The confirmed
+XD-C (`04d8:ef4a`) broadcasts live feedback, which the Teensy decodes below.
+Other CDC devices retain escaped raw `USB2 CDC RX: ...` logging.
 
-### Xeryon protocol selection
+### Readable XD-C feedback
 
-The [Controller & Connection Manual, sections 5 and 8](https://xeryon.com/download-files/Controller%20%26%20Connection%20Manual.pdf)
-documents ASCII queries such as `SRNO=?`, `SOFT=?`, and `EPOS=?` terminated by
-LF for the applicable controllers. The newer
-[XLA-INTG manual, sections 6.1 and 6.4](https://xeryon.com/download-files/Xeryon%20INTG%20manual%20v1.3.pdf)
-instead specifies CANopen through a USB-to-CAN adapter. Its application protocol
-depends on the adapter firmware (SLCAN or native SocketCAN).
-Confirm the controller model, adapter if present, and USB VID/PID before adding
-application requests. USB enumeration alone does not establish the protocol.
+Flash with `.\upload.cmd` on Windows, then reopen COM6 (or the assigned port).
+Illustrative output:
+
+```text
+XD-C EPOS=-123 | encoder position (counts)
+XD-C DPOS=100 | target position (counts)
+XD-C STAT=1344 (0x000540) active flags: closed loop, encoder valid, position reached
+XD-C SOFT=20103 | firmware 2.1.3
+```
+
+The decoder follows the [XD-C manual v3.1, section 4.3, pages 13–14](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.1%20-%20JPL.pdf).
+Each `STAT` line lists the set bits, retaining the decimal and hexadecimal word.
+Flags absent from the list are clear; `none` means no bits are set, not a general
+health verdict. Bit 0 is labeled XRTA-only, bit 20 unused, and undefined bits
+22–23 appear as an unknown-bit mask. Position remains in encoder counts because
+conversion to physical units depends on the stage's resolution.
+
+`SRNO`, `FREQ`, `TIME`, and `SYNC` get descriptive labels too. Unfamiliar numeric
+tags (including stage/resolution tags) are retained. The parser assembles LF or
+CRLF lines across USB reads with a fixed 64-byte buffer. Malformed or overlong
+lines generate a warning and are discarded through the next newline; reconnects
+clear partial input. A partial line received when the port first opens may also
+be discarded. No motion, configuration, or query commands are transmitted.
 
 The current receive transport supports standard CDC ACM only; it does not
 implement CANopen, SLCAN, or vendor-specific USB serial protocols. It uses
 static buffers and the existing main loop with `OPT_OS_NONE`, with no RTOS,
 Arduino layer, heap allocation, or desktop driver running on the Teensy.
 Opening the port may expose any feedback the controller already broadcasts.
-If it sends nothing automatically, no `CDC RX` output is expected yet.
+If it sends nothing automatically, no telemetry output is expected.
 Setup failure or a three-second setup timeout requires unplugging/reconnecting
 to retry. Raw receive logs are diagnostic output, not lossless data capture.
 
@@ -162,13 +175,13 @@ completed. A stopped LED indicates the main loop is no longer progressing.
 The snapshots are read-only and do not clear controller status flags.
 
 ```sh
-./tests/run.sh                   # native C bridge tests; needs a host C compiler
+./tests/run.sh                   # native C bridge and Rust decoder tests
 cargo fmt --check
 ```
 
 Only one directly attached device and one CDC ACM interface are supported, with
 a configuration descriptor up to 1024 bytes. Strings are optional and best-effort.
-The CDC receive transport has native mock tests but still needs board verification.
-There is no actuator application-protocol driver yet.
+CDC reception of XD-C EPOS/STAT telemetry has been confirmed on hardware.
+The readable decoder passes native tests; its output still needs board verification.
 Control-transfer timeout support is incomplete; a nonresponsive
 device may require unplugging/reconnecting or resetting the board to retry.

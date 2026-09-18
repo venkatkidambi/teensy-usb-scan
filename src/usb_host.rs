@@ -1,7 +1,8 @@
 //! Rust owns board initialization and logging. TinyUSB owns USB2 after init.
 use core::{
+    cell::RefCell,
     fmt,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use cortex_m::peripheral::{NVIC, SYST, syst::SystClkSource};
 use teensy4_bsp::{board, hal, ral};
@@ -10,6 +11,15 @@ static MILLIS: AtomicU32 = AtomicU32::new(0);
 static ATTACHES: AtomicU32 = AtomicU32::new(0);
 static REMOVES: AtomicU32 = AtomicU32::new(0);
 static INTERRUPTS: AtomicU32 = AtomicU32::new(0);
+static XD_C: AtomicBool = AtomicBool::new(false);
+static TELEMETRY: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::Decoder>> =
+    cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::Decoder::new()));
+
+fn reset_telemetry() {
+    cortex_m::interrupt::free(|cs| {
+        *TELEMETRY.borrow(cs).borrow_mut() = crate::xeryon::Decoder::new();
+    });
+}
 
 unsafe extern "C" {
     fn scanner_init() -> bool;
@@ -163,6 +173,9 @@ extern "C" fn scanner_device(
     protocol: u8,
     mounted: bool,
 ) {
+    // Confirmed descriptor identity of the user's XD-C. Other CDC devices
+    // retain escaped raw logging instead of receiving Xeryon interpretations.
+    XD_C.store(vid == 0x04d8 && pid == 0xef4a, Ordering::Relaxed);
     log::info!(
         "addr={} VID={:04x} PID={:04x} class={:02x} subclass={:02x} protocol={:02x} configured={}",
         address,
@@ -177,11 +190,14 @@ extern "C" fn scanner_device(
 
 #[unsafe(no_mangle)]
 extern "C" fn scanner_removed(address: u8) {
+    XD_C.store(false, Ordering::Relaxed);
+    reset_telemetry();
     log::info!("Device removed: address={}", address);
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn scanner_serial_event(event: u8, address: u8, interface: u8) {
+    reset_telemetry();
     let message = match event {
         0 => "CDC ACM detected",
         1 => "CDC ACM open: 115200 8-N-1, DTR asserted; receiving only",
@@ -214,7 +230,20 @@ unsafe extern "C" fn scanner_serial_rx(data: *const u8, len: u32) {
     }
     // SAFETY: C supplies a live stack buffer for this main-context callback.
     let bytes = unsafe { core::slice::from_raw_parts(data, len as usize) };
-    log::info!("USB2 CDC RX: {}", SerialBytes(bytes));
+    if XD_C.load(Ordering::Relaxed) {
+        for &byte in bytes {
+            let result =
+                cortex_m::interrupt::free(|cs| TELEMETRY.borrow(cs).borrow_mut().push(byte));
+            // Format/log outside the critical section; the result owns its data.
+            match result {
+                Some(Ok(record)) => log::info!("XD-C {}", record),
+                Some(Err(error)) => log::warn!("XD-C ignored feedback line: {:?}", error),
+                None => {}
+            }
+        }
+    } else {
+        log::info!("USB2 CDC RX: {}", SerialBytes(bytes));
+    }
 }
 
 struct UsbString<'a>(&'a [u8]);

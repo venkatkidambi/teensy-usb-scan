@@ -3,6 +3,7 @@
 
 use teensy4_bsp::{self as bsp, board, hal::pit::Channel};
 mod usb_host;
+mod xeryon;
 
 #[bsp::rt::entry]
 fn main() -> ! {
