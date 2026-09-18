@@ -10,6 +10,31 @@ device class/subclass/protocol, and optional manufacturer/product/serial strings
 The **primary USB1 connector** provides CDC serial logging to your Mac.
 Descriptors are repeated every five seconds so you can open the terminal later.
 This enumerates devices; it does not send actuator-specific control commands.
+CDC ACM devices are also opened at 115200 8-N-1 with DTR asserted. Incoming
+bytes are logged as `USB2 CDC RX: ...` in chunks of up to 64 bytes; newlines,
+control bytes, and non-ASCII bytes are escaped. USB packet/chunk boundaries
+are not message boundaries. This is a receive-only transport bring-up step,
+not yet an implementation of Xeryon information queries.
+
+### Xeryon protocol selection
+
+The [Controller & Connection Manual, sections 5 and 8](https://xeryon.com/download-files/Controller%20%26%20Connection%20Manual.pdf)
+documents ASCII queries such as `SRNO=?`, `SOFT=?`, and `EPOS=?` terminated by
+LF for the applicable controllers. The newer
+[XLA-INTG manual, sections 6.1 and 6.4](https://xeryon.com/download-files/Xeryon%20INTG%20manual%20v1.3.pdf)
+instead specifies CANopen through a USB-to-CAN adapter. Its application protocol
+depends on the adapter firmware (SLCAN or native SocketCAN).
+Confirm the controller model, adapter if present, and USB VID/PID before adding
+application requests. USB enumeration alone does not establish the protocol.
+
+The current receive transport supports standard CDC ACM only; it does not
+implement CANopen, SLCAN, or vendor-specific USB serial protocols. It uses
+static buffers and the existing main loop with `OPT_OS_NONE`, with no RTOS,
+Arduino layer, heap allocation, or desktop driver running on the Teensy.
+Opening the port may expose any feedback the controller already broadcasts.
+If it sends nothing automatically, no `CDC RX` output is expected yet.
+Setup failure or a three-second setup timeout requires unplugging/reconnecting
+to retry. Raw receive logs are diagnostic output, not lossless data capture.
 
 ## Tools and build
 
@@ -141,7 +166,9 @@ The snapshots are read-only and do not clear controller status flags.
 cargo fmt --check
 ```
 
-Only one directly attached device is supported, with a configuration descriptor
-up to 1024 bytes. Strings are optional and best-effort. There are no actuator
-class drivers. Control-transfer timeout support is incomplete; a nonresponsive
+Only one directly attached device and one CDC ACM interface are supported, with
+a configuration descriptor up to 1024 bytes. Strings are optional and best-effort.
+The CDC receive transport has native mock tests but still needs board verification.
+There is no actuator application-protocol driver yet.
+Control-transfer timeout support is incomplete; a nonresponsive
 device may require unplugging/reconnecting or resetting the board to retry.

@@ -1,5 +1,6 @@
 #include "tusb.h"
 #include "host/hcd.h"
+#include "usb_serial.h"
 #ifndef SCANNER_NATIVE_TEST
 #include "portable/chipidea/ci_hs/ci_hs_type.h"
 #include "portable/chipidea/ci_hs/ci_hs_imxrt.h"
@@ -132,6 +133,7 @@ static void string_complete(tuh_xfer_t *xfer) {
 
 void scanner_task(void) {
   tuh_task_ext(0, false);
+  usb_serial_task();
   if (!mounted || busy || stage >= 4) return;
   if (stage && string_index[stage - 1] == 0) {
     ++stage;

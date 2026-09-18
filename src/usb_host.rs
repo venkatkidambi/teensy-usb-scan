@@ -180,6 +180,43 @@ extern "C" fn scanner_removed(address: u8) {
     log::info!("Device removed: address={}", address);
 }
 
+#[unsafe(no_mangle)]
+extern "C" fn scanner_serial_event(event: u8, address: u8, interface: u8) {
+    let message = match event {
+        0 => "CDC ACM detected",
+        1 => "CDC ACM open: 115200 8-N-1, DTR asserted; receiving only",
+        2 => "CDC ACM disconnected",
+        3 => "CDC ACM setup failed; unplug/reconnect to retry",
+        4 => "CDC ACM setup timed out; unplug/reconnect to retry",
+        _ => return,
+    };
+    log::info!("USB2 addr={} interface={}: {}", address, interface, message);
+}
+
+struct SerialBytes<'a>(&'a [u8]);
+
+impl fmt::Display for SerialBytes<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use fmt::Write;
+        for &byte in self.0 {
+            for escaped in core::ascii::escape_default(byte) {
+                f.write_char(char::from(escaped))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn scanner_serial_rx(data: *const u8, len: u32) {
+    if data.is_null() || len > 64 {
+        return;
+    }
+    // SAFETY: C supplies a live stack buffer for this main-context callback.
+    let bytes = unsafe { core::slice::from_raw_parts(data, len as usize) };
+    log::info!("USB2 CDC RX: {}", SerialBytes(bytes));
+}
+
 struct UsbString<'a>(&'a [u8]);
 
 impl fmt::Display for UsbString<'_> {

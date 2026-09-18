@@ -36,8 +36,10 @@ fn main() {
         .opt_level(2)
         .files([
             "c/scanner.c",
+            "c/usb_serial.c",
             "vendor/tinyusb/src/tusb.c",
             "vendor/tinyusb/src/common/tusb_fifo.c",
+            "vendor/tinyusb/src/class/cdc/cdc_host.c",
             "vendor/tinyusb/src/host/usbh.c",
             "vendor/tinyusb/src/portable/ehci/ehci.c",
             "vendor/tinyusb/src/portable/chipidea/ci_hs/hcd_ci_hs.c",

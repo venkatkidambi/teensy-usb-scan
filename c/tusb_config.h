@@ -9,6 +9,9 @@
 #define CFG_TUH_MAX_SPEED OPT_MODE_HIGH_SPEED
 #define CFG_TUH_DEVICE_MAX 1
 #define CFG_TUH_HUB 0
+#define CFG_TUH_CDC 1
+#define CFG_TUH_CDC_RX_BUFSIZE 1024
+#define CFG_TUH_CDC_TX_BUFSIZE 512
 #define CFG_TUH_ENUMERATION_BUFSIZE 1024
 
 // RT1062 M7 DTCM is USB-DMA accessible and uncached. The BSP puts .bss.*

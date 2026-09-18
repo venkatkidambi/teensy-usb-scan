@@ -17,6 +17,8 @@ static uint16_t language_requested;
 static unsigned string_calls, device_calls, remove_calls, events;
 static bool configured;
 
+void usb_serial_task(void) {}
+
 bool tusb_rhport_init(uint8_t port, const tusb_rhport_init_t *init) {
   assert(port == 1 && init->role == TUSB_ROLE_HOST);
   return true;
