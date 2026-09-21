@@ -86,3 +86,9 @@ test('hardware diagnostics distinguish missing data, settling and transfer failu
   assert.deepEqual(parseMessage(JSON.stringify(m)).plunger_io,m.plunger_io);
   m.plunger_io.standby=1;assert.throws(()=>parseMessage(JSON.stringify(m)),/plunger IO/);
 });
+
+test('HX711 pin readback validates booleans',()=>{
+  const m={type:'snapshot',id:0,ms:100,epoch:1,vid:0,pid:0,mounted:false,cdc:0,records:0,malformed:0,skipped:0,values:{},pressure:{raw:0,average:0,ms:0,samples:0,valid:false,saturated:false,state:0,errors:0,pins:{dout_high:true,sck_high:false,sck_requested_high:false}}};
+  assert.deepEqual(parseMessage(JSON.stringify(m)).pressure.pins,m.pressure.pins);
+  m.pressure.pins.sck_high=0;assert.throws(()=>parseMessage(JSON.stringify(m)),/pin levels/);
+});

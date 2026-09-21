@@ -25,8 +25,17 @@ pub fn signed_inverted(word: u32) -> i32 {
     -(((word << 8) as i32) >> 8)
 }
 
+/// GPIO readback sampled while SCK should be idle low.
+#[derive(Clone, Copy, Default)]
+pub struct PinLevels {
+    pub dout_high: bool,
+    pub sck_high: bool,
+    pub sck_requested_high: bool,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct Reading {
+    pub pins: Option<PinLevels>,
     pub raw: i32,
     pub average: i32,
     pub ms: u32,
@@ -101,6 +110,7 @@ impl Pressure {
         self.next = (self.next + 1) % WINDOW;
         self.count = (self.count + 1).min(WINDOW);
         self.reading = Reading {
+            pins: None,
             raw,
             average: self.sum / self.count as i32,
             ms: now,

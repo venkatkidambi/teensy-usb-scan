@@ -78,3 +78,9 @@ output activity; they do not prove motor movement. Pressure adds `state` (0 wait
 for DOUT, 1 settling, 2 receiving, 3 conversion timeout, 4 DOUT stayed low after
 read) and a wrapping `errors` transfer-error counter. These fields are optional
 for backward compatibility. Read snapshot records these diagnostics in the UI log.
+
+Firmware 0.1.2 adds optional `pressure.pins`: boolean `dout_high`, `sck_high`,
+and `sck_requested_high`. These are sampled between transfers. SCK is commanded
+low there. A high physical SCK with a low requested level indicates the pin is
+not following its output latch. DOUT high with no samples means conversion-ready
+has not been observed; it is not a measured pressure of zero.

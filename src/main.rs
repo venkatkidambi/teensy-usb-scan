@@ -79,7 +79,7 @@ fn main() -> ! {
         let now = usb_host::millis();
         pressure.poll(now, &mut hx711);
         pot.poll(now);
-        console.poll(now, pot.value, pressure.reading);
+        console.poll(now, pot.value, hx711.with_pin_levels(pressure.reading));
         usb_host::poll();
         if pit.is_elapsed(channel) {
             pit.clear_elapsed(channel);

@@ -306,3 +306,11 @@ motor or pressure still fails. It includes commanded motor state, physical
 standby/direction readbacks, PWM timer registers, encoder input, and HX711 state.
 Automatic heartbeat successes no longer fill this log. A motor `Drive enabled`
 status reports commanded drive, not verified physical movement.
+
+Firmware 0.1.2 includes HX711 DT/SCK pad levels in the pressure panel and Hardware
+log. At idle SCK should be LOW. `state: 0, samples: 0, errors: 0` means DOUT-ready
+has never been seen, not zero measured pressure. Check the readings at the actual
+HX711 terminals as well as these Teensy pin readbacks: the software cannot verify
+that a wire reaches the module. Verify DT=A1/p15, SCK=A0/p14, supply, and common
+ground. If the original Arduino sketch still reads correctly on unchanged
+hardware, report that along with the snapshot to isolate the firmware difference.

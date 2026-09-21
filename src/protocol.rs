@@ -118,9 +118,17 @@ impl Telemetry {
         if let Some(p) = self.pressure {
             write!(
                 out,
-                ",\"pressure\":{{\"raw\":{},\"average\":{},\"ms\":{},\"samples\":{},\"valid\":{},\"saturated\":{},\"state\":{},\"errors\":{}}}",
+                ",\"pressure\":{{\"raw\":{},\"average\":{},\"ms\":{},\"samples\":{},\"valid\":{},\"saturated\":{},\"state\":{},\"errors\":{}",
                 p.raw, p.average, p.ms, p.samples, p.valid, p.saturated, p.state, p.errors
             )?;
+            if let Some(pins) = p.pins {
+                write!(
+                    out,
+                    ",\"pins\":{{\"dout_high\":{},\"sck_high\":{},\"sck_requested_high\":{}}}",
+                    pins.dout_high, pins.sck_high, pins.sck_requested_high
+                )?;
+            }
+            out.write_str("}")?;
         }
         out.write_str("}\n")
     }
@@ -295,6 +303,7 @@ mod tests {
         motor.position = i32::MIN;
         t.plunger = Some((motor, Some(4095)));
         t.pressure = Some(crate::pressure::Reading {
+            pins: Some(crate::pressure::PinLevels::default()),
             raw: -8388607,
             average: 8388608,
             ms: u32::MAX,

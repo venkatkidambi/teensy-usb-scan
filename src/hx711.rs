@@ -31,6 +31,17 @@ impl Hx711 {
             clock,
         }
     }
+    pub fn with_pin_levels(
+        &self,
+        mut reading: crate::pressure::Reading,
+    ) -> crate::pressure::Reading {
+        reading.pins = Some(crate::pressure::PinLevels {
+            dout_high: self.data.is_set(),
+            sck_high: self.clock.is_pad_high(),
+            sck_requested_high: self.clock.is_set(),
+        });
+        reading
+    }
     fn pulse(&self) -> bool {
         // Only the high pulse masks interrupts. An ISR stretching SCK high
         // beyond 60 us would power down the HX711 and lose channel selection.

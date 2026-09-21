@@ -118,7 +118,7 @@ function render(){
   text('pressure-samples',number.format(pressure?.samples??0));
   text('pressure-state',demo?'Simulated':!connected?'Offline':!hello?.pressure?'Unavailable':!pressureValid?pressureState(pressure):!pressureFresh?'Stale':pressure.saturated?'Saturated':'Receiving');
   text('pressure-age',pressureValid?`${pressureFresh?'Updated':'Stale'} · ${(pressureAge/1000).toFixed(1)}s ago`:'NO DATA');
-  text('pressure-detail',!active?'Raw readings appear when the HX711 responds.':!pressure?'Waiting for pressure telemetry.':`${pressureState(pressure)} · transfer errors ${pressure.errors??0}`);
+  text('pressure-detail',!active?'Raw readings appear when the HX711 responds.':!pressure?'Waiting for pressure telemetry.':`${pressureState(pressure)} · transfer errors ${pressure.errors??0}${pressure.pins?` · DT ${pressure.pins.dout_high?'HIGH':'LOW'} · SCK ${pressure.pins.sck_high?'HIGH (should be LOW)':'LOW'}`:''}`);
   const plunger=snapshot?.plunger;
   text('plunger-position',plunger?positionNumber.format(plunger.counts*1000/plunger.counts_per_mm):'—');
   text('plunger-state',!connected?'Waiting for connection':!hello?.motion?'Firmware does not support plunger control':!plunger?'Waiting for feedback':performance.now()-received>=3000?'Stale feedback':plunger.running?`Drive ${plunger.up?'up':'down'} enabled · PWM ${plunger.speed}`:'Stopped');

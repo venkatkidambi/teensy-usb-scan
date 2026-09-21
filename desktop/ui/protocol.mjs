@@ -25,6 +25,7 @@ export function parseMessage(line) {
       if(!object(p)||!counts(p.raw)||!counts(p.average)||!u32(p.ms)||!u32(p.samples)||typeof p.valid!=='boolean'||typeof p.saturated!=='boolean') throw Error('Invalid pressure telemetry');
       if(p.state!==undefined&&(!u32(p.state)||p.state>4)) throw Error('Invalid pressure state');
       if(p.errors!==undefined&&!u32(p.errors)) throw Error('Invalid pressure error count');
+      if(p.pins!==undefined&&(!object(p.pins)||!['dout_high','sck_high','sck_requested_high'].every(k=>typeof p.pins[k]==='boolean'))) throw Error('Invalid HX711 pin levels');
     }
     if(m.plunger_io!==undefined) {
       const io=m.plunger_io;
