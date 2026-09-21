@@ -70,3 +70,11 @@ fields may retain the last sample and must not be displayed as current data.
 `saturated` flags either signed 24-bit ADC rail. HX711 uses A1/p15 DOUT, A0/p14
 SCK, channel B/gain 32. Acquisition continues while streaming is paused.
 No I²C scan, temperature, or WHO_AM_I operation applies to this device.
+
+Firmware 0.1.1 adds `plunger_io`: physical pad readbacks `standby`, `ain1`, `ain2`,
+2-bit `encoder`, signed 16-bit `pwm_count`/`pwm_compare`, and boolean
+`pwm_running`/`pwm_enabled`. These distinguish an accepted command from hardware
+output activity; they do not prove motor movement. Pressure adds `state` (0 waiting
+for DOUT, 1 settling, 2 receiving, 3 conversion timeout, 4 DOUT stayed low after
+read) and a wrapping `errors` transfer-error counter. These fields are optional
+for backward compatibility. Read snapshot records these diagnostics in the UI log.

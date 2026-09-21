@@ -23,6 +23,7 @@ pub struct Telemetry {
     pub records: u32,
     pub malformed: u32,
     pub samples: [Sample; TAGS.len()],
+    pub plunger_io: Option<crate::plunger::Io>,
     pub pressure: Option<crate::pressure::Reading>,
     pub plunger: Option<(crate::plunger::Motion, Option<u16>)>,
 }
@@ -30,6 +31,7 @@ pub struct Telemetry {
 impl Telemetry {
     pub const fn new() -> Self {
         Self {
+            plunger_io: None,
             pressure: None,
             plunger: None,
             epoch: 0,
@@ -99,11 +101,25 @@ impl Telemetry {
             }
             out.write_str("}")?;
         }
+        if let Some(io) = self.plunger_io {
+            write!(
+                out,
+                ",\"plunger_io\":{{\"standby\":{},\"ain1\":{},\"ain2\":{},\"encoder\":{},\"pwm_count\":{},\"pwm_compare\":{},\"pwm_running\":{},\"pwm_enabled\":{}}}",
+                io.standby,
+                io.ain1,
+                io.ain2,
+                io.encoder,
+                io.pwm_count,
+                io.pwm_compare,
+                io.pwm_running,
+                io.pwm_enabled
+            )?;
+        }
         if let Some(p) = self.pressure {
             write!(
                 out,
-                ",\"pressure\":{{\"raw\":{},\"average\":{},\"ms\":{},\"samples\":{},\"valid\":{},\"saturated\":{}}}",
-                p.raw, p.average, p.ms, p.samples, p.valid, p.saturated
+                ",\"pressure\":{{\"raw\":{},\"average\":{},\"ms\":{},\"samples\":{},\"valid\":{},\"saturated\":{},\"state\":{},\"errors\":{}}}",
+                p.raw, p.average, p.ms, p.samples, p.valid, p.saturated, p.state, p.errors
             )?;
         }
         out.write_str("}\n")
@@ -285,7 +301,10 @@ mod tests {
             samples: u32::MAX,
             valid: true,
             saturated: true,
+            state: 2,
+            errors: u32::MAX,
         });
+        t.plunger_io = Some(crate::plunger::Io::default());
         let mut f = Frame::new();
         t.snapshot(&mut f, u32::MAX, u32::MAX, u32::MAX).unwrap();
         let original = f.pending().to_vec();

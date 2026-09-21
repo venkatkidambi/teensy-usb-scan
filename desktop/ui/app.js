@@ -1,4 +1,4 @@
-import {NativeSession,statusFlags,elapsed} from './protocol.mjs';
+import {NativeSession,statusFlags,elapsed,pressureState} from './protocol.mjs';
 const $=id=>document.getElementById(id), text=(id,value)=>{$(id).textContent=value;};
 const invoke=window.__TAURI__?.core.invoke;
 const number=new Intl.NumberFormat(undefined,{maximumFractionDigits:0});
@@ -57,14 +57,15 @@ function accept(m){
   }
   render();
 }
-async function request(command){
+async function request(command,quiet=false){
   if(!session)return;const start=performance.now(),promise=session.request(command);controls();
   try{
     const reply=await promise;
     if(command==='PING')text('rtt',`${Math.round(performance.now()-start)} ms`);
     if(reply.type==='ack')streaming=reply.stream;
-    activity(`${command} → ${reply.type} #${reply.id}`);
-    if(connected)notice(streaming?'Connected locally. Receiving telemetry.':'Display stream paused. Hardware monitoring continues.');
+    if(!quiet)activity(`${command} → ${reply.type} #${reply.id}`);
+    if(command==='SNAPSHOT')activity(`Hardware ${JSON.stringify({plunger:reply.plunger,plunger_io:reply.plunger_io,pressure:reply.pressure})}`);
+    if(connected&&!quiet)notice(streaming?'Connected locally. Receiving telemetry.':'Display stream paused. Hardware monitoring continues.');
     return reply;
   }catch(e){notice(String(e.message??e),true);activity(String(e.message??e));throw e;}finally{controls();}
 }
@@ -115,11 +116,12 @@ function render(){
   text('pressure-raw',pressureValid?number.format(pressure.raw):'—');
   text('pressure-average',pressureValid?number.format(pressure.average):'—');
   text('pressure-samples',number.format(pressure?.samples??0));
-  text('pressure-state',demo?'Simulated':!connected?'Offline':!hello?.pressure?'Unavailable':!pressureValid?'Waiting':!pressureFresh?'Stale':pressure.saturated?'Saturated':'Receiving');
+  text('pressure-state',demo?'Simulated':!connected?'Offline':!hello?.pressure?'Unavailable':!pressureValid?pressureState(pressure):!pressureFresh?'Stale':pressure.saturated?'Saturated':'Receiving');
   text('pressure-age',pressureValid?`${pressureFresh?'Updated':'Stale'} · ${(pressureAge/1000).toFixed(1)}s ago`:'NO DATA');
+  text('pressure-detail',!active?'Raw readings appear when the HX711 responds.':!pressure?'Waiting for pressure telemetry.':`${pressureState(pressure)} · transfer errors ${pressure.errors??0}`);
   const plunger=snapshot?.plunger;
   text('plunger-position',plunger?positionNumber.format(plunger.counts*1000/plunger.counts_per_mm):'—');
-  text('plunger-state',!connected?'Waiting for connection':!hello?.motion?'Firmware does not support plunger control':!plunger?'Waiting for feedback':performance.now()-received>=3000?'Stale feedback':plunger.running?`Moving ${plunger.up?'up':'down'} · PWM ${plunger.speed}`:'Stopped');
+  text('plunger-state',!connected?'Waiting for connection':!hello?.motion?'Firmware does not support plunger control':!plunger?'Waiting for feedback':performance.now()-received>=3000?'Stale feedback':plunger.running?`Drive ${plunger.up?'up':'down'} enabled · PWM ${plunger.speed}`:'Stopped');
   text('plunger-pot',plunger?.pot!=null?`Potentiometer ${plunger.pot} / 4095 (${(100*plunger.pot/4095).toFixed(1)}%)`:'Potentiometer —');
   controls();
   text('board-state',demo?'Demo':connected?stalled?'Stalled':'Online':'Offline');
@@ -162,5 +164,5 @@ $('demo').addEventListener('click',()=>{
   accept(make(60000));text('session-label','SIMULATED SESSION');notice('Demo mode — all readings are simulated. No serial port is open.');controls();
   demoTimer=setInterval(()=>accept(make(Math.floor(performance.now()-start)+60000)),100);
 });
-setInterval(()=>{if(connected&&session&&!session.pending&&performance.now()-lastPing>2000){lastPing=performance.now();void request('PING').catch(()=>{});}render();if(history.length||pressureHistory.length)draw();},500);
+setInterval(()=>{if(connected&&session&&!session.pending&&performance.now()-lastPing>2000){lastPing=performance.now();void request('PING',true).catch(()=>{});}render();if(history.length||pressureHistory.length)draw();},500);
 render();controls();void refresh();

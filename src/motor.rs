@@ -58,19 +58,27 @@ pub fn init(
     gpio4: &mut hal::gpio::Port,
     mut pwm: flexpwm::Pwm,
 ) {
-    let output = hal::iomuxc::Config::zero().set_drive_strength(hal::iomuxc::DriveStrength::R0);
+    let output = hal::iomuxc::Config::zero().set_drive_strength(hal::iomuxc::DriveStrength::R0_7);
     hal::iomuxc::configure(&mut pins.pwm, output);
     hal::iomuxc::configure(&mut pins.ain1, output);
     hal::iomuxc::configure(&mut pins.ain2, output);
     hal::iomuxc::configure(&mut pins.standby, output);
+    // Teensy Arduino pinMode enables the input path (SION), including outputs.
+    // Keep pad readback enabled for diagnostics and force encoder input routing.
+    hal::iomuxc::set_sion(&mut pins.ain1);
+    hal::iomuxc::set_sion(&mut pins.ain2);
+    hal::iomuxc::set_sion(&mut pins.standby);
+    hal::iomuxc::set_sion(&mut pins.c1);
+    hal::iomuxc::set_sion(&mut pins.c2);
     let standby = gpio4.output(pins.standby).unwrap();
     standby.clear();
     let ain1 = gpio4.output(pins.ain1).unwrap();
     ain1.clear();
     let ain2 = gpio4.output(pins.ain2).unwrap();
     ain2.clear();
-    let pullup =
-        hal::iomuxc::Config::zero().set_pull_keeper(Some(hal::iomuxc::PullKeeper::Pullup100k));
+    let pullup = hal::iomuxc::Config::zero()
+        .set_pull_keeper(Some(hal::iomuxc::PullKeeper::Pullup22k))
+        .set_hysteresis(hal::iomuxc::Hysteresis::Enabled);
     hal::iomuxc::configure(&mut pins.c1, pullup);
     hal::iomuxc::configure(&mut pins.c2, pullup);
     let c1 = gpio2.input(pins.c1).unwrap();
@@ -84,6 +92,9 @@ pub fn init(
     c1.clear_triggered();
     c2.clear_triggered();
     hal::iomuxc::flexpwm::prepare(&mut pins.pwm);
+    pwm.set_run(flexpwm::Mask::empty());
+    pwm.clear_load_ok(SM.mask());
+    pwm.set_output_masks(flexpwm::OutputMasks::empty());
     pwm.set_clock_select(SM, flexpwm::ClockSelect::Ipg);
     pwm.set_prescaler(SM, flexpwm::Prescaler::Prescaler1);
     pwm.set_pair_operation(SM, flexpwm::PairOperation::Independent);
@@ -175,6 +186,24 @@ pub fn snapshot() -> Motion {
             .as_ref()
             .map(|m| m.motion)
             .unwrap_or_default()
+    })
+}
+pub fn io_snapshot() -> crate::plunger::Io {
+    interrupt::free(|cs| {
+        let slot = MOTOR.borrow(cs).borrow();
+        let Some(m) = slot.as_ref() else {
+            return crate::plunger::Io::default();
+        };
+        crate::plunger::Io {
+            standby: m.standby.is_pad_high(),
+            ain1: m.ain1.is_pad_high(),
+            ain2: m.ain2.is_pad_high(),
+            encoder: m.state(),
+            pwm_count: m.pwm.sm_count(SM),
+            pwm_compare: m.pwm.turn_off(SM, Channel::A),
+            pwm_running: m.pwm.run().contains(SM.mask()),
+            pwm_enabled: m.pwm.output_enable(Channel::A).contains(SM.mask()),
+        }
     })
 }
 // Called from SysTick: motor stops even if foreground USB or a peripheral stalls.

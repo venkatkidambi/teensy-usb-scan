@@ -18,6 +18,19 @@ pub fn encoder_delta(previous: u8, current: u8) -> i32 {
     }
 }
 
+/// Actual pad levels and PWM register readback, separate from commanded state.
+#[derive(Clone, Copy, Default)]
+pub struct Io {
+    pub standby: bool,
+    pub ain1: bool,
+    pub ain2: bool,
+    pub encoder: u8,
+    pub pwm_count: i16,
+    pub pwm_compare: i16,
+    pub pwm_running: bool,
+    pub pwm_enabled: bool,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct Motion {
     pub position: i32,

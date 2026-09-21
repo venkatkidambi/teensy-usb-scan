@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {NativeSession,parseMessage,statusFlags,elapsed} from '../ui/protocol.mjs';
+import {NativeSession,parseMessage,statusFlags,elapsed,pressureState} from '../ui/protocol.mjs';
 
 test('telemetry schema and status mapping',()=>{
   const m={type:'snapshot',id:0,ms:100,epoch:1,vid:1240,pid:61258,mounted:true,cdc:2,records:3,malformed:0,skipped:0,values:{STAT:{value:1344,ms:99}}};
@@ -74,4 +74,15 @@ test('HX711 pressure schema preserves inverted signed range and freshness',()=>{
     assert.throws(()=>parseMessage(JSON.stringify(bad)),/pressure/);
   }
   delete m.pressure;assert.doesNotThrow(()=>parseMessage(JSON.stringify(m)));
+});
+
+test('hardware diagnostics distinguish missing data, settling and transfer failure',()=>{
+  assert.equal(pressureState({state:0,valid:false}),'Waiting for HX711 data');
+  assert.equal(pressureState({state:1,valid:false}),'Settling channel B');
+  assert.equal(pressureState({state:3,valid:false}),'No conversions for 1s');
+  assert.equal(pressureState({state:4,valid:false}),'DOUT stayed low after read');
+  assert.equal(pressureState({valid:true}),'Receiving');
+  const m={type:'snapshot',id:0,ms:100,epoch:1,vid:0,pid:0,mounted:false,cdc:0,records:0,malformed:0,skipped:0,values:{},plunger_io:{standby:true,ain1:true,ain2:false,encoder:3,pwm_count:123,pwm_compare:16447,pwm_running:true,pwm_enabled:true}};
+  assert.deepEqual(parseMessage(JSON.stringify(m)).plunger_io,m.plunger_io);
+  m.plunger_io.standby=1;assert.throws(()=>parseMessage(JSON.stringify(m)),/plunger IO/);
 });

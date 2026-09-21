@@ -40,9 +40,11 @@ fn pressure_snapshot_preserves_values_and_validity() {
         samples: 16,
         valid: true,
         saturated: false,
+        state: 2,
+        errors: 0,
     });
     let mut frame = protocol::Frame::new();
     telemetry.snapshot(&mut frame, 7, 50, 0).unwrap();
     let json = core::str::from_utf8(frame.pending()).unwrap();
-    assert!(json.ends_with("\"pressure\":{\"raw\":-123,\"average\":-100,\"ms\":42,\"samples\":16,\"valid\":true,\"saturated\":false}}\n"));
+    assert!(json.ends_with("\"pressure\":{\"raw\":-123,\"average\":-100,\"ms\":42,\"samples\":16,\"valid\":true,\"saturated\":false,\"state\":2,\"errors\":0}}\n"));
 }

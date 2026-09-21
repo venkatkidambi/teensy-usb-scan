@@ -289,3 +289,20 @@ simulated and labeled; disconnect clears displayed measurements. Clock timing,
 input voltage compatibility, channel wiring, and actual readings must be verified
 on the board before relying on them. Protocol behavior follows the
 [AVIA HX711 datasheet](https://e2e.ti.com/cfs-file/__key/communityserver-discussions-components-files/73/HX711.pdf).
+
+### Troubleshooting wired hardware
+
+Firmware 0.1.1 explicitly selects GPIO1/2/4 for the HX711, encoder, and motor pads,
+enables their input paths for sampling/readback, and matches Arduino's output
+drive strength. It also clears PWM load/mask state before initial configuration.
+These address startup assumptions in the original port; actual operation must
+still be checked on the board. Existing wiring and calibration are unchanged.
+
+After `upload.cmd`, reconnect and verify **Firmware 0.1.1**. Pressure is displayed
+as raw counts without any calibration requirement. Its status now distinguishes
+waiting for DOUT, channel settling, conversion timeout, and transfer failure.
+Click **Read snapshot**, then copy the `Hardware {...}` activity-log entry if the
+motor or pressure still fails. It includes commanded motor state, physical
+standby/direction readbacks, PWM timer registers, encoder input, and HX711 state.
+Automatic heartbeat successes no longer fill this log. A motor `Drive enabled`
+status reports commanded drive, not verified physical movement.

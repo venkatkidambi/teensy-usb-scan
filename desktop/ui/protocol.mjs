@@ -5,6 +5,9 @@ export const elapsed = (now,before) => (now-before)>>>0;
 const u32 = n => Number.isInteger(n) && n>=0 && n<=0xffffffff;
 const object = v => v!==null && typeof v==='object' && !Array.isArray(v);
 const tags = new Set(['EPOS','DPOS','STAT','SRNO','SOFT','FREQ','TIME','SYNC']);
+export function pressureState(p) {
+  return ['Waiting for HX711 data','Settling channel B','Receiving','No conversions for 1s','DOUT stayed low after read'][p?.state]??(p?.valid?'Receiving':'Waiting for HX711 data');
+}
 export function parseMessage(line) {
   if(line.startsWith('#')) return {type:'log',message:line.slice(1).trim()};
   const m=JSON.parse(line);
@@ -20,6 +23,12 @@ export function parseMessage(line) {
       const p=m.pressure;
       const counts=n=>Number.isInteger(n)&&n>=-8388607&&n<=8388608;
       if(!object(p)||!counts(p.raw)||!counts(p.average)||!u32(p.ms)||!u32(p.samples)||typeof p.valid!=='boolean'||typeof p.saturated!=='boolean') throw Error('Invalid pressure telemetry');
+      if(p.state!==undefined&&(!u32(p.state)||p.state>4)) throw Error('Invalid pressure state');
+      if(p.errors!==undefined&&!u32(p.errors)) throw Error('Invalid pressure error count');
+    }
+    if(m.plunger_io!==undefined) {
+      const io=m.plunger_io;
+      if(!object(io)||!['standby','ain1','ain2','pwm_running','pwm_enabled'].every(k=>typeof io[k]==='boolean')||!u32(io.encoder)||io.encoder>3||!['pwm_count','pwm_compare'].every(k=>Number.isInteger(io[k])&&io[k]>=-32768&&io[k]<=32767)) throw Error('Invalid plunger IO');
     }
     if(m.plunger!==undefined) {
       const p=m.plunger;

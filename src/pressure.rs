@@ -33,6 +33,9 @@ pub struct Reading {
     pub samples: u32,
     pub valid: bool,
     pub saturated: bool,
+    // 0 waiting for DOUT, 1 settling, 2 receiving, 3 timeout, 4 invalid transfer.
+    pub state: u8,
+    pub errors: u32,
 }
 
 pub struct Pressure {
@@ -58,8 +61,9 @@ impl Pressure {
             last_rx: 0,
         }
     }
-    fn invalidate(&mut self) {
+    fn invalidate(&mut self, state: u8) {
         self.reading.valid = false;
+        self.reading.state = state;
         self.configured = false;
         self.values.fill(0);
         self.sum = 0;
@@ -68,19 +72,21 @@ impl Pressure {
     }
     pub fn poll(&mut self, now: u32, bus: &mut impl Bus) {
         if self.configured && now.wrapping_sub(self.last_rx) >= TIMEOUT_MS {
-            self.invalidate();
+            self.invalidate(3);
         }
         if !bus.ready() {
             return;
         }
         let Some(word) = bus.read() else {
-            self.invalidate();
+            self.reading.errors = self.reading.errors.wrapping_add(1);
+            self.invalidate(4);
             return;
         };
         self.last_rx = now;
         if !self.configured {
             // The first result may be channel A after power-up. Reading with
             // 26 clocks selects B/32 for the NEXT conversion, so discard this one.
+            self.reading.state = 1;
             self.configured = true;
             self.selected_at = now;
             return;
@@ -100,6 +106,8 @@ impl Pressure {
             ms: now,
             samples: self.reading.samples.wrapping_add(1),
             valid: true,
+            state: 2,
+            errors: self.reading.errors,
             saturated: matches!(word & 0xffffff, 0x800000 | 0x7fffff),
         };
     }
@@ -156,13 +164,16 @@ mod tests {
             reads: 0,
         };
         p.poll(0, &mut bus);
+        assert_eq!(p.reading.state, 0);
         assert_eq!(bus.reads, 0);
         bus.ready = true;
         p.poll(1, &mut bus);
+        assert_eq!(p.reading.state, 1);
         assert!(!p.reading.valid);
         p.poll(400, &mut bus);
         assert!(!p.reading.valid);
         p.poll(401, &mut bus);
+        assert_eq!(p.reading.state, 2);
         assert_eq!(p.reading.average, -100);
         bus.word = Some(200);
         p.poll(501, &mut bus);
@@ -173,6 +184,7 @@ mod tests {
         assert_eq!(p.reading.average, -200);
         bus.ready = false;
         p.poll(3101, &mut bus);
+        assert_eq!(p.reading.state, 3);
         assert!(!p.reading.valid);
         bus.ready = true;
         bus.word = Some(0xffffff);
@@ -182,6 +194,8 @@ mod tests {
         assert_eq!(p.reading.average, 1);
         bus.word = None;
         p.poll(3701, &mut bus);
+        assert_eq!(p.reading.state, 4);
+        assert_eq!(p.reading.errors, 1);
         assert!(!p.reading.valid);
     }
     #[test]

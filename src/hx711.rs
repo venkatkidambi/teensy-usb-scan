@@ -15,8 +15,10 @@ impl Hx711 {
         );
         hal::iomuxc::configure(
             &mut clock,
-            hal::iomuxc::Config::zero().set_drive_strength(hal::iomuxc::DriveStrength::R0),
+            hal::iomuxc::Config::zero().set_drive_strength(hal::iomuxc::DriveStrength::R0_7),
         );
+        hal::iomuxc::set_sion(&mut data);
+        hal::iomuxc::set_sion(&mut clock);
         let clock = port.output(clock).unwrap();
         clock.clear();
         // Reset serial framing after a Teensy reboot, even if the previous

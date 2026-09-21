@@ -103,6 +103,7 @@ impl Console {
     ) -> core::fmt::Result {
         let mut telemetry = crate::usb_host::telemetry();
         telemetry.pressure = Some(pressure);
+        telemetry.plunger_io = Some(crate::motor::io_snapshot());
         telemetry.plunger = Some((crate::motor::snapshot(), pot));
         telemetry.snapshot(&mut self.tx, id, now, self.skipped)
     }
