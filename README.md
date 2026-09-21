@@ -46,7 +46,7 @@ run on or link into the Teensy firmware.
 
 The dashboard includes positions, decoded status flags, a 60-second
 plot, sample ages, a bounded activity log, and Ping / Read snapshot / Pause stream.
-Pause only stops USB1 snapshots; actuator reception continues. The HX711 pressure input shows raw ADC counts, a 16-sample average,
+Pause only stops USB1 snapshots; actuator reception continues. The I²C pressure input shows raw ADC counts, a 16-sample average,
 and a 60-second plot. The wired plunger has Up/Down, Stop, and Zero controls; Xeryon USB remains read-only. **Preview demo**
 renders simulated readings without opening a serial port.
 
@@ -233,7 +233,7 @@ logging-only firmware cannot answer these requests.
 Only one directly attached device and one CDC ACM interface are supported, with
 a configuration descriptor up to 1024 bytes. Host control-transfer timeout support
 is incomplete; an unresponsive device may require unplugging or resetting the board.
-Plunger and HX711 support are implemented; their hardware timing, motion, and
+Plunger and I²C pressure support are implemented; their hardware timing, motion, and
 readings still need board validation. Pressure conversion to physical units
 requires transducer calibration.
 
@@ -260,68 +260,39 @@ Build and test before flashing; the new GPIO/PWM/encoder/ADC paths have not yet
 been validated on physical hardware. The app and firmware must both be updated
 to enable plunger controls. An older telemetry firmware remains viewable.
 
-## HX711 pressure input
+## I²C pressure input (firmware 0.1.4)
 
-Wiring/settings come from the supplied `HX711_meas_1.ino`: DOUT on **A1 / pin 15**,
-SCK on **A0 / pin 14**, **channel B, gain 32**, with the ADC reading negated.
-The earlier `Pressure.cpp` describes different I²C hardware and is not used.
-The HX711 has no temperature or WHO_AM_I registers and is not an I²C device.
+The working sensor is the one in NanoManipulator `Pressure.cpp`, not the separate
+HX711 sketch. Firmware 0.1.4 replaces the HX711 transport with LPI2C1 on the
+standard Teensy `Wire` pins: **SDA pin 18 / A4, SCL pin 19 / A5**, address **0x5C**,
+at **400 kHz**. Keep the wiring that works with NanoManipulator. Pins A0/A1 are
+no longer used for pressure. Motor wiring and control are unchanged.
 
-The main loop polls readiness without waiting for a conversion. Each available
-word is read using exactly 26 clock pulses. Only individual clock-high pulses
-mask interrupts, preventing an interrupt from stretching SCK into power-down;
-encoder and USB interrupts can run between pulses. Startup leaves SCK low, matching Arduino HX711 initialization. The initial
-result is discarded when selecting B/32, followed by a conservative 400 ms settling period. A fixed
-16-entry ring buffer computes the moving average in constant time, averaging only
-actual samples during startup. No heap, Arduino runtime, or 100 ms delay is added.
+The driver writes `0x72` to register `0x10`, reads WHO_AM_I at `0x0F`, reads
+three pressure bytes starting at `0xA8`, and two raw temperature bytes at `0xAB`.
+Register-pointer writes end with STOP before the read, matching the supplied
+Arduino sketch. Pressure is unsigned little-endian 24-bit data, with no HX711
+sign inversion. Temperature preserves the sketch's unsigned raw two-byte value.
+No sensor model or physical-unit conversion is inferred from the address alone.
 
-The RATE pin on the HX711 board determines **10 or 80 samples/sec**. The desktop
-receives the latest reading and average in the existing 10 Hz snapshots; it is not
-a lossless recorder. One second without a conversion invalidates the reading,
-clears the averaging window, and triggers channel selection/settling on recovery.
-A stuck-low DOUT after a transfer is rejected. Saturated readings are flagged.
-The pressure plot includes the sketch's 0 and 200,000 ADC-count reference range
-and expands for values outside it. USB1 stream pause does not pause acquisition.
+Sampling starts every 50 ms. The average divides a zero-initialized 16-entry
+window by 16, matching NanoManipulator (including its initial ramp). Successful
+samples carry timestamps and a sample count. I²C errors invalidate the displayed
+reading and clear the averaging window; initialization is retried after one
+second. WHO_AM_I is reported diagnostically rather than checked against an
+assumed sensor model.
 
-Values are explicitly **ADC counts**, not Pa/bar: the sketch provides no pressure
-scale or offset. The sign matches its `Serial.print(-reading)`. Demo pressure is
-simulated and labeled; disconnect clears displayed measurements. Clock timing,
-input voltage compatibility, channel wiring, and actual readings must be verified
-on the board before relying on them. Protocol behavior follows the
-[AVIA HX711 datasheet](https://e2e.ti.com/cfs-file/__key/communityserver-discussions-components-files/73/HX711.pdf).
+Transactions use the hardware FIFOs and are polled without waiting. Each has a
+20 ms deadline; a failed transaction resets the controller. A physically stuck
+bus is reported as an error and may still require hardware intervention. Motor
+interrupts, USB servicing, and disconnect handling continue during acquisition.
 
-### Troubleshooting wired hardware
+Update both firmware and desktop app. Flash with `./upload.sh` on macOS or
+`upload.cmd` on Windows, then reconnect and verify **Firmware 0.1.4**. The pressure
+panel should identify **I²C · address 0x5C** and report WHO_AM_I, raw temperature,
+and increasing pressure samples. Use **Read snapshot** to capture the `Hardware`
+log if it fails. Older firmware still reports HX711 diagnostics in the new app.
 
-Firmware 0.1.1 explicitly selects GPIO1/2/4 for the HX711, encoder, and motor pads,
-enables their input paths for sampling/readback, and matches Arduino's output
-drive strength. It also clears PWM load/mask state before initial configuration.
-These address startup assumptions in the original port; actual operation must
-still be checked on the board. Existing wiring and calibration are unchanged.
-
-After `upload.cmd`, reconnect and verify **Firmware 0.1.1**. Pressure is displayed
-as raw counts without any calibration requirement. Its status now distinguishes
-waiting for DOUT, channel settling, conversion timeout, and transfer failure.
-Click **Read snapshot**, then copy the `Hardware {...}` activity-log entry if the
-motor or pressure still fails. It includes commanded motor state, physical
-standby/direction readbacks, PWM timer registers, encoder input, and HX711 state.
-Automatic heartbeat successes no longer fill this log. A motor `Drive enabled`
-status reports commanded drive, not verified physical movement.
-
-Firmware 0.1.2 includes HX711 DT/SCK pad levels in the pressure panel and Hardware
-log. At idle SCK should be LOW. `state: 0, samples: 0, errors: 0` means DOUT-ready
-has never been seen, not zero measured pressure. Check the readings at the actual
-HX711 terminals as well as these Teensy pin readbacks: the software cannot verify
-that a wire reaches the module. Verify DT=A1/p15, SCK=A0/p14, supply, and common
-ground. If the original Arduino sketch still reads correctly on unchanged
-hardware, report that along with the snapshot to isolate the firmware difference.
-
-Firmware 0.1.3 changes only the HX711 GPIO startup path: A0/A1 now use the same
-fast GPIO6 bank as Teensy Arduino, with a 22 kΩ input pull-up, hysteresis, and
-matching pad configuration. SCK is preloaded low before output routing; the
-forced power-down/reset pulse from the original port is removed. Motor GPIO
-routing is unchanged. Readiness remains nonblocking, and B/32 gain, polarity,
-averaging, and diagnostics are unchanged. This is an Arduino-compatibility fix
-for hardware that works with the original sketch but never becomes ready under
-0.1.2; successful operation still needs a board retest. The comparison used
-[upstream HX711](https://github.com/bogde/HX711/blob/master/src/HX711.cpp) and
-[PJRC GPIO setup](https://github.com/PaulStoffregen/cores/blob/master/teensy4/digital.c).
+Host tests and an embedded release build validate software behavior; the new I²C
+path still needs a physical-board retest. The original problem was a sensor
+interface mismatch, so the prior HX711 GPIO changes did not address this sensor.

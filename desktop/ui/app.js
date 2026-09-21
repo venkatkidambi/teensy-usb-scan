@@ -118,7 +118,8 @@ function render(){
   text('pressure-samples',number.format(pressure?.samples??0));
   text('pressure-state',demo?'Simulated':!connected?'Offline':!hello?.pressure?'Unavailable':!pressureValid?pressureState(pressure):!pressureFresh?'Stale':pressure.saturated?'Saturated':'Receiving');
   text('pressure-age',pressureValid?`${pressureFresh?'Updated':'Stale'} · ${(pressureAge/1000).toFixed(1)}s ago`:'NO DATA');
-  text('pressure-detail',!active?'Raw readings appear when the HX711 responds.':!pressure?'Waiting for pressure telemetry.':`${pressureState(pressure)} · transfer errors ${pressure.errors??0}${pressure.pins?` · DT ${pressure.pins.dout_high?'HIGH':'LOW'} · SCK ${pressure.pins.sck_high?'HIGH (should be LOW)':'LOW'}`:''}`);
+  text('pressure-sensor',pressure?.sensor==='i2c'||!pressure?'I²C · address 0x5C':'HX711 · legacy firmware');
+  text('pressure-detail',!active?'Raw readings appear when the I²C sensor responds.':!pressure?'Waiting for pressure telemetry.':`${pressureState(pressure)} · transfer errors ${pressure.errors??0}${pressure.sensor==='i2c'?` · WHO_AM_I ${pressure.who===null?'unavailable':`0x${pressure.who.toString(16).padStart(2,'0')}`} · temperature (raw) ${pressureValid?pressure.temperature:'—'}`:''}${pressure.pins?` · DT ${pressure.pins.dout_high?'HIGH':'LOW'} · SCK ${pressure.pins.sck_high?'HIGH (should be LOW)':'LOW'}`:''}`);
   const plunger=snapshot?.plunger;
   text('plunger-position',plunger?positionNumber.format(plunger.counts*1000/plunger.counts_per_mm):'—');
   text('plunger-state',!connected?'Waiting for connection':!hello?.motion?'Firmware does not support plunger control':!plunger?'Waiting for feedback':performance.now()-received>=3000?'Stale feedback':plunger.running?`Drive ${plunger.up?'up':'down'} enabled · PWM ${plunger.speed}`:'Stopped');
@@ -153,13 +154,13 @@ function drawSeries(canvasId,points,series,format,range){
 function draw(){
   const now=performance.now();
   drawSeries('plot',history.filter(p=>now-p.time<=60000),[['d','#b3bda5',[5,4]],['e','#4a8962',[]]],position);
-  drawSeries('pressure-plot',pressureHistory.filter(p=>now-p.time<=60000),[['raw','#b3bda5',[5,4]],['average','#4a8962',[]]],number.format,[0,200000]);
+  drawSeries('pressure-plot',pressureHistory.filter(p=>now-p.time<=60000),[['raw','#b3bda5',[5,4]],['average','#4a8962',[]]],number.format);
 }
 const plotResize=new ResizeObserver(draw);
 for(const id of ['plot','pressure-plot'])plotResize.observe($(id).parentElement);
 $('demo').addEventListener('click',()=>{
   if(session||busy)return;reset();demo=true;const start=performance.now();hello={firmware:'preview',protocol:1,pressure:true,motion:false};epoch=1;
-  const make=ms=>({type:'snapshot',id:0,ms,epoch:1,vid:0x04d8,pid:0xef4a,mounted:true,cdc:2,records:Math.floor(ms/10),malformed:0,skipped:0,pressure:{raw:Math.round(100000+15000*Math.sin(ms/1800)),average:Math.round(100000+12000*Math.sin(ms/1800-.4)),ms,samples:Math.floor(ms/100),valid:true,saturated:false},values:Object.fromEntries(Object.entries({EPOS:Math.round(1200+180*Math.sin(ms/6000)),DPOS:1200,STAT:352,SRNO:12345,SOFT:20103}).map(([tag,value])=>[tag,{value,ms}]))});
+  const make=ms=>({type:'snapshot',id:0,ms,epoch:1,vid:0x04d8,pid:0xef4a,mounted:true,cdc:2,records:Math.floor(ms/10),malformed:0,skipped:0,pressure:{sensor:'i2c',address:92,who:177,temperature:2500,state:2,errors:0,raw:Math.round(100000+15000*Math.sin(ms/1800)),average:Math.round(100000+12000*Math.sin(ms/1800-.4)),ms,samples:Math.floor(ms/100),valid:true,saturated:false},values:Object.fromEntries(Object.entries({EPOS:Math.round(1200+180*Math.sin(ms/6000)),DPOS:1200,STAT:352,SRNO:12345,SOFT:20103}).map(([tag,value])=>[tag,{value,ms}]))});
   for(let i=0;i<600;i++)history.push({time:start-60000+i*100,e:make(i*100).values.EPOS.value,d:1200});
   accept(make(60000));text('session-label','SIMULATED SESSION');notice('Demo mode — all readings are simulated. No serial port is open.');controls();
   demoTimer=setInterval(()=>accept(make(Math.floor(performance.now()-start)+60000)),100);

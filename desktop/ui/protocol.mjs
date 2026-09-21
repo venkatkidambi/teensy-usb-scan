@@ -6,6 +6,7 @@ const u32 = n => Number.isInteger(n) && n>=0 && n<=0xffffffff;
 const object = v => v!==null && typeof v==='object' && !Array.isArray(v);
 const tags = new Set(['EPOS','DPOS','STAT','SRNO','SOFT','FREQ','TIME','SYNC']);
 export function pressureState(p) {
+  if(p?.sensor==='i2c') return ['Initializing I²C sensor','Waiting for first sample','Receiving','I²C transfer timed out','I²C bus error / no acknowledgement'][p.state]??(p.valid?'Receiving':'Initializing I²C sensor');
   return ['Waiting for HX711 data','Settling channel B','Receiving','No conversions for 1s','DOUT stayed low after read'][p?.state]??(p?.valid?'Receiving':'Waiting for HX711 data');
 }
 export function parseMessage(line) {
@@ -21,8 +22,10 @@ export function parseMessage(line) {
     }
     if(m.pressure!==undefined) {
       const p=m.pressure;
-      const counts=n=>Number.isInteger(n)&&n>=-8388607&&n<=8388608;
+      const counts=n=>Number.isInteger(n)&&(p?.sensor==='i2c'?n>=0&&n<=0xffffff:n>=-8388607&&n<=8388608);
       if(!object(p)||!counts(p.raw)||!counts(p.average)||!u32(p.ms)||!u32(p.samples)||typeof p.valid!=='boolean'||typeof p.saturated!=='boolean') throw Error('Invalid pressure telemetry');
+      if(p.sensor!==undefined&&p.sensor!=='i2c') throw Error('Invalid pressure sensor');
+      if(p.sensor==='i2c'&&(p.address!==92||(p.who!==null&&(!u32(p.who)||p.who>255))||!u32(p.temperature)||p.temperature>65535)) throw Error('Invalid pressure I²C diagnostics');
       if(p.state!==undefined&&(!u32(p.state)||p.state>4)) throw Error('Invalid pressure state');
       if(p.errors!==undefined&&!u32(p.errors)) throw Error('Invalid pressure error count');
       if(p.pins!==undefined&&(!object(p.pins)||!['dout_high','sck_high','sck_requested_high'].every(k=>typeof p.pins[k]==='boolean'))) throw Error('Invalid HX711 pin levels');

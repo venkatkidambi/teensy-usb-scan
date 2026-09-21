@@ -31,40 +31,22 @@ mod plunger;
 mod pressure;
 
 #[test]
-fn pressure_snapshot_preserves_values_and_validity() {
+fn pressure_snapshot_preserves_i2c_values_and_identity() {
     let mut telemetry = protocol::Telemetry::new();
     telemetry.pressure = Some(pressure::Reading {
-        pins: None,
-        raw: -123,
-        average: -100,
+        raw: 0xffffff,
+        average: 0xffffff,
         ms: 42,
         samples: 16,
         valid: true,
-        saturated: false,
         state: 2,
-        errors: 0,
+        who: Some(0xb1),
+        temperature: 65535,
+        ..Default::default()
     });
     let mut frame = protocol::Frame::new();
     telemetry.snapshot(&mut frame, 7, 50, 0).unwrap();
     let json = core::str::from_utf8(frame.pending()).unwrap();
-    assert!(json.ends_with("\"pressure\":{\"raw\":-123,\"average\":-100,\"ms\":42,\"samples\":16,\"valid\":true,\"saturated\":false,\"state\":2,\"errors\":0}}\n"));
-}
-
-#[test]
-fn hx711_snapshot_reports_idle_gpio_levels() {
-    let mut telemetry = protocol::Telemetry::new();
-    telemetry.pressure = Some(pressure::Reading {
-        pins: Some(pressure::PinLevels {
-            dout_high: true,
-            sck_high: false,
-            sck_requested_high: false,
-        }),
-        ..Default::default()
-    });
-    let mut frame = protocol::Frame::new();
-    telemetry.snapshot(&mut frame, 1, 0, 0).unwrap();
-    let json = core::str::from_utf8(frame.pending()).unwrap();
-    assert!(json.ends_with(
-        "\"pins\":{\"dout_high\":true,\"sck_high\":false,\"sck_requested_high\":false}}}\n"
-    ));
+    assert!(json.contains("\"raw\":16777215,\"average\":16777215"));
+    assert!(json.contains("\"sensor\":\"i2c\",\"address\":92,\"temperature\":65535,\"who\":177"));
 }

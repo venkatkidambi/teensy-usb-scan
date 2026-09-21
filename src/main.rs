@@ -3,11 +3,11 @@
 
 use teensy4_bsp::{self as bsp, board, hal::pit::Channel};
 mod console;
-mod hx711;
 mod line;
 mod motor;
 mod plunger;
 mod pressure;
+mod pressure_i2c;
 mod protocol;
 mod usb_host;
 mod xeryon;
@@ -20,6 +20,7 @@ fn main() -> ! {
         mut gpio4,
         flexpwm4,
         adc1,
+        lpi2c1,
         mut pit,
         usb,
         mut ccm,
@@ -54,7 +55,7 @@ fn main() -> ! {
         &mut gpio4,
         flexpwm4,
     );
-    let mut hx711 = hx711::Hx711::new(&mut iomuxc_gpr, pins.p15, pins.p14);
+    let mut pressure_bus = pressure_i2c::PressureI2c::new(lpi2c1, pins.p18, pins.p19);
     let mut pressure = pressure::Pressure::new();
     let mut pot = motor::Pot::new(adc1, pins.p20);
     let led = board::led(&mut gpio2, pins.p13);
@@ -73,9 +74,9 @@ fn main() -> ! {
     pit.enable(channel);
     loop {
         let now = usb_host::millis();
-        pressure.poll(now, &mut hx711);
+        pressure.poll(now, &mut pressure_bus);
         pot.poll(now);
-        console.poll(now, pot.value, hx711.with_pin_levels(pressure.reading));
+        console.poll(now, pot.value, pressure.reading);
         usb_host::poll();
         if pit.is_elapsed(channel) {
             pit.clear_elapsed(channel);

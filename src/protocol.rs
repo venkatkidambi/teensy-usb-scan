@@ -121,12 +121,15 @@ impl Telemetry {
                 ",\"pressure\":{{\"raw\":{},\"average\":{},\"ms\":{},\"samples\":{},\"valid\":{},\"saturated\":{},\"state\":{},\"errors\":{}",
                 p.raw, p.average, p.ms, p.samples, p.valid, p.saturated, p.state, p.errors
             )?;
-            if let Some(pins) = p.pins {
-                write!(
-                    out,
-                    ",\"pins\":{{\"dout_high\":{},\"sck_high\":{},\"sck_requested_high\":{}}}",
-                    pins.dout_high, pins.sck_high, pins.sck_requested_high
-                )?;
+            write!(
+                out,
+                ",\"sensor\":\"i2c\",\"address\":{},\"temperature\":{},\"who\":",
+                crate::pressure::ADDRESS,
+                p.temperature
+            )?;
+            match p.who {
+                Some(who) => write!(out, "{who}")?,
+                None => out.write_str("null")?,
             }
             out.write_str("}")?;
         }
@@ -303,13 +306,14 @@ mod tests {
         motor.position = i32::MIN;
         t.plunger = Some((motor, Some(4095)));
         t.pressure = Some(crate::pressure::Reading {
-            pins: Some(crate::pressure::PinLevels::default()),
-            raw: -8388607,
-            average: 8388608,
+            who: Some(255),
+            temperature: 65535,
+            raw: 0xffffff,
+            average: 0xffffff,
             ms: u32::MAX,
             samples: u32::MAX,
             valid: true,
-            saturated: true,
+            saturated: false,
             state: 2,
             errors: u32::MAX,
         });

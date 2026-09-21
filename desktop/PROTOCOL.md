@@ -60,27 +60,31 @@ Stop supersedes the desktop's pending request. If not acknowledged within 500 ms
 the UI closes the serial connection to drop DTR. Firmware stops on USB1 session
 closure, five seconds without a valid command, or a 60-second move deadline.
 Manual clients must send periodic PING commands during long moves.
-HX711-enabled firmware reports `pressure: true`. Snapshots include an additive
-`pressure` object with `raw`, `average`, `ms`, `samples`, `valid`, and `saturated`.
-Raw/average are sign-inverted ADC counts in [-8388607, 8388608], not calibrated
-pressure units. `average` covers up to the latest 16 valid readings. `ms` is the
-last accepted conversion time; `samples` is a wrapping u32 accepted-sample count.
-`valid: false` means startup, settling, timeout, or a failed transfer; numeric
-fields may retain the last sample and must not be displayed as current data.
-`saturated` flags either signed 24-bit ADC rail. HX711 uses A1/p15 DOUT, A0/p14
-SCK, channel B/gain 32. Acquisition continues while streaming is paused.
-No I²C scan, temperature, or WHO_AM_I operation applies to this device.
+Firmware 0.1.4 uses the NanoManipulator I²C pressure sensor and reports
+`pressure: true`. Its snapshot `pressure` object contains:
 
-Firmware 0.1.1 adds `plunger_io`: physical pad readbacks `standby`, `ain1`, `ain2`,
+- `sensor: "i2c"`, `address: 92` (0x5C), and `who` (WHO_AM_I byte, or null).
+- `raw` and `average`: unsigned 24-bit raw counts, 0 through 16777215.
+  The average uses 16 entries initialized to zero, matching the Arduino sketch.
+- `temperature`: unsigned 16-bit raw register value, without unit conversion.
+- `ms`: last successful sample timestamp; `samples`: wrapping u32 sample count.
+- `valid`: false during initialization or after a transfer error. Numeric fields
+  may retain old values and must not be displayed as current when invalid.
+- `state`: 0 initializing, 1 waiting for first sample, 2 receiving,
+  3 transaction timeout, 4 bus error / no acknowledgement.
+- `errors`: wrapping u32 failed-transaction count.
+- `saturated`: always false; retained for compatibility with the earlier schema.
+
+The sensor uses SDA pin 18, SCL pin 19, 400 kHz. Acquisition continues while
+streaming is paused. There are no new PC commands; WHO_AM_I and raw temperature
+are included in snapshots. Update the desktop app with this firmware because
+older parsers enforce the HX711 signed range.
+
+The updated app also accepts legacy HX711 firmware: absent `sensor` identifies
+its sign-inverted counts [-8388607, 8388608], legacy states (0 waiting for DOUT,
+1 settling, 2 receiving, 3 conversion timeout, 4 invalid transfer), and optional
+`pins` booleans `dout_high`, `sck_high`, `sck_requested_high`.
+
+`plunger_io` remains unchanged: physical pad readbacks `standby`, `ain1`, `ain2`,
 2-bit `encoder`, signed 16-bit `pwm_count`/`pwm_compare`, and boolean
-`pwm_running`/`pwm_enabled`. These distinguish an accepted command from hardware
-output activity; they do not prove motor movement. Pressure adds `state` (0 waiting
-for DOUT, 1 settling, 2 receiving, 3 conversion timeout, 4 DOUT stayed low after
-read) and a wrapping `errors` transfer-error counter. These fields are optional
-for backward compatibility. Read snapshot records these diagnostics in the UI log.
-
-Firmware 0.1.2 adds optional `pressure.pins`: boolean `dout_high`, `sck_high`,
-and `sck_requested_high`. These are sampled between transfers. SCK is commanded
-low there. A high physical SCK with a low requested level indicates the pin is
-not following its output latch. DOUT high with no samples means conversion-ready
-has not been observed; it is not a measured pressure of zero.
+`pwm_running`/`pwm_enabled`. Read snapshot records hardware diagnostics in the UI log.

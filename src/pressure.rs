@@ -1,61 +1,50 @@
-//! HX711 acquisition state and a constant-time, 16-sample moving average.
-//! Readings retain the sign inversion from HX711_meas_1.ino; units are ADC counts.
+//! NanoManipulator Pressure.cpp register protocol and zero-filled 16-sample average.
+use core::task::Poll;
 const WINDOW: usize = 16;
-const TIMEOUT_MS: u32 = 1000;
-const SETTLE_MS: u32 = 400; // Worst-case channel-change settling at RATE=0.
+pub const ADDRESS: u8 = 0x5c;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    Configure,
+    WhoPointer,
+    WhoRead,
+    PressurePointer,
+    PressureRead,
+    TemperaturePointer,
+    TemperatureRead,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    Timeout,
+    Bus,
+}
 pub trait Bus {
-    fn ready(&self) -> bool;
-    /// Exactly one available conversion; None indicates a framing/wiring fault.
-    fn read(&mut self) -> Option<u32>;
+    /// Poll one STOP-terminated transaction. Never wait for hardware in this call.
+    fn poll(&mut self, op: Operation, now: u32) -> Poll<Result<[u8; 3], Error>>;
 }
-
-/// Shift one MSB-first conversion and select B/32 for the next one.
-pub fn read_channel_b(mut pulse: impl FnMut() -> bool) -> u32 {
-    let mut word = 0;
-    for _ in 0..24 {
-        word = (word << 1) | u32::from(pulse());
-    }
-    pulse();
-    pulse(); // 26 clocks total, channel B / gain 32.
-    word
-}
-
-pub fn signed_inverted(word: u32) -> i32 {
-    -(((word << 8) as i32) >> 8)
-}
-
-/// GPIO readback sampled while SCK should be idle low.
-#[derive(Clone, Copy, Default)]
-pub struct PinLevels {
-    pub dout_high: bool,
-    pub sck_high: bool,
-    pub sck_requested_high: bool,
-}
-
 #[derive(Clone, Copy, Default)]
 pub struct Reading {
-    pub pins: Option<PinLevels>,
     pub raw: i32,
     pub average: i32,
     pub ms: u32,
     pub samples: u32,
     pub valid: bool,
-    pub saturated: bool,
-    // 0 waiting for DOUT, 1 settling, 2 receiving, 3 timeout, 4 invalid transfer.
+    pub saturated: bool, // Retained for protocol compatibility; unused for this sensor.
+    // 0 initializing, 1 waiting for first sample, 2 receiving, 3 timeout, 4 bus error.
     pub state: u8,
     pub errors: u32,
+    pub who: Option<u8>,
+    pub temperature: u16, // Preserve Arduino's unsigned two-byte raw value.
 }
-
 pub struct Pressure {
     pub reading: Reading,
     values: [i32; WINDOW],
     sum: i32,
     next: usize,
-    count: usize,
-    configured: bool,
-    selected_at: u32,
-    last_rx: u32,
+    phase: Option<Operation>,
+    last_attempt: u32,
+    retry: bool,
+    raw: i32,
 }
 impl Pressure {
     pub fn new() -> Self {
@@ -64,61 +53,74 @@ impl Pressure {
             values: [0; WINDOW],
             sum: 0,
             next: 0,
-            count: 0,
-            configured: false,
-            selected_at: 0,
-            last_rx: 0,
+            phase: Some(Operation::Configure),
+            last_attempt: 0,
+            retry: false,
+            raw: 0,
         }
-    }
-    fn invalidate(&mut self, state: u8) {
-        self.reading.valid = false;
-        self.reading.state = state;
-        self.configured = false;
-        self.values.fill(0);
-        self.sum = 0;
-        self.next = 0;
-        self.count = 0;
     }
     pub fn poll(&mut self, now: u32, bus: &mut impl Bus) {
-        if self.configured && now.wrapping_sub(self.last_rx) >= TIMEOUT_MS {
-            self.invalidate(3);
+        use Operation::*;
+        if self.phase.is_none() {
+            let interval = if self.retry { 1000 } else { 50 };
+            if now.wrapping_sub(self.last_attempt) < interval {
+                return;
+            }
+            self.last_attempt = now;
+            self.phase = Some(if self.retry {
+                Configure
+            } else {
+                PressurePointer
+            });
         }
-        if !bus.ready() {
-            return;
-        }
-        let Some(word) = bus.read() else {
-            self.reading.errors = self.reading.errors.wrapping_add(1);
-            self.invalidate(4);
-            return;
+        let op = self.phase.unwrap();
+        let bytes = match bus.poll(op, now) {
+            Poll::Pending => return,
+            Poll::Ready(Ok(bytes)) => bytes,
+            Poll::Ready(Err(error)) => {
+                self.reading.valid = false;
+                self.reading.who = None;
+                self.reading.state = if error == Error::Timeout { 3 } else { 4 };
+                self.reading.errors = self.reading.errors.wrapping_add(1);
+                self.values.fill(0);
+                self.sum = 0;
+                self.next = 0;
+                self.phase = None;
+                self.retry = true;
+                self.last_attempt = now;
+                return;
+            }
         };
-        self.last_rx = now;
-        if !self.configured {
-            // The first result may be channel A after power-up. Reading with
-            // 26 clocks selects B/32 for the NEXT conversion, so discard this one.
-            self.reading.state = 1;
-            self.configured = true;
-            self.selected_at = now;
-            return;
-        }
-        if now.wrapping_sub(self.selected_at) < SETTLE_MS {
-            return;
-        }
-        let raw = signed_inverted(word);
-        self.sum -= self.values[self.next];
-        self.values[self.next] = raw;
-        self.sum += raw;
-        self.next = (self.next + 1) % WINDOW;
-        self.count = (self.count + 1).min(WINDOW);
-        self.reading = Reading {
-            pins: None,
-            raw,
-            average: self.sum / self.count as i32,
-            ms: now,
-            samples: self.reading.samples.wrapping_add(1),
-            valid: true,
-            state: 2,
-            errors: self.reading.errors,
-            saturated: matches!(word & 0xffffff, 0x800000 | 0x7fffff),
+        self.phase = match op {
+            Configure => Some(WhoPointer),
+            WhoPointer => Some(WhoRead),
+            WhoRead => {
+                self.reading.who = Some(bytes[0]);
+                self.reading.state = 1;
+                self.retry = false;
+                self.last_attempt = now;
+                None
+            }
+            PressurePointer => Some(PressureRead),
+            PressureRead => {
+                self.raw = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]);
+                Some(TemperaturePointer)
+            }
+            TemperaturePointer => Some(TemperatureRead),
+            TemperatureRead => {
+                self.sum -= self.values[self.next];
+                self.values[self.next] = self.raw;
+                self.sum += self.raw;
+                self.next = (self.next + 1) % WINDOW;
+                self.reading.raw = self.raw;
+                self.reading.average = self.sum / WINDOW as i32;
+                self.reading.temperature = u16::from_le_bytes([bytes[0], bytes[1]]);
+                self.reading.ms = now;
+                self.reading.valid = true;
+                self.reading.state = 2;
+                self.reading.samples = self.reading.samples.wrapping_add(1);
+                None
+            }
         };
     }
 }
@@ -126,103 +128,71 @@ impl Pressure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct Fake {
-        ready: bool,
-        word: Option<u32>,
-        reads: usize,
-    }
+    use std::collections::VecDeque;
+    struct Fake(VecDeque<(Operation, Poll<Result<[u8; 3], Error>>)>);
     impl Bus for Fake {
-        fn ready(&self) -> bool {
-            self.ready
-        }
-        fn read(&mut self) -> Option<u32> {
-            self.reads += 1;
-            self.word
+        fn poll(&mut self, op: Operation, _: u32) -> Poll<Result<[u8; 3], Error>> {
+            let (expected, result) = self.0.pop_front().expect("unexpected bus operation");
+            assert_eq!(op, expected);
+            result
         }
     }
-    #[test]
-    fn wire_bit_order_and_gain_selection() {
-        for expected in [0, 1, 0x800000, 0x7fffff, 0xffffff, 0x123456] {
-            let mut pulses = 0;
-            let word = read_channel_b(|| {
-                let bit = if pulses < 24 {
-                    expected & (1 << (23 - pulses)) != 0
-                } else {
-                    true
-                };
-                pulses += 1;
-                bit
-            });
-            assert_eq!(word, expected);
-            assert_eq!(pulses, 26);
-        }
+    fn complete(p: &mut Pressure, op: Operation, bytes: [u8; 3], now: u32) {
+        let mut bus = Fake([(op, Poll::Pending), (op, Poll::Ready(Ok(bytes)))].into());
+        p.poll(now, &mut bus);
+        p.poll(now, &mut bus);
+        assert!(bus.0.is_empty());
+    }
+    fn initialize(p: &mut Pressure, now: u32) {
+        complete(p, Operation::Configure, [0; 3], now);
+        complete(p, Operation::WhoPointer, [0; 3], now);
+        complete(p, Operation::WhoRead, [0xb1, 0, 0], now);
+        assert_eq!(p.reading.who, Some(0xb1));
+    }
+    fn sample(p: &mut Pressure, now: u32, bytes: [u8; 3]) {
+        complete(p, Operation::PressurePointer, [0; 3], now);
+        complete(p, Operation::PressureRead, bytes, now);
+        complete(p, Operation::TemperaturePointer, [0; 3], now);
+        complete(p, Operation::TemperatureRead, [0x34, 0x92, 0], now);
     }
     #[test]
-    fn sign_and_range() {
-        assert_eq!(signed_inverted(0), 0);
-        assert_eq!(signed_inverted(1), -1);
-        assert_eq!(signed_inverted(0xffffff), 1);
-        assert_eq!(signed_inverted(0x800000), 8388608);
-        assert_eq!(signed_inverted(0x7fffff), -8388607);
-    }
-    #[test]
-    fn ready_settling_average_and_recovery() {
+    fn matches_arduino_unsigned_bytes_zero_filled_average_and_cadence() {
         let mut p = Pressure::new();
-        let mut bus = Fake {
-            ready: false,
-            word: Some(100),
-            reads: 0,
-        };
-        p.poll(0, &mut bus);
-        assert_eq!(p.reading.state, 0);
-        assert_eq!(bus.reads, 0);
-        bus.ready = true;
-        p.poll(1, &mut bus);
-        assert_eq!(p.reading.state, 1);
-        assert!(!p.reading.valid);
-        p.poll(400, &mut bus);
-        assert!(!p.reading.valid);
-        p.poll(401, &mut bus);
-        assert_eq!(p.reading.state, 2);
-        assert_eq!(p.reading.average, -100);
-        bus.word = Some(200);
-        p.poll(501, &mut bus);
-        assert_eq!(p.reading.average, -150);
-        for now in (601..=2101).step_by(100) {
-            p.poll(now, &mut bus);
+        initialize(&mut p, 0);
+        p.poll(49, &mut Fake(VecDeque::new()));
+        sample(&mut p, 50, [0x56, 0x34, 0x92]);
+        assert_eq!(p.reading.raw, 0x923456);
+        assert_eq!(p.reading.average, 0x923456 / 16);
+        assert_eq!(p.reading.temperature, 0x9234);
+        for now in (100..=800).step_by(50) {
+            sample(&mut p, now, [0x56, 0x34, 0x92]);
         }
-        assert_eq!(p.reading.average, -200);
-        bus.ready = false;
-        p.poll(3101, &mut bus);
-        assert_eq!(p.reading.state, 3);
-        assert!(!p.reading.valid);
-        bus.ready = true;
-        bus.word = Some(0xffffff);
-        p.poll(3201, &mut bus);
-        assert!(!p.reading.valid);
-        p.poll(3601, &mut bus);
-        assert_eq!(p.reading.average, 1);
-        bus.word = None;
-        p.poll(3701, &mut bus);
-        assert_eq!(p.reading.state, 4);
-        assert_eq!(p.reading.errors, 1);
-        assert!(!p.reading.valid);
+        assert_eq!(p.reading.average, 0x923456);
+        sample(&mut p, 850, [0xff; 3]);
+        assert_eq!(p.reading.average, (15 * 0x923456 + 0xffffff) / 16);
+        assert!(p.reading.valid);
+        assert_eq!(p.reading.samples, 17);
     }
     #[test]
-    fn rollover_and_saturation() {
-        let mut p = Pressure::new();
-        let mut bus = Fake {
-            ready: true,
-            word: Some(0x800000),
-            reads: 0,
-        };
-        p.poll(u32::MAX - 200, &mut bus);
-        p.poll(200, &mut bus);
-        assert!(p.reading.valid && p.reading.saturated);
-        assert_eq!(p.reading.average, 8388608);
-        for now in (300..=2000).step_by(100) {
-            p.poll(now, &mut bus);
+    fn failures_invalidate_retry_and_reinitialize_across_timer_wrap() {
+        for error in [Error::Timeout, Error::Bus] {
+            let mut p = Pressure::new();
+            let start = u32::MAX - 100;
+            initialize(&mut p, start);
+            sample(&mut p, start + 50, [16, 0, 0]);
+            p.poll(
+                start + 100,
+                &mut Fake([(Operation::PressurePointer, Poll::Ready(Err(error)))].into()),
+            );
+            assert!(!p.reading.valid);
+            assert_eq!(p.reading.who, None);
+            assert_eq!(p.reading.state, if error == Error::Timeout { 3 } else { 4 });
+            assert_eq!(p.reading.errors, 1);
+            p.poll(998, &mut Fake(VecDeque::new()));
+            initialize(&mut p, 999);
+            sample(&mut p, 1049, [32, 0, 0]);
+            assert_eq!(p.reading.average, 2);
+            assert!(p.reading.valid);
         }
-        assert_eq!(p.reading.average, 8388608); // Sum fits i32 even at full scale.
     }
 }

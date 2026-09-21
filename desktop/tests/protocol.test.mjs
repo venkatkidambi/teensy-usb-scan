@@ -92,3 +92,16 @@ test('HX711 pin readback validates booleans',()=>{
   assert.deepEqual(parseMessage(JSON.stringify(m)).pressure.pins,m.pressure.pins);
   m.pressure.pins.sck_high=0;assert.throws(()=>parseMessage(JSON.stringify(m)),/pin levels/);
 });
+
+
+test('I²C pressure accepts unsigned 24-bit values and validates sensor diagnostics',()=>{
+  const m={type:'snapshot',id:0,ms:100,epoch:1,vid:0,pid:0,mounted:false,cdc:0,records:0,malformed:0,skipped:0,values:{},pressure:{sensor:'i2c',address:92,who:177,temperature:65535,raw:0xffffff,average:0xffffff,ms:99,samples:16,valid:true,saturated:false,state:2,errors:0}};
+  assert.deepEqual(parseMessage(JSON.stringify(m)).pressure,m.pressure);
+  for(const [key,value] of [['raw',-1],['average',0x1000000],['who',256],['temperature',65536],['address',93],['sensor','unknown']]) {
+    assert.throws(()=>parseMessage(JSON.stringify({...m,pressure:{...m.pressure,[key]:value}})),/pressure/);
+  }
+  m.pressure.who=null;assert.doesNotThrow(()=>parseMessage(JSON.stringify(m)));
+  assert.equal(pressureState({...m.pressure,state:0}),'Initializing I²C sensor');
+  assert.equal(pressureState({...m.pressure,state:3}),'I²C transfer timed out');
+  assert.equal(pressureState({...m.pressure,state:4}),'I²C bus error / no acknowledgement');
+});
