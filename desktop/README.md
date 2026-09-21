@@ -43,6 +43,9 @@ The native port list includes other serial devices in case USB metadata is missi
 the handshake must still identify protocol 1 / Teensy 4.1 before controls enable.
 The XD-C's `04d8:ef4a` is not the PC-facing serial port.
 
+Encoder and target positions, including the plot and demo, display microns (µm)
+using 0.078 µm per encoder count, with three decimal places.
+
 ## Build
 
 ```text

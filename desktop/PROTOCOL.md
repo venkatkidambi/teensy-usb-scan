@@ -31,7 +31,7 @@ Responses are newline-delimited JSON. Example:
   snapshot opportunities coalesced by USB1 backpressure, not lost actuator samples.
 - Missing samples are omitted. Retained tags: EPOS, DPOS, STAT, SRNO, SOFT, FREQ,
   TIME, SYNC. Each sample has its own `value` and Teensy reception `ms` timestamp.
-- EPOS/DPOS are counts, FREQ is Hz, STAT is a 24-bit word, and TIME is controller
+- EPOS/DPOS are raw encoder counts (the desktop displays µm using 0.078 µm/count), FREQ is Hz, STAT is a 24-bit word, and TIME is controller
   time in 0.1 ms ticks. SOFT 20103 means firmware 2.1.3.
 
 The UI marks samples older than three seconds stale. The desktop worker also

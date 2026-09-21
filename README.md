@@ -44,7 +44,7 @@ for the repository's default Teensy ARM target. The desktop and firmware crates
 have separate lockfiles and dependencies. Build-time desktop dependencies never
 run on or link into the Teensy firmware.
 
-The dashboard includes positions, frequency, decoded status flags, a 60-second
+The dashboard includes positions, decoded status flags, a 60-second
 plot, sample ages, a bounded activity log, and Ping / Read snapshot / Pause stream.
 Pause only stops USB1 snapshots; actuator reception continues. Pressure sensing
 is labeled **Not configured**. No motion commands are enabled. **Preview demo**
@@ -80,7 +80,9 @@ control loop.
 The decoder follows the [XD-C manual v3.1, section 4.3, pages 13–14](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.1%20-%20JPL.pdf).
 The dashboard names active `STAT` bits, preserving the numeric word. Bit 0 is
 XRTA-only, bit 20 unused, and bits 22–23 undefined. No flags set is not a health
-verdict. Position remains in encoder counts; physical units require stage resolution.
+verdict. The dashboard displays encoder and target positions in microns (µm), using
+0.078 µm per encoder count with three decimal places. The serial protocol retains
+raw encoder counts.
 
 The fixed 64-byte parser handles LF/CRLF lines across USB packets. Malformed or
 oversized lines are counted and discarded through newline. Disconnects clear

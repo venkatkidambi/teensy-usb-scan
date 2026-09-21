@@ -2,6 +2,9 @@ import {NativeSession,statusFlags,elapsed} from './protocol.mjs';
 const $=id=>document.getElementById(id), text=(id,value)=>{$(id).textContent=value;};
 const invoke=window.__TAURI__?.core.invoke;
 const number=new Intl.NumberFormat(undefined,{maximumFractionDigits:0});
+const micronsPerCount=0.078;
+const positionNumber=new Intl.NumberFormat(undefined,{minimumFractionDigits:3,maximumFractionDigits:3});
+const position=counts=>positionNumber.format(counts*micronsPerCount);
 let session=null,connected=false,busy=false,demo=false,streaming=true,snapshot=null,received=0,hello=null;
 let history=[],logs=[],epoch=null,lastSample=null,lastPong=0,lastPing=0,demoTimer=null;
 function activity(message){logs.push(`${new Date().toLocaleTimeString()}  ${message}`);if(logs.length>100)logs.shift();text('log',logs.join('\n'));}
@@ -80,7 +83,7 @@ function render(){
   const v=snapshot?.values??{},active=connected||demo,stalled=connected&&lastPong>0&&performance.now()-lastPong>6000;
   text('connection',demo?'Demo · simulated':stalled?'Link unresponsive':connected?'Connected':'Disconnected');
   $('connection').className=`pill ${demo||stalled?'warn':connected?'live':''}`;
-  for(const[id,tag]of[['epos','EPOS'],['dpos','DPOS'],['freq','FREQ']]){text(id,v[tag]?number.format(v[tag].value):'—');text(`${id}-age`,ageText(v[tag]));$(id).closest('.metric').classList.toggle('stale',!!v[tag]&&age(v[tag])>=3000);}
+  for(const[id,tag]of[['epos','EPOS'],['dpos','DPOS']]){text(id,v[tag]?position(v[tag].value):'—');text(`${id}-age`,ageText(v[tag]));$(id).closest('.metric').classList.toggle('stale',!!v[tag]&&age(v[tag])>=3000);}
   const stat=v.STAT,key=stat?String(stat.value):'none';
   text('stat-word',stat?`STAT ${stat.value} / 0x${stat.value.toString(16).padStart(6,'0')}`:'Waiting for STAT');
   text('stat-age',stat?`${ageText(stat)} · listed flags are active`:'No status received');$('flags').classList.toggle('stale-flags',!!stat&&age(stat)>=3000);
@@ -109,7 +112,7 @@ function draw(){
   let lo=Infinity,hi=-Infinity;for(const p of points)for(const value of[p.e,p.d])if(value!==null){lo=Math.min(lo,value);hi=Math.max(hi,value);}
   if(!Number.isFinite(lo)){lo=-100;hi=100;}const pad=Math.max((hi-lo)*.15,1);lo-=pad;hi+=pad;
   ctx.font='9px system-ui';ctx.fillStyle='#929f88';ctx.textAlign='right';
-  for(let i=0;i<5;i++){const y=top+(bottom-top)*i/4;ctx.strokeStyle='#edf1e7';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();ctx.fillText(number.format(hi-(hi-lo)*i/4),left-8,y+3);}
+  for(let i=0;i<5;i++){const y=top+(bottom-top)*i/4;ctx.strokeStyle='#edf1e7';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();ctx.fillText(position(hi-(hi-lo)*i/4),left-8,y+3);}
   ctx.textAlign='center';for(let i=0;i<=4;i++)ctx.fillText(i===4?'now':`−${60-i*15}s`,left+(right-left)*i/4,r.height-8);
   const x=t=>left+(1-(now-t)/60000)*(right-left),y=v=>bottom-(v-lo)/(hi-lo)*(bottom-top);
   ctx.save();ctx.beginPath();ctx.rect(left,top,right-left,bottom-top);ctx.clip();
@@ -118,7 +121,7 @@ function draw(){
 new ResizeObserver(draw).observe($('plot').parentElement);
 $('demo').addEventListener('click',()=>{
   if(session||busy)return;reset();demo=true;const start=performance.now();hello={firmware:'preview',protocol:1};epoch=1;
-  const make=ms=>({type:'snapshot',id:0,ms,epoch:1,vid:0x04d8,pid:0xef4a,mounted:true,cdc:2,records:Math.floor(ms/10),malformed:0,skipped:0,values:Object.fromEntries(Object.entries({EPOS:Math.round(1200+180*Math.sin(ms/6000)),DPOS:1200,FREQ:84000,STAT:352,SRNO:12345,SOFT:20103}).map(([tag,value])=>[tag,{value,ms}]))});
+  const make=ms=>({type:'snapshot',id:0,ms,epoch:1,vid:0x04d8,pid:0xef4a,mounted:true,cdc:2,records:Math.floor(ms/10),malformed:0,skipped:0,values:Object.fromEntries(Object.entries({EPOS:Math.round(1200+180*Math.sin(ms/6000)),DPOS:1200,STAT:352,SRNO:12345,SOFT:20103}).map(([tag,value])=>[tag,{value,ms}]))});
   for(let i=0;i<600;i++)history.push({time:start-60000+i*100,e:make(i*100).values.EPOS.value,d:1200});
   accept(make(60000));text('session-label','SIMULATED SESSION');notice('Demo mode — all readings are simulated. No serial port is open.');controls();
   demoTimer=setInterval(()=>accept(make(Math.floor(performance.now()-start)+60000)),100);
