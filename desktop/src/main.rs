@@ -15,6 +15,27 @@ struct Backend {
     next: AtomicU32,
 }
 
+impl Backend {
+    fn with_session<T>(
+        &self,
+        session: u32,
+        action: impl FnOnce(&serial::Connection) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let connection = self.connection.lock().map_err(|e| e.to_string())?;
+        let connection = connection
+            .as_ref()
+            .filter(|c| c.id == session)
+            .ok_or("Serial session expired")?;
+        action(connection)
+    }
+
+    fn disconnect(&self) {
+        if let Ok(mut connection) = self.connection.lock() {
+            connection.take();
+        }
+    }
+}
+
 #[tauri::command]
 async fn serial_ports() -> Result<Vec<serial::Port>, String> {
     tauri::async_runtime::spawn_blocking(serial::ports)
@@ -49,12 +70,7 @@ async fn serial_send(
 ) -> Result<(), String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let connection = state.connection.lock().map_err(|e| e.to_string())?;
-        let connection = connection
-            .as_ref()
-            .filter(|c| c.id == session)
-            .ok_or("Serial session expired")?;
-        connection.send(command)
+        state.with_session(session, |connection| connection.send(command))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -67,12 +83,7 @@ async fn serial_poll(
 ) -> Result<serial::Batch, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let connection = state.connection.lock().map_err(|e| e.to_string())?;
-        let connection = connection
-            .as_ref()
-            .filter(|c| c.id == session)
-            .ok_or("Serial session expired")?;
-        Ok(connection.poll())
+        state.with_session(session, |connection| Ok(connection.poll()))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -108,9 +119,7 @@ fn main() {
         .on_page_load(|window, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Started {
                 // A full Vite reload discards the JS session that owned this port.
-                if let Ok(mut connection) = window.state::<Arc<Backend>>().connection.lock() {
-                    connection.take();
-                }
+                window.state::<Arc<Backend>>().disconnect();
             }
             #[cfg(feature = "smoke-test")]
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
@@ -119,9 +128,7 @@ fn main() {
         })
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
-                if let Ok(mut connection) = window.state::<Arc<Backend>>().connection.lock() {
-                    connection.take();
-                }
+                window.state::<Arc<Backend>>().disconnect();
             }
         });
     #[cfg(feature = "smoke-test")]

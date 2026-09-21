@@ -1,12 +1,9 @@
 //! XD-C ASCII feedback, manual v3.1 section 4.3 (pages 13–14).
 //! Fixed storage, no allocation, and no actuator commands.
+use crate::line::LineBuffer;
 use core::fmt;
 
-pub struct Decoder {
-    bytes: [u8; 64],
-    len: usize,
-    dropping: bool,
-}
+pub struct Decoder(LineBuffer<64>);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -23,39 +20,21 @@ pub struct Record {
 
 impl Decoder {
     pub const fn new() -> Self {
-        Self {
-            bytes: [0; 64],
-            len: 0,
-            dropping: false,
-        }
+        Self(LineBuffer::new())
     }
 
     pub fn push(&mut self, byte: u8) -> Option<Result<Record, Error>> {
-        if byte == b'\n' {
-            let len = self.len;
-            self.len = 0;
-            if self.dropping {
-                self.dropping = false;
-                return Some(Err(Error::TooLong));
-            }
-            let line = self.bytes[..len]
-                .strip_suffix(b"\r")
-                .unwrap_or(&self.bytes[..len]);
-            return if line.is_empty() {
-                None
-            } else {
-                Some(Record::parse(line))
-            };
-        }
-        if !self.dropping {
-            if self.len == self.bytes.len() {
-                self.dropping = true;
-            } else {
-                self.bytes[self.len] = byte;
-                self.len += 1;
+        match self.0.push(byte)? {
+            Err(()) => Some(Err(Error::TooLong)),
+            Ok(line) => {
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                if line.is_empty() {
+                    None
+                } else {
+                    Some(Record::parse(line))
+                }
             }
         }
-        None
     }
 }
 

@@ -1,4 +1,5 @@
 //! Version 1 PC protocol: bounded ASCII commands, newline-delimited JSON replies.
+use crate::line::LineBuffer;
 use core::fmt::{self, Write};
 
 pub const TAGS: [&str; 8] = [
@@ -21,7 +22,7 @@ pub struct Telemetry {
     pub cdc: u8,
     pub records: u32,
     pub malformed: u32,
-    pub samples: [Sample; 8],
+    pub samples: [Sample; TAGS.len()],
 }
 
 impl Telemetry {
@@ -38,7 +39,7 @@ impl Telemetry {
                 value: 0,
                 ms: 0,
                 valid: false,
-            }; 8],
+            }; TAGS.len()],
         }
     }
 
@@ -119,41 +120,17 @@ impl Command {
     }
 }
 
-pub struct Commands {
-    bytes: [u8; 64],
-    len: usize,
-    dropping: bool,
-}
+pub struct Commands(LineBuffer<64>);
 impl Commands {
     pub const fn new() -> Self {
-        Self {
-            bytes: [0; 64],
-            len: 0,
-            dropping: false,
-        }
+        Self(LineBuffer::new())
     }
-    pub fn push(&mut self, b: u8) -> Option<Result<Command, ()>> {
-        if b == b'\n' {
-            let len = self.len;
-            self.len = 0;
-            if self.dropping {
-                self.dropping = false;
-                return Some(Err(()));
-            }
-            if len == 0 {
-                return None;
-            }
-            return Some(Command::parse(&self.bytes[..len]));
+    pub fn push(&mut self, byte: u8) -> Option<Result<Command, ()>> {
+        match self.0.push(byte)? {
+            Ok([]) => None,
+            Ok(line) => Some(Command::parse(line)),
+            Err(()) => Some(Err(())),
         }
-        if !self.dropping {
-            if self.len == self.bytes.len() {
-                self.dropping = true;
-            } else {
-                self.bytes[self.len] = b;
-                self.len += 1;
-            }
-        }
-        None
     }
 }
 
