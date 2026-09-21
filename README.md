@@ -270,8 +270,8 @@ The HX711 has no temperature or WHO_AM_I registers and is not an I²C device.
 The main loop polls readiness without waiting for a conversion. Each available
 word is read using exactly 26 clock pulses. Only individual clock-high pulses
 mask interrupts, preventing an interrupt from stretching SCK into power-down;
-encoder and USB interrupts can run between pulses. An 80 µs clock-high reset initializes serial framing at boot. The initial result
-is discarded when selecting B/32, followed by a conservative 400 ms settling period. A fixed
+encoder and USB interrupts can run between pulses. Startup leaves SCK low, matching Arduino HX711 initialization. The initial
+result is discarded when selecting B/32, followed by a conservative 400 ms settling period. A fixed
 16-entry ring buffer computes the moving average in constant time, averaging only
 actual samples during startup. No heap, Arduino runtime, or 100 ms delay is added.
 
@@ -314,3 +314,14 @@ HX711 terminals as well as these Teensy pin readbacks: the software cannot verif
 that a wire reaches the module. Verify DT=A1/p15, SCK=A0/p14, supply, and common
 ground. If the original Arduino sketch still reads correctly on unchanged
 hardware, report that along with the snapshot to isolate the firmware difference.
+
+Firmware 0.1.3 changes only the HX711 GPIO startup path: A0/A1 now use the same
+fast GPIO6 bank as Teensy Arduino, with a 22 kΩ input pull-up, hysteresis, and
+matching pad configuration. SCK is preloaded low before output routing; the
+forced power-down/reset pulse from the original port is removed. Motor GPIO
+routing is unchanged. Readiness remains nonblocking, and B/32 gain, polarity,
+averaging, and diagnostics are unchanged. This is an Arduino-compatibility fix
+for hardware that works with the original sketch but never becomes ready under
+0.1.2; successful operation still needs a board retest. The comparison used
+[upstream HX711](https://github.com/bogde/HX711/blob/master/src/HX711.cpp) and
+[PJRC GPIO setup](https://github.com/PaulStoffregen/cores/blob/master/teensy4/digital.c).

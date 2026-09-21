@@ -16,7 +16,6 @@ mod xeryon;
 fn main() -> ! {
     let board::Resources {
         pins,
-        mut gpio1,
         mut gpio2,
         mut gpio4,
         flexpwm4,
@@ -30,17 +29,14 @@ fn main() -> ! {
         ..
     } = board::t41(board::instances());
 
-    // Our HAL uses GPIO1/2/4, not the alternate fast GPIO6/7/9 aliases.
+    // The motor HAL uses GPIO2/4, not the fast GPIO7/9 aliases.
     // Select the owned pads explicitly rather than relying on reset/loader state.
     use teensy4_bsp::{hal::iomuxc::gpio::Pin, pins::common, ral};
-    const HX_PINS: u32 =
-        (1 << <common::P14 as Pin<1>>::OFFSET) | (1 << <common::P15 as Pin<1>>::OFFSET);
     const ENCODER_PINS: u32 =
         (1 << <common::P11 as Pin<2>>::OFFSET) | (1 << <common::P12 as Pin<2>>::OFFSET);
     const MOTOR_PINS: u32 = (1 << <common::P3 as Pin<4>>::OFFSET)
         | (1 << <common::P4 as Pin<4>>::OFFSET)
         | (1 << <common::P5 as Pin<4>>::OFFSET);
-    ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR26, |v| v & !HX_PINS);
     ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR27, |v| v & !ENCODER_PINS);
     ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR29, |v| v & !MOTOR_PINS);
     cortex_m::asm::dsb();
@@ -58,7 +54,7 @@ fn main() -> ! {
         &mut gpio4,
         flexpwm4,
     );
-    let mut hx711 = hx711::Hx711::new(&mut gpio1, pins.p15, pins.p14);
+    let mut hx711 = hx711::Hx711::new(&mut iomuxc_gpr, pins.p15, pins.p14);
     let mut pressure = pressure::Pressure::new();
     let mut pot = motor::Pot::new(adc1, pins.p20);
     let led = board::led(&mut gpio2, pins.p13);

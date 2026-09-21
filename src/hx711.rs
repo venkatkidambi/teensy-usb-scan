@@ -1,17 +1,30 @@
 //! HX711 GPIO transport: Teensy A1/p15 DOUT, A0/p14 SCK, channel B / gain 32.
 use crate::pressure::Bus;
 use cortex_m::interrupt;
-use teensy4_bsp::{board, hal, pins::common};
+use hal::iomuxc::gpio::Pin;
+use teensy4_bsp::{board, hal, pins::common, ral};
 
 pub struct Hx711 {
     data: hal::gpio::Input,
     clock: hal::gpio::Output,
 }
 impl Hx711 {
-    pub fn new(port: &mut hal::gpio::Port, mut data: common::P15, mut clock: common::P14) -> Self {
+    pub fn new(
+        gpr: &mut ral::iomuxc_gpr::IOMUXC_GPR,
+        mut data: common::P15,
+        mut clock: common::P14,
+    ) -> Self {
+        // Match Teensy Arduino INPUT_PULLUP/OUTPUT, including hysteresis and SION.
+        // GPIO6 is the fast alias of GPIO1; Arduino uses it for A0 and A1.
+        const DATA_BIT: u32 = <common::P15 as Pin<1>>::OFFSET;
+        const CLOCK_BIT: u32 = <common::P14 as Pin<1>>::OFFSET;
+        const MASK: u32 = (1 << DATA_BIT) | (1 << CLOCK_BIT);
         hal::iomuxc::configure(
             &mut data,
-            hal::iomuxc::Config::zero().set_pull_keeper(Some(hal::iomuxc::PullKeeper::Pullup100k)),
+            hal::iomuxc::Config::zero()
+                .set_drive_strength(hal::iomuxc::DriveStrength::R0_7)
+                .set_pull_keeper(Some(hal::iomuxc::PullKeeper::Pullup22k))
+                .set_hysteresis(hal::iomuxc::Hysteresis::Enabled),
         );
         hal::iomuxc::configure(
             &mut clock,
@@ -19,16 +32,25 @@ impl Hx711 {
         );
         hal::iomuxc::set_sion(&mut data);
         hal::iomuxc::set_sion(&mut clock);
-        let clock = port.output(clock).unwrap();
-        clock.clear();
-        // Reset serial framing after a Teensy reboot, even if the previous
-        // firmware stopped mid-word. Power-down requires SCK high >60 us.
-        clock.set();
-        cortex_m::asm::delay(board::ARM_FREQUENCY / 1_000_000 * 80);
-        clock.clear();
+
+        // SAFETY: board::t41 neither uses nor returns GPIO6. This module owns its
+        // A0/A1 bits; all other GPIO users keep their pads on the standard banks.
+        let gpio6 = unsafe { ral::gpio::GPIO6::instance() };
+        // Preload low BEFORE enabling/routing the output; do not power down the
+        // sensor during startup. This matches the working HX711 Arduino begin().
+        ral::write_reg!(ral::gpio, gpio6, DR_CLEAR, 1 << CLOCK_BIT);
+        let mut port = hal::gpio::Port::new(gpio6);
+        let output = hal::gpio::Output::without_pin(&mut port, CLOCK_BIT);
+        let input = hal::gpio::Input::without_pin(&mut port, DATA_BIT);
+        // The pin types describe GPIO1. Prepare their common ALT5 mux, then
+        // explicitly select GPIO6 for just these two pads in GPR26.
+        hal::iomuxc::gpio::prepare(&mut clock);
+        hal::iomuxc::gpio::prepare(&mut data);
+        ral::modify_reg!(ral::iomuxc_gpr, gpr, GPR26, |v| v | MASK);
+        cortex_m::asm::dsb();
         Self {
-            data: port.input(data).unwrap(),
-            clock,
+            data: input,
+            clock: output,
         }
     }
     pub fn with_pin_levels(
