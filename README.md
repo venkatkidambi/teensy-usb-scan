@@ -46,8 +46,8 @@ run on or link into the Teensy firmware.
 
 The dashboard includes positions, decoded status flags, a 60-second
 plot, sample ages, a bounded activity log, and Ping / Read snapshot / Pause stream.
-Pause only stops USB1 snapshots; actuator reception continues. Pressure sensing
-is labeled **Not configured**. No motion commands are enabled. **Preview demo**
+Pause only stops USB1 snapshots; actuator reception continues. The HX711 pressure input shows raw ADC counts, a 16-sample average,
+and a 60-second plot. The wired plunger has Up/Down, Stop, and Zero controls; Xeryon USB remains read-only. **Preview demo**
 renders simulated readings without opening a serial port.
 
 The desktop serial worker has a 20 ms read timeout, bounded command/response/log
@@ -233,4 +233,59 @@ logging-only firmware cannot answer these requests.
 Only one directly attached device and one CDC ACM interface are supported, with
 a configuration descriptor up to 1024 bytes. Host control-transfer timeout support
 is incomplete; an unresponsive device may require unplugging or resetting the board.
-Motion and I²C pressure sensing are not implemented in this telemetry phase.
+Plunger and HX711 support are implemented; their hardware timing, motion, and
+readings still need board validation. Pressure conversion to physical units
+requires transducer calibration.
+
+## Wired plunger
+
+The bare-metal driver ports the supplied NanoManipulator Motor.cpp: pin 2 PWM,
+pins 3/4 direction, pin 5 standby, pins 11/12 quadrature encoder, and pin 20 (A6)
+potentiometer. Plunger calibration is **16,688 counts/mm**, independently of the
+Xeryon's 0.078 µm/count. Positions and commanded travel display in µm. Drive is
+an 8-bit PWM level (1–255), not a calibrated velocity. Travel is a positive whole
+number of µm; each move is relative to the encoder position at its start.
+
+Hardware PWM runs independently of the loop. Encoder interrupts decode both
+edges and disable the motor at the target distance. Potentiometer conversions
+use 12-bit resolution and 16 hardware averages, polled without waiting at 20 Hz.
+Zero is allowed only while stopped; overlapping moves are rejected. Standby is
+low at startup and on Stop/target completion. USB disconnect stops the motor.
+SysTick also stops it after five seconds without a valid PC command or 60 seconds
+of continuous movement. Desktop heartbeats keep the connection alive. These are
+software limits; no physical end-stop inputs or absolute travel calibration were
+provided. The potentiometer is displayed, not used for travel limiting.
+
+Build and test before flashing; the new GPIO/PWM/encoder/ADC paths have not yet
+been validated on physical hardware. The app and firmware must both be updated
+to enable plunger controls. An older telemetry firmware remains viewable.
+
+## HX711 pressure input
+
+Wiring/settings come from the supplied `HX711_meas_1.ino`: DOUT on **A1 / pin 15**,
+SCK on **A0 / pin 14**, **channel B, gain 32**, with the ADC reading negated.
+The earlier `Pressure.cpp` describes different I²C hardware and is not used.
+The HX711 has no temperature or WHO_AM_I registers and is not an I²C device.
+
+The main loop polls readiness without waiting for a conversion. Each available
+word is read using exactly 26 clock pulses. Only individual clock-high pulses
+mask interrupts, preventing an interrupt from stretching SCK into power-down;
+encoder and USB interrupts can run between pulses. An 80 µs clock-high reset initializes serial framing at boot. The initial result
+is discarded when selecting B/32, followed by a conservative 400 ms settling period. A fixed
+16-entry ring buffer computes the moving average in constant time, averaging only
+actual samples during startup. No heap, Arduino runtime, or 100 ms delay is added.
+
+The RATE pin on the HX711 board determines **10 or 80 samples/sec**. The desktop
+receives the latest reading and average in the existing 10 Hz snapshots; it is not
+a lossless recorder. One second without a conversion invalidates the reading,
+clears the averaging window, and triggers channel selection/settling on recovery.
+A stuck-low DOUT after a transfer is rejected. Saturated readings are flagged.
+The pressure plot includes the sketch's 0 and 200,000 ADC-count reference range
+and expands for values outside it. USB1 stream pause does not pause acquisition.
+
+Values are explicitly **ADC counts**, not Pa/bar: the sketch provides no pressure
+scale or offset. The sign matches its `Serial.print(-reading)`. Demo pressure is
+simulated and labeled; disconnect clears displayed measurements. Clock timing,
+input voltage compatibility, channel wiring, and actual readings must be verified
+on the board before relying on them. Protocol behavior follows the
+[AVIA HX711 datasheet](https://e2e.ti.com/cfs-file/__key/communityserver-discussions-components-files/73/HX711.pdf).

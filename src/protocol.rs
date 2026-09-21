@@ -23,11 +23,15 @@ pub struct Telemetry {
     pub records: u32,
     pub malformed: u32,
     pub samples: [Sample; TAGS.len()],
+    pub pressure: Option<crate::pressure::Reading>,
+    pub plunger: Option<(crate::plunger::Motion, Option<u16>)>,
 }
 
 impl Telemetry {
     pub const fn new() -> Self {
         Self {
+            pressure: None,
+            plunger: None,
             epoch: 0,
             vid: 0,
             pid: 0,
@@ -78,7 +82,31 @@ impl Telemetry {
                 sep = ",";
             }
         }
-        out.write_str("}}\n")
+        out.write_str("}")?;
+        if let Some((motor, pot)) = self.plunger {
+            write!(
+                out,
+                ",\"plunger\":{{\"counts\":{},\"counts_per_mm\":{},\"running\":{},\"speed\":{},\"up\":{},\"pot\":",
+                motor.position,
+                crate::plunger::COUNTS_PER_MM,
+                motor.running,
+                motor.speed,
+                motor.up
+            )?;
+            match pot {
+                Some(value) => write!(out, "{value}")?,
+                None => out.write_str("null")?,
+            }
+            out.write_str("}")?;
+        }
+        if let Some(p) = self.pressure {
+            write!(
+                out,
+                ",\"pressure\":{{\"raw\":{},\"average\":{},\"ms\":{},\"samples\":{},\"valid\":{},\"saturated\":{}}}",
+                p.raw, p.average, p.ms, p.samples, p.valid, p.saturated
+            )?;
+        }
+        out.write_str("}\n")
     }
 }
 
@@ -88,6 +116,9 @@ pub enum Command {
     Ping(u32),
     Snapshot(u32),
     Stream(u32, bool),
+    Move(u32, bool, u8, u32),
+    Stop(u32),
+    Zero(u32),
 }
 
 impl Command {
@@ -100,6 +131,21 @@ impl Command {
             return Err(());
         }
         let command = match name {
+            "PLUNGER_STOP" => Self::Stop(id),
+            "PLUNGER_ZERO" => Self::Zero(id),
+            "PLUNGER_MOVE" => {
+                let up = match words.next() {
+                    Some("U") => true,
+                    Some("D") => false,
+                    _ => return Err(()),
+                };
+                let speed = words.next().ok_or(())?.parse::<u8>().map_err(|_| ())?;
+                let um = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
+                if speed == 0 || crate::plunger::distance_counts(um).is_none() {
+                    return Err(());
+                }
+                Self::Move(id, up, speed, um)
+            }
             "HELLO" => Self::Hello(id),
             "PING" => Self::Ping(id),
             "SNAPSHOT" => Self::Snapshot(id),
@@ -205,11 +251,41 @@ mod tests {
         );
     }
     #[test]
+    fn plunger_commands_are_bounded() {
+        assert_eq!(
+            Command::parse(b"PLUNGER_MOVE 1 U 64 10"),
+            Ok(Command::Move(1, true, 64, 10))
+        );
+        assert_eq!(Command::parse(b"PLUNGER_STOP 2"), Ok(Command::Stop(2)));
+        assert_eq!(Command::parse(b"PLUNGER_ZERO 3"), Ok(Command::Zero(3)));
+        for line in [
+            "PLUNGER_MOVE 1 U 0 10",
+            "PLUNGER_MOVE 1 D 256 10",
+            "PLUNGER_MOVE 1 X 64 10",
+            "PLUNGER_MOVE 1 U 64 0",
+            "PLUNGER_MOVE 1 U 64 4294967295",
+            "PLUNGER_STOP 1 extra",
+        ] {
+            assert!(Command::parse(line.as_bytes()).is_err(), "{line}");
+        }
+    }
+    #[test]
     fn snapshots_reset_and_fit_worst_case() {
         let mut t = Telemetry::new();
         for tag in TAGS {
             t.record(tag.as_bytes(), i64::MIN, u32::MAX);
         }
+        let mut motor = crate::plunger::Motion::default();
+        motor.position = i32::MIN;
+        t.plunger = Some((motor, Some(4095)));
+        t.pressure = Some(crate::pressure::Reading {
+            raw: -8388607,
+            average: 8388608,
+            ms: u32::MAX,
+            samples: u32::MAX,
+            valid: true,
+            saturated: true,
+        });
         let mut f = Frame::new();
         t.snapshot(&mut f, u32::MAX, u32::MAX, u32::MAX).unwrap();
         let original = f.pending().to_vec();

@@ -65,7 +65,7 @@ The separate desktop Cargo.lock pins its dependencies and does not alter firmwar
 ## Architecture
 
 - `src/main.rs`: five local Tauri commands, app state, and port cleanup on exit.
-- `src/serial.rs`: native port discovery, exclusive connection ownership, read-only
+- `src/serial.rs`: native port discovery, exclusive connection ownership, bounded
   command validation, and a worker with a 20 ms read timeout. Eight queued commands,
   32 replies, 32 logs, one latest unsolicited snapshot; lines capped at 4096 bytes.
   Reply overflow closes the connection explicitly instead of dropping acknowledgments.
@@ -73,7 +73,7 @@ The separate desktop Cargo.lock pins its dependencies and does not alter firmwar
   2.5-second request timeout, and one in-flight request. IPC polling is serial and
   scheduled every 50 ms after the previous call finishes, preventing overlapping polls.
 - `ui/app.js`: local port picker, telemetry and flags, bounded Canvas history,
-  heartbeat, stale indicators, and an explicitly simulated demo.
+  heartbeat, stale indicators, an explicitly simulated demo, and wired-plunger controls.
 
 The normal app only grants access to its own commands; no filesystem, shell,
 network, or third-party Tauri plugins are exposed to the UI. CSP permits embedded
@@ -95,3 +95,13 @@ Node 22.12+ is needed for npm development and JavaScript tests. The native smoke
 opens the real desktop window, exercises native IPC/port listing and demo rendering,
 then exits with a success/failure status. It never opens a physical serial device.
 Normal launchers do not enable it.
+
+Plunger controls require firmware advertising `motion: true`. They use the
+separate 16,688 counts/mm calibration, integer travel in µm, and PWM drive 1–255.
+Stop can interrupt a pending request and closes the serial session if its reply
+fails. Zero and new moves are disabled while moving or when telemetry is stale.
+The HX711 panel shows raw ADC counts, a 16-sample average, sample age, saturation,
+and a 60-second signal plot. It uses A1/p15 DOUT and A0/p14 SCK, channel B/gain 32,
+with inverted polarity matching the supplied measurement sketch. Physical pressure
+units need calibration; no scale is assumed. Demo readings are explicitly simulated.
+Pressure collection continues independently of Xeryon enumeration or stream pause.

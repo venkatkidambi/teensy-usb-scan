@@ -59,10 +59,22 @@ pub fn validate_command(command: &str) -> bool {
     {
         return false;
     }
-    matches!(
-        parts.as_slice(),
-        ["HELLO" | "PING" | "SNAPSHOT", _] | ["STREAM", _, "0" | "1"]
-    )
+    match parts.as_slice() {
+        [
+            "HELLO" | "PING" | "SNAPSHOT" | "PLUNGER_STOP" | "PLUNGER_ZERO",
+            _,
+        ]
+        | ["STREAM", _, "0" | "1"] => true,
+        ["PLUNGER_MOVE", _, "U" | "D", speed, um] => {
+            speed.bytes().all(|b| b.is_ascii_digit())
+                && speed.parse::<u8>().is_ok_and(|s| s > 0)
+                && um.bytes().all(|b| b.is_ascii_digit())
+                && um
+                    .parse::<u32>()
+                    .is_ok_and(|d| d > 0 && (u64::from(d) * 16688 + 500) / 1000 <= i32::MAX as u64)
+        }
+        _ => false,
+    }
 }
 
 #[derive(Default)]
@@ -273,8 +285,12 @@ impl Drop for Connection {
 mod tests {
     use super::*;
     #[test]
-    fn only_read_only_requests_are_allowed() {
+    fn only_supported_requests_are_allowed() {
         for command in [
+            "PLUNGER_MOVE 1 U 64 10",
+            "PLUNGER_MOVE 2 D 255 128684302",
+            "PLUNGER_STOP 3",
+            "PLUNGER_ZERO 4",
             "HELLO 1",
             "PING 2",
             "SNAPSHOT 4294967295",
@@ -284,6 +300,13 @@ mod tests {
             assert!(validate_command(command));
         }
         for command in [
+            "PLUNGER_MOVE 1 U 0 10",
+            "PLUNGER_MOVE 1 D 256 10",
+            "PLUNGER_MOVE 1 D 64 128684303",
+            "PLUNGER_MOVE 1 X 64 10",
+            "PLUNGER_MOVE 1 U 64 0",
+            "PLUNGER_MOVE 1 U 64 -1",
+            "PLUNGER_STOP 1 extra",
             "MOVE 1",
             "DPOS=100",
             "PING 0",

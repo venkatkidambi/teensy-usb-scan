@@ -3,7 +3,11 @@
 
 use teensy4_bsp::{self as bsp, board, hal::pit::Channel};
 mod console;
+mod hx711;
 mod line;
+mod motor;
+mod plunger;
+mod pressure;
 mod protocol;
 mod usb_host;
 mod xeryon;
@@ -12,7 +16,11 @@ mod xeryon;
 fn main() -> ! {
     let board::Resources {
         pins,
+        mut gpio1,
         mut gpio2,
+        mut gpio4,
+        flexpwm4,
+        adc1,
         mut pit,
         usb,
         mut ccm,
@@ -22,6 +30,22 @@ fn main() -> ! {
         ..
     } = board::t41(board::instances());
 
+    motor::init(
+        motor::Pins {
+            pwm: pins.p2,
+            ain1: pins.p3,
+            ain2: pins.p4,
+            standby: pins.p5,
+            c1: pins.p11,
+            c2: pins.p12,
+        },
+        &mut gpio2,
+        &mut gpio4,
+        flexpwm4,
+    );
+    let mut hx711 = hx711::Hx711::new(&mut gpio1, pins.p15, pins.p14);
+    let mut pressure = pressure::Pressure::new();
+    let mut pot = motor::Pot::new(adc1, pins.p20);
     let led = board::led(&mut gpio2, pins.p13);
     led.set();
 
@@ -37,7 +61,10 @@ fn main() -> ! {
     pit.set_load_timer_value(channel, board::PERCLK_FREQUENCY / 2);
     pit.enable(channel);
     loop {
-        console.poll(usb_host::millis());
+        let now = usb_host::millis();
+        pressure.poll(now, &mut hx711);
+        pot.poll(now);
+        console.poll(now, pot.value, pressure.reading);
         usb_host::poll();
         if pit.is_elapsed(channel) {
             pit.clear_elapsed(channel);

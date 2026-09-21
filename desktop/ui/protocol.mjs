@@ -16,10 +16,20 @@ export function parseMessage(line) {
       if(!tags.has(tag)||!object(s)||!Number.isSafeInteger(s.value)||!u32(s.ms)) throw Error('Invalid sample');
       if(tag==='STAT'&&(s.value<0||s.value>0xffffff)) throw Error('Invalid STAT');
     }
+    if(m.pressure!==undefined) {
+      const p=m.pressure;
+      const counts=n=>Number.isInteger(n)&&n>=-8388607&&n<=8388608;
+      if(!object(p)||!counts(p.raw)||!counts(p.average)||!u32(p.ms)||!u32(p.samples)||typeof p.valid!=='boolean'||typeof p.saturated!=='boolean') throw Error('Invalid pressure telemetry');
+    }
+    if(m.plunger!==undefined) {
+      const p=m.plunger;
+      if(!object(p)||!Number.isInteger(p.counts)||p.counts< -2147483648||p.counts>2147483647||p.counts_per_mm!==16688||typeof p.running!=='boolean'||typeof p.up!=='boolean'||!u32(p.speed)||p.speed>255||(p.pot!==null&&(!u32(p.pot)||p.pot>4095))) throw Error('Invalid plunger telemetry');
+    }
   } else if(m.type==='hello') {
-    if(m.protocol!==1||m.board!=='Teensy 4.1'||typeof m.firmware!=='string'||m.motion!==false||m.pressure!==false) throw Error('Incompatible firmware; upload this project’s telemetry build');
+    if(m.protocol!==1||m.board!=='Teensy 4.1'||typeof m.firmware!=='string'||typeof m.motion!=='boolean'||typeof m.pressure!=='boolean') throw Error('Incompatible firmware; upload this project’s telemetry build');
   } else if(m.type==='pong') { if(!u32(m.ms)) throw Error('Invalid pong'); }
   else if(m.type==='ack') { if(typeof m.stream!=='boolean') throw Error('Invalid acknowledgement'); }
+  else if(m.type==='plunger_ack') { if(!['move','stop','zero'].includes(m.action)) throw Error('Invalid plunger acknowledgement'); }
   else if(m.type==='error') { if(typeof m.message!=='string') throw Error('Invalid error'); }
   else throw Error('Unknown message type');
   return m;
@@ -65,11 +75,14 @@ export class NativeSession {
   }
   request(command) {
     if(this.closed||this.session===null) return Promise.reject(Error('Not connected'));
+    if(command==='PLUNGER_STOP') this.rejectPending(Error('Interrupted by Stop'));
     if(this.pending) return Promise.reject(Error('Wait for the current request'));
-    if(!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1'].includes(command)) return Promise.reject(Error('Unsupported command'));
-    const [name,arg]=command.split(' ');const id=this.id=this.id===0xffffffff?1:this.id+1;
+    const move=/^PLUNGER_MOVE [UD] ([0-9]+) ([0-9]+)$/.exec(command);
+    const validMove=move&&+move[1]>0&&+move[1]<=255&&Number.isSafeInteger(+move[2])&&+move[2]>0&&Math.floor((+move[2]*16688+500)/1000)<=2147483647;
+    if(!validMove&&!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO'].includes(command)) return Promise.reject(Error('Unsupported command'));
+    const [name,...args]=command.split(' ');const arg=args.length?args.join(' '):undefined;const id=this.id=this.id===0xffffffff?1:this.id+1;
     return new Promise((resolve,reject)=>{
-      this.pending={id,resolve,reject,expected:{HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),this.timeout)};
+      this.pending={id,resolve,reject,expected:{HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack',PLUNGER_MOVE:'plunger_ack',PLUNGER_STOP:'plunger_ack',PLUNGER_ZERO:'plunger_ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),command==='PLUNGER_STOP'?500:this.timeout)};
       this.invoke('serial_send',{session:this.session,command:`${name} ${id}${arg===undefined?'':` ${arg}`}`}).catch(e=>{if(this.pending?.id===id)this.rejectPending(Error(String(e)));});
     });
   }

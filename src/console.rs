@@ -94,7 +94,37 @@ impl Console {
         }
     }
 
-    pub fn poll(&mut self, now: u32) {
+    fn snapshot(
+        &mut self,
+        id: u32,
+        now: u32,
+        pot: Option<u16>,
+        pressure: crate::pressure::Reading,
+    ) -> core::fmt::Result {
+        let mut telemetry = crate::usb_host::telemetry();
+        telemetry.pressure = Some(pressure);
+        telemetry.plunger = Some((crate::motor::snapshot(), pot));
+        telemetry.snapshot(&mut self.tx, id, now, self.skipped)
+    }
+    fn motor_reply(
+        &mut self,
+        id: u32,
+        action: &str,
+        result: Result<(), &'static str>,
+    ) -> core::fmt::Result {
+        match result {
+            Ok(()) => writeln!(
+                self.tx,
+                "{{\"type\":\"plunger_ack\",\"id\":{id},\"action\":\"{action}\"}}"
+            ),
+            Err(message) => writeln!(
+                self.tx,
+                "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
+            ),
+        }
+    }
+
+    pub fn poll(&mut self, now: u32, pot: Option<u16>, pressure: crate::pressure::Reading) {
         self.device.poll(&mut [&mut self.class]);
         let configured = self.device.state() == UsbDeviceState::Configured;
         if configured && !self.configured {
@@ -102,6 +132,9 @@ impl Console {
         }
         self.configured = configured;
         let open = configured && self.class.dtr();
+        if self.open && !open {
+            crate::motor::stop();
+        }
         if !open || !self.open {
             self.commands = Commands::new();
             self.rx_len = 0;
@@ -124,6 +157,7 @@ impl Console {
                 Err(_) => {
                     self.tx.clear();
                     self.open = false;
+                    crate::motor::stop();
                     return;
                 }
             }
@@ -146,17 +180,30 @@ impl Console {
             let byte = self.rx[self.rx_pos];
             self.rx_pos += 1;
             if let Some(command) = self.commands.push(byte) {
+                if command.is_ok() {
+                    crate::motor::heartbeat(now);
+                }
                 let result = match command {
                     Ok(Command::Hello(id)) => writeln!(
                         self.tx,
-                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":false,\"pressure\":false}}",
+                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"pressure\":true}}",
                         env!("CARGO_PKG_VERSION")
                     ),
                     Ok(Command::Ping(id)) => {
                         writeln!(self.tx, "{{\"type\":\"pong\",\"id\":{id},\"ms\":{now}}}")
                     }
-                    Ok(Command::Snapshot(id)) => {
-                        crate::usb_host::telemetry().snapshot(&mut self.tx, id, now, self.skipped)
+                    Ok(Command::Snapshot(id)) => self.snapshot(id, now, pot, pressure),
+                    Ok(Command::Move(id, up, speed, um)) => {
+                        let result = crate::motor::command(up, speed, um, now);
+                        self.motor_reply(id, "move", result)
+                    }
+                    Ok(Command::Stop(id)) => {
+                        crate::motor::stop();
+                        self.motor_reply(id, "stop", Ok(()))
+                    }
+                    Ok(Command::Zero(id)) => {
+                        let result = crate::motor::zero();
+                        self.motor_reply(id, "zero", result)
                     }
                     Ok(Command::Stream(id, on)) => {
                         self.streaming = on;
@@ -174,10 +221,7 @@ impl Console {
         }
         if due {
             self.last_snapshot = now;
-            if crate::usb_host::telemetry()
-                .snapshot(&mut self.tx, 0, now, self.skipped)
-                .is_err()
-            {
+            if self.snapshot(0, now, pot, pressure).is_err() {
                 self.tx.clear();
             }
         } else {

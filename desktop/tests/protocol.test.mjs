@@ -46,3 +46,32 @@ test('unplug invalidates pending request',async()=>{
   let lost;const b=backend(false),s=new NativeSession(async(name,args)=>name==='serial_poll'?{session:7,messages:[],closed:true,error:'unplugged',coalesced:0}:b.invoke(name,args),()=>{},e=>{lost=e.message;},assert.fail);
   await s.open('COM6');await new Promise(resolve=>setTimeout(resolve,1));assert.equal(lost,'unplugged');await s.close();
 });
+
+test('plunger schema, move framing and Stop preemption',async()=>{
+  assert.equal(parseMessage(JSON.stringify({type:'hello',id:1,protocol:1,board:'Teensy 4.1',firmware:'test',motion:true,pressure:false})).motion,true);
+  const m={type:'snapshot',id:0,ms:100,epoch:1,vid:0,pid:0,mounted:false,cdc:0,records:0,malformed:0,skipped:0,values:{},plunger:{counts:-16688,counts_per_mm:16688,running:false,speed:0,up:true,pot:4095}};
+  assert.equal(parseMessage(JSON.stringify(m)).plunger.counts,-16688);
+  m.plunger.pot=4096;assert.throws(()=>parseMessage(JSON.stringify(m)));
+  const b=backend(false),s=new NativeSession(b.invoke,()=>{},assert.fail,assert.fail,500);
+  await s.open('COM6');
+  try {
+  for(const command of ['PLUNGER_MOVE U 0 1','PLUNGER_MOVE U 256 1','PLUNGER_MOVE U 1 0','PLUNGER_MOVE U 1 128684303','PLUNGER_MOVE X 1 1'])await assert.rejects(s.request(command),/Unsupported/);
+  const moving=s.request('PLUNGER_MOVE U 64 10');
+  const interrupted=assert.rejects(moving,/Interrupted by Stop/);
+  const stopping=s.request('PLUNGER_STOP');
+  const closed=assert.rejects(stopping,/Connection closed/);
+  assert.deepEqual(b.sent,['PLUNGER_MOVE 1 U 64 10','PLUNGER_STOP 2']);
+  await s.close();await interrupted;await closed;
+  } finally { await s.close(); }
+});
+
+test('HX711 pressure schema preserves inverted signed range and freshness',()=>{
+  const m={type:'snapshot',id:0,ms:100,epoch:1,vid:0,pid:0,mounted:false,cdc:0,records:0,malformed:0,skipped:0,values:{},pressure:{raw:8388608,average:-8388607,ms:99,samples:1,valid:true,saturated:true}};
+  assert.deepEqual(parseMessage(JSON.stringify(m)).pressure,m.pressure);
+  m.pressure.valid=false;assert.equal(parseMessage(JSON.stringify(m)).pressure.valid,false);
+  for(const [key,value] of [['raw',8388609],['raw',-8388608],['average',1.5],['ms',-1],['samples',-1],['valid',1],['saturated','yes']]){
+    const bad={...m,pressure:{...m.pressure,[key]:value}};
+    assert.throws(()=>parseMessage(JSON.stringify(bad)),/pressure/);
+  }
+  delete m.pressure;assert.doesNotThrow(()=>parseMessage(JSON.stringify(m)));
+});

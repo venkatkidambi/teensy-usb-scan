@@ -22,10 +22,12 @@ pub const SCRIPT: &str = r#"
     if(!document.querySelector('#connection').textContent.includes('Demo'))throw Error('Demo UI did not start');
     if(!document.querySelector('#flags').textContent.includes('Motor on'))throw Error('Status flags did not render');
     if(document.querySelector('#epos').textContent==='—')throw Error('Telemetry did not render');
+    for(const id of ['plunger-up','plunger-down','plunger-zero','plunger-stop'])if(!document.getElementById(id).disabled)throw Error('Demo enabled physical plunger controls');
+    if(document.querySelector('#pressure-raw').textContent==='—')throw Error('Pressure demo did not render');
     if(document.documentElement.scrollWidth>innerWidth)throw Error('Layout overflows window');
     document.querySelector('#connect').click();
     await new Promise(r=>setTimeout(r,100));
-    if(document.querySelector('#epos').textContent!=='—')throw Error('Disconnect failed to clear data');
+    if(document.querySelector('#epos').textContent!=='—'||document.querySelector('#pressure-raw').textContent!=='—')throw Error('Disconnect failed to clear data');
     await invoke('smoke_report',{result:{ok:true,ports:ports.length,nativeIPC:true,demo:true,disconnect:true}});
   }catch(e){await window.__TAURI__.core.invoke('smoke_report',{result:{ok:false,error:String(e)}});}
 })();
