@@ -7,6 +7,8 @@ use core::{
 use cortex_m::peripheral::{NVIC, SYST, syst::SystClkSource};
 use teensy4_bsp::{board, hal, ral};
 
+static AUTONOMOUS: AtomicBool = AtomicBool::new(false);
+
 static MILLIS: AtomicU32 = AtomicU32::new(0);
 static ATTACHES: AtomicU32 = AtomicU32::new(0);
 static REMOVES: AtomicU32 = AtomicU32::new(0);
@@ -79,7 +81,7 @@ pub fn stop_xeryon() -> Result<(), &'static str> {
 
 pub fn disconnect_xeryon() {
     let active = cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow().state == 1);
-    if active {
+    if active && !AUTONOMOUS.load(Ordering::Relaxed) {
         let _ = stop_xeryon();
     }
 }
@@ -91,6 +93,7 @@ fn reset_telemetry() {
 }
 
 unsafe extern "C" {
+    fn usb_serial_tx_empty() -> bool;
     fn usb_serial_send(data: *const u8, len: u32, stop: bool) -> bool;
     fn scanner_init() -> bool;
     fn scanner_task();
@@ -177,7 +180,14 @@ pub fn poll() {
     // SAFETY: host task is called only from the single main-loop context.
     unsafe { scanner_task() };
     let t = telemetry();
-    let stop = cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().poll(&t, millis()));
+    let stop = cortex_m::interrupt::free(|cs| {
+        let mut motion = MOTION.borrow(cs).borrow_mut();
+        if AUTONOMOUS.load(Ordering::Relaxed) {
+            motion.poll_policy(&t, millis(), true)
+        } else {
+            motion.poll(&t, millis())
+        }
+    });
     if stop {
         let reason = cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow().interruption_reason);
         let result = stop_xeryon();
@@ -187,6 +197,56 @@ pub fn poll() {
             reason.unwrap_or("unknown reason"),
             result.is_ok()
         );
+    }
+}
+
+pub fn autonomous(on: bool) {
+    AUTONOMOUS.store(on, Ordering::Relaxed);
+}
+
+pub struct ExperimentActuator;
+impl crate::experiment::Actuator for ExperimentActuator {
+    fn target(&mut self, target: i32, now: u32, track: bool) -> Result<(), &'static str> {
+        // SAFETY: foreground-only query into the existing C transport. Fault
+        // instead of growing a backlog of trajectory targets during USB stalls.
+        if !unsafe { usb_serial_tx_empty() } {
+            return Err("Xeryon transmit backlog");
+        }
+        // Bounded integer encoding avoids core::fmt in the waveform path.
+        let mut bytes = [0u8; 20];
+        bytes[..5].copy_from_slice(b"DPOS=");
+        let mut end = 5;
+        if target < 0 {
+            bytes[end] = b'-';
+            end += 1;
+        }
+        let mut digits = [0u8; 10];
+        let mut n = target.unsigned_abs();
+        let mut pos = digits.len();
+        loop {
+            pos -= 1;
+            digits[pos] = b'0' + (n % 10) as u8;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        let count = digits.len() - pos;
+        bytes[end..end + count].copy_from_slice(&digits[pos..]);
+        end += count;
+        bytes[end] = b'\n';
+        end += 1;
+        // SAFETY: foreground only; C copies this complete short line.
+        if !unsafe { usb_serial_send(bytes.as_ptr(), end as u32, false) } {
+            return Err("Xeryon target transmit unavailable");
+        }
+        if track {
+            cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().start(target, now));
+        }
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), &'static str> {
+        stop_xeryon()
     }
 }
 

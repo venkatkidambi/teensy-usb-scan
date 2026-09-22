@@ -3,6 +3,8 @@
 
 use teensy4_bsp::{self as bsp, board, hal::pit::Channel};
 mod console;
+mod experiment;
+mod experiment_data;
 mod line;
 mod motor;
 mod plunger;
@@ -64,6 +66,12 @@ fn main() -> ! {
 
     let mut core = cortex_m::Peripherals::take().unwrap();
     usb_host::start_tick(&mut core.SYST);
+    // Zero-initialized DTCM (.bss), never materialized as a large stack value.
+    // SAFETY: entry runs once; the foreground engine exclusively owns this array.
+    static mut EXPERIMENT_SAMPLES: [experiment_data::Record; experiment_data::CAPACITY] =
+        [experiment_data::Record::EMPTY; experiment_data::CAPACITY];
+    let samples = unsafe { &mut *core::ptr::addr_of_mut!(EXPERIMENT_SAMPLES) };
+    let mut experiment = experiment::Engine::new(samples);
     let mut console = console::Console::new(usb);
     usb_host::init(&mut ccm, &mut ccm_analog, &mut gpio3, &mut iomuxc_gpr);
     log::info!("Teensy USB2 host scanner ready; connect one device to the host header");
@@ -77,14 +85,25 @@ fn main() -> ! {
         let now = usb_host::millis();
         pressure.poll(now, &mut pressure_bus);
         pot.poll(now);
-        console.poll(now, pot.value, pressure.reading);
         usb_host::poll();
+        experiment.poll(
+            usb_host::millis(),
+            &usb_host::telemetry(),
+            pressure.reading,
+            &mut usb_host::ExperimentActuator,
+        );
+        console.poll(
+            usb_host::millis(),
+            pot.value,
+            pressure.reading,
+            &mut experiment,
+        );
         if pit.is_elapsed(channel) {
             pit.clear_elapsed(channel);
             led.toggle();
         }
         let now = usb_host::millis();
-        if now.wrapping_sub(last_report) >= 5_000 {
+        if !experiment.owns_hardware() && now.wrapping_sub(last_report) >= 5_000 {
             last_report = now;
             log::info!("Scanner alive ({} ms); current device:", now);
             usb_host::report();

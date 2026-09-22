@@ -56,6 +56,7 @@ export function parseMessage(line) {
     }
   } else if(m.type==='hello') {
     if(m.protocol!==1||m.board!=='Teensy 4.1'||typeof m.firmware!=='string'||typeof m.motion!=='boolean'||typeof m.pressure!=='boolean') throw Error('Incompatible firmware; upload this project’s telemetry build');
+    if(m.experiments!==undefined&&typeof m.experiments!=='boolean')throw Error('Invalid experiment capability');
     if(m.xeryon_speed!==undefined&&typeof m.xeryon_speed!=='boolean') throw Error('Invalid Xeryon speed capability');
     if(m.xeryon_optional_speed!==undefined&&typeof m.xeryon_optional_speed!=='boolean') throw Error('Invalid Xeryon optional speed capability');
     if(m.xeryon!==undefined&&typeof m.xeryon!=='boolean') throw Error('Invalid Xeryon capability');
@@ -63,6 +64,8 @@ export function parseMessage(line) {
   else if(m.type==='ack') { if(typeof m.stream!=='boolean') throw Error('Invalid acknowledgement'); }
   else if(m.type==='xeryon_ack') { if(!['move','stop'].includes(m.action)||(m.action==='move'&&!xeryonPosition(m.target))) throw Error('Invalid Xeryon acknowledgement'); }
   else if(m.type==='plunger_ack') { if(!['move','stop','zero'].includes(m.action)) throw Error('Invalid plunger acknowledgement'); }
+  else if(m.type==='experiment_state') { if(!['dashboard','running','data_ready'].includes(m.state)||!u32(m.run)) throw Error('Invalid experiment state'); }
+  else if(m.type==='experiment_ack') { if(!['start','abort','data_received'].includes(m.action)||!u32(m.run)) throw Error('Invalid experiment acknowledgement'); }
   else if(m.type==='error') { if(typeof m.message!=='string') throw Error('Invalid error'); }
   else throw Error('Unknown message type');
   return m;
@@ -72,7 +75,7 @@ export function parseMessage(line) {
 export class NativeSession {
   constructor(invoke,onMessage,onLost,onError,timeout=2500) {
     Object.assign(this,{invoke,onMessage,onLost,onError,timeout});
-    this.id=0;this.session=null;this.pending=null;this.closed=false;this.coalesced=0;
+    this.startupSeen=false;this.experimentOwned=false;this.id=0;this.session=null;this.pending=null;this.closed=false;this.coalesced=0;
   }
   async open(port) {
     this.session=await this.invoke('serial_connect',{port});
@@ -84,9 +87,14 @@ export class NativeSession {
       const batch=await this.invoke('serial_poll',{session:this.session});
       if(this.closed||batch.session!==this.session) return;
       this.coalesced=batch.coalesced;
+      if(typeof batch.experiment_owned==='boolean') this.experimentOwned=batch.experiment_owned;
       for(const line of batch.messages) {
         try {
           const m=parseMessage(line);
+          if(m.type==='experiment_state'||m.type==='snapshot')this.startupSeen=true;
+          if(m.type==='experiment_state') this.experimentOwned=m.state!=='dashboard';
+          if(m.type==='experiment_ack'&&m.action==='start') this.experimentOwned=true;
+          if(m.type==='experiment_ack'&&m.action==='data_received') this.experimentOwned=false;
           if(this.pending&&(m.id===this.pending.id||m.type==='error'&&m.id===0)) {
             const p=this.pending;this.pending=null;clearTimeout(p.timer);
             if(m.type==='error') p.reject(Error(m.message));
@@ -96,6 +104,7 @@ export class NativeSession {
           this.onMessage(m);
         } catch(e) { this.onError(e); }
       }
+      if(batch.dataset) this.onMessage({type:'experiment_dataset',dataset:batch.dataset});
       if(batch.closed||batch.error) throw Error(batch.error||'Serial device disconnected');
       this.timer=setTimeout(()=>this.poll(),50);
     } catch(e) {
@@ -108,17 +117,41 @@ export class NativeSession {
   }
   request(command) {
     if(this.closed||this.session===null) return Promise.reject(Error('Not connected'));
-    if(command==='PLUNGER_STOP'||command==='XERYON_STOP') this.rejectPending(Error('Interrupted by Stop'));
+    if(this.experimentOwned&&command!=='ABORT') return Promise.reject(Error('Experiment owns hardware; only ABORT is allowed'));
+    if(command==='ABORT'||command==='PLUNGER_STOP'||command==='XERYON_STOP') this.rejectPending(Error('Interrupted by Stop'));
     if(this.pending) return Promise.reject(Error('Wait for the current request'));
     const move=/^PLUNGER_MOVE [UD] ([0-9]+) ([0-9]+)$/.exec(command);
     const validMove=move&&+move[1]>0&&+move[1]<=255&&Number.isSafeInteger(+move[2])&&+move[2]>0&&Math.floor((+move[2]*16688+500)/1000)<=2147483647;
     const xeryonMove=/^XERYON_MOVE [UD] ([0-9]+)(?: ([0-9]+))?$/.exec(command);
     const validXeryon=xeryonMove&&Number.isSafeInteger(+xeryonMove[1])&&+xeryonMove[1]>=78&&+xeryonMove[1]<=2617245618&&(xeryonMove[2]===undefined||Number.isInteger(+xeryonMove[2])&&+xeryonMove[2]>=1&&+xeryonMove[2]<=16777215);
-    if(!validMove&&!validXeryon&&!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP'].includes(command)) return Promise.reject(Error('Unsupported command'));
-    const [name,...args]=command.split(' ');const arg=args.length?args.join(' '):undefined;const id=this.id=this.id===0xffffffff?1:this.id+1;
+    if(!validMove&&!validXeryon&&!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP','ABORT'].includes(command)) return Promise.reject(Error('Unsupported command'));
+    const [name,...args]=command.split(' ');const arg=args.length?args.join(' '):undefined;const id=this.id=this.id===0xefffffff?1:this.id+1;
     return new Promise((resolve,reject)=>{
-      this.pending={id,resolve,reject,expected:{XERYON_MOVE:'xeryon_ack',XERYON_STOP:'xeryon_ack',HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack',PLUNGER_MOVE:'plunger_ack',PLUNGER_STOP:'plunger_ack',PLUNGER_ZERO:'plunger_ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),(command==='PLUNGER_STOP'||command==='XERYON_STOP')?500:this.timeout)};
-      this.invoke('serial_send',{session:this.session,command:`${name} ${id}${arg===undefined?'':` ${arg}`}`}).catch(e=>{if(this.pending?.id===id)this.rejectPending(Error(String(e)));});
+      this.pending={id,resolve,reject,expected:{ABORT:'experiment_ack',XERYON_MOVE:'xeryon_ack',XERYON_STOP:'xeryon_ack',HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack',PLUNGER_MOVE:'plunger_ack',PLUNGER_STOP:'plunger_ack',PLUNGER_ZERO:'plunger_ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),(command==='ABORT'||command==='PLUNGER_STOP'||command==='XERYON_STOP')?500:this.timeout)};
+      const send=()=>this.invoke('serial_send',{session:this.session,command:`${name} ${id}${arg===undefined?'':` ${arg}`}`});
+      // Preserve native queue order if ABORT preempts an in-flight START IPC.
+      const sending=command==='ABORT'&&this.startSubmission?this.startSubmission.then(send,send):send();
+      sending.catch(e=>{if(this.pending?.id===id)this.rejectPending(Error(String(e)));});
+    });
+  }
+  async waitForStartup() {
+    const end=Date.now()+this.timeout;
+    while(!this.startupSeen&&!this.closed&&Date.now()<end)await new Promise(resolve=>setTimeout(resolve,20));
+    if(!this.startupSeen)throw Error('No startup state received; reconnect to recover safely');
+  }
+  startExperiment(config) {
+    if(this.closed||this.session===null||this.pending||this.experimentOwned) return Promise.reject(Error('Experiment or request already active'));
+    const id=this.id=this.id===0xefffffff?1:this.id+1;
+    this.experimentOwned=true;
+    return new Promise((resolve,reject)=>{
+      this.pending={id,resolve,reject,expected:'experiment_ack',timer:setTimeout(()=>this.rejectPending(Error('START timed out; reconnect to recover state or send ABORT')),this.timeout)};
+      const submission=this.invoke('experiment_start',{session:this.session,id,config});
+      this.startSubmission=submission;
+      submission.then(()=>{if(this.startSubmission===submission)this.startSubmission=null;},e=>{
+        if(this.startSubmission===submission)this.startSubmission=null;
+        this.experimentOwned=false;
+        if(this.pending?.id===id)this.rejectPending(Error(String(e)));
+      });
     });
   }
   async close() {

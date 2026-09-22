@@ -1,10 +1,15 @@
 # PC ↔ Teensy protocol v1
 
+Firmware 0.2.0 adds `experiments: true`, START/ABORT and a retained binary dataset
+extension. See [EXPERIMENTS.md — Dataset protocol](../EXPERIMENTS.md#dataset-protocol)
+for framing, raw record layout, CRC, ownership, passive reconnect and ACK lifecycle.
+All Dashboard commands below remain available when no experiment owns hardware.
+
 USB1: CDC ACM `5824:27dd`, 115200 8-N-1, no flow control, DTR asserted.
 Baud rate is a CDC setting, not USB throughput. The desktop opens the port natively.
 The actuator is on separate USB2 (`04d8:ef4a`).
 
-Requests are ASCII lines terminated by LF, maximum 64 bytes before LF. CRLF also
+Requests are ASCII lines terminated by LF, maximum 128 bytes before LF (64 on firmware before 0.2.0). CRLF also
 works. Each request uses a nonzero u32 ID; only one request is in flight at a time.
 
 | Request | Response | Effect |

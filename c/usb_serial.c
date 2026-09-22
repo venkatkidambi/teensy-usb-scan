@@ -13,6 +13,12 @@ static bool busy;
 static uint32_t started;
 static uintptr_t generation;
 
+// Foreground-only readiness query for bounded autonomous setpoint scheduling.
+// One packet may be in flight, but no older target may wait in the software FIFO.
+bool usb_serial_tx_empty(void) {
+  return state == READY && tuh_cdc_write_available(cdc_index) == CFG_TUH_CDC_TX_BUFSIZE;
+}
+
 // Enqueue a complete short command, never a partial command or a blocking write.
 // Stop discards queued bytes; an already submitted USB packet cannot be recalled.
 bool usb_serial_send(const uint8_t *data, uint32_t len, bool stop) {

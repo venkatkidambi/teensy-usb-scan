@@ -153,6 +153,11 @@ impl Telemetry {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
+    Start(u32, crate::experiment_data::ExperimentConfig),
+    Abort(u32),
+    GetData(u32, u32),
+    GetChunk(u32, u32, u32),
+    AckData(u32, u32, u32, u32),
     Hello(u32),
     Ping(u32),
     Snapshot(u32),
@@ -165,7 +170,25 @@ pub enum Command {
 }
 
 impl Command {
-    fn parse(line: &[u8]) -> Result<Self, ()> {
+    pub fn id(&self) -> u32 {
+        match *self {
+            Self::Start(id, _)
+            | Self::Abort(id)
+            | Self::GetData(id, _)
+            | Self::GetChunk(id, _, _)
+            | Self::AckData(id, _, _, _)
+            | Self::Hello(id)
+            | Self::Ping(id)
+            | Self::Snapshot(id)
+            | Self::Stream(id, _)
+            | Self::Move(id, _, _, _)
+            | Self::Stop(id)
+            | Self::Zero(id)
+            | Self::XeryonMove(id, _, _, _)
+            | Self::XeryonStop(id) => id,
+        }
+    }
+    pub fn parse(line: &[u8]) -> Result<Self, ()> {
         let text = core::str::from_utf8(line).map_err(|_| ())?;
         let mut words = text.split_ascii_whitespace();
         let name = words.next().ok_or(())?;
@@ -174,6 +197,45 @@ impl Command {
             return Err(());
         }
         let command = match name {
+            "START" => {
+                use crate::experiment_data::ExperimentConfig;
+                let kind = words.next().ok_or(())?;
+                let start = words.next().ok_or(())?.parse::<i64>().map_err(|_| ())?;
+                let increment = words.next().ok_or(())?.parse::<i64>().map_err(|_| ())?;
+                let timing = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
+                let repeats = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
+                Self::Start(
+                    id,
+                    match kind {
+                        "Q" => ExperimentConfig::QuasiStatic {
+                            start_nm: start,
+                            step_nm: increment,
+                            hold_ms: timing,
+                            steps: repeats,
+                        },
+                        "S" => ExperimentConfig::Sinusoidal {
+                            center_nm: start,
+                            amplitude_nm: u32::try_from(increment).map_err(|_| ())?,
+                            frequency_mhz: timing,
+                            cycles: repeats,
+                        },
+                        _ => return Err(()),
+                    },
+                )
+            }
+            "ABORT" => Self::Abort(id),
+            "GET_DATA" => Self::GetData(id, words.next().ok_or(())?.parse().map_err(|_| ())?),
+            "GET_CHUNK" => Self::GetChunk(
+                id,
+                words.next().ok_or(())?.parse().map_err(|_| ())?,
+                words.next().ok_or(())?.parse().map_err(|_| ())?,
+            ),
+            "ACK_DATA_RECEIVED" => Self::AckData(
+                id,
+                words.next().ok_or(())?.parse().map_err(|_| ())?,
+                words.next().ok_or(())?.parse().map_err(|_| ())?,
+                words.next().ok_or(())?.parse().map_err(|_| ())?,
+            ),
             "XERYON_STOP" => Self::XeryonStop(id),
             "XERYON_MOVE" => {
                 let up = match words.next() {
@@ -232,7 +294,7 @@ impl Command {
     }
 }
 
-pub struct Commands(LineBuffer<64>);
+pub struct Commands(LineBuffer<128>);
 impl Commands {
     pub const fn new() -> Self {
         Self(LineBuffer::new())
@@ -290,6 +352,30 @@ impl Write for Frame {
 mod tests {
     use super::*;
     #[test]
+    fn experiment_commands_keep_ids_and_reject_extra_arguments() {
+        for text in [
+            "START 7 Q -1234 78 500 2",
+            "START 7 S 0 780 1000 1",
+            "ABORT 7",
+            "GET_DATA 7 1",
+            "GET_CHUNK 7 1 0",
+            "ACK_DATA_RECEIVED 7 1 21 12345678",
+        ] {
+            let command = Command::parse(text.as_bytes()).unwrap();
+            assert_eq!(command.id(), 7);
+            assert!(Command::parse(format!("{text} extra").as_bytes()).is_err());
+        }
+        for text in [
+            "START 1 X 0 78 500 2",
+            "START 1 S 0 -78 500 2",
+            "START 0 Q 0 78 500 2",
+            "GET_CHUNK 7 1 -1",
+            "ACK_DATA_RECEIVED 7 1 21 -1",
+        ] {
+            assert!(Command::parse(text.as_bytes()).is_err());
+        }
+    }
+    #[test]
     fn commands_reject_motion_and_recover() {
         let mut parser = Commands::new();
         for b in b"PING " {
@@ -307,7 +393,7 @@ mod tests {
         ] {
             assert!(Command::parse(bad.as_bytes()).is_err());
         }
-        for _ in 0..100 {
+        for _ in 0..200 {
             parser.push(b'x');
         }
         assert_eq!(parser.push(b'\n'), Some(Err(())));

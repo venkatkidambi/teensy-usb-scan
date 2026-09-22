@@ -1,5 +1,12 @@
 # Teensy 4.1 USB host scanner
 
+Firmware/desktop **0.2.0** add autonomous Quasi-static and Sinusoidal experiment
+modes alongside the existing Dashboard. The Teensy owns timing, motion and a
+fixed 160 KiB dataset buffer; native desktop Rust downloads/verifies results and
+builds optional CSV exports. See [EXPERIMENTS.md](EXPERIMENTS.md) for the state
+machine, limits, waveform strategy, safety policy, protocol, and hardware acceptance
+procedure. PC disconnect does not stop an autonomous run if the Teensy stays powered.
+
 Bare-metal Rust (`no_std`, `no_main`) plus the TinyUSB 0.21.0 C host stack.
 Cargo builds everything; no Arduino, PlatformIO, or operating system is used.
 The Rust `teensy4-bsp` supplies startup, clocks, pins, and the linker script.

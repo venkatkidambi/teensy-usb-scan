@@ -45,6 +45,9 @@ pub struct Console {
     rx_len: usize,
     rx_pos: usize,
     tx: Frame,
+    announce: bool,
+    notified: bool,
+    urgent: Option<(u32, bool)>,
 }
 
 impl Console {
@@ -91,6 +94,9 @@ impl Console {
             rx_len: 0,
             rx_pos: 0,
             tx: Frame::new(),
+            announce: true,
+            notified: false,
+            urgent: None,
         }
     }
 
@@ -125,7 +131,13 @@ impl Console {
         }
     }
 
-    pub fn poll(&mut self, now: u32, pot: Option<u16>, pressure: crate::pressure::Reading) {
+    pub fn poll(
+        &mut self,
+        now: u32,
+        pot: Option<u16>,
+        pressure: crate::pressure::Reading,
+        experiment: &mut crate::experiment::Engine<'_>,
+    ) {
         self.device.poll(&mut [&mut self.class]);
         let configured = self.device.state() == UsbDeviceState::Configured;
         if configured && !self.configured {
@@ -138,6 +150,9 @@ impl Console {
             crate::usb_host::disconnect_xeryon();
         }
         if !open || !self.open {
+            self.announce = true;
+            self.notified = false;
+            self.urgent = None;
             self.commands = Commands::new();
             self.rx_len = 0;
             self.rx_pos = 0;
@@ -150,7 +165,32 @@ impl Console {
             return;
         }
 
-        let due = self.streaming && now.wrapping_sub(self.last_snapshot) >= 100;
+        // ABORT reception must not depend on USB1 IN backpressure. Even a stalled
+        // START reply cannot prevent a STOP request reaching the actuator.
+        if experiment.active() {
+            if self.rx_pos == self.rx_len {
+                self.rx_pos = 0;
+                self.rx_len = self.class.read_packet(&mut self.rx).unwrap_or(0);
+            }
+            while self.rx_pos < self.rx_len {
+                let byte = self.rx[self.rx_pos];
+                self.rx_pos += 1;
+                if let Some(command) = self.commands.push(byte) {
+                    let abort = matches!(command, Ok(Command::Abort(_)));
+                    let id = command.as_ref().map(|c| c.id()).unwrap_or(0);
+                    if abort {
+                        crate::motor::stop();
+                        experiment.abort(&mut crate::usb_host::ExperimentActuator);
+                        self.urgent = Some((id, true));
+                    } else if !self.urgent.is_some_and(|(_, abort)| abort) {
+                        self.urgent = Some((id, false));
+                    }
+                }
+            }
+        }
+        let due = !experiment.owns_hardware()
+            && self.streaming
+            && now.wrapping_sub(self.last_snapshot) >= 100;
         if !self.tx.pending().is_empty() {
             let packet = &self.tx.pending()[..self.tx.pending().len().min(512)];
             match self.class.write_packet(packet) {
@@ -173,6 +213,38 @@ impl Console {
             }
         }
 
+        if let Some((id, abort)) = self.urgent.take() {
+            if abort {
+                let _ = writeln!(
+                    self.tx,
+                    "{{\"type\":\"experiment_ack\",\"id\":{id},\"run\":{},\"action\":\"abort\"}}",
+                    experiment.run
+                );
+            } else {
+                let _ = writeln!(
+                    self.tx,
+                    "{{\"type\":\"error\",\"id\":{id},\"message\":\"Experiment busy; only ABORT is allowed\"}}"
+                );
+            }
+            return;
+        }
+        if self.announce || (experiment.data_ready() && !self.notified) {
+            self.announce = false;
+            self.notified = experiment.data_ready();
+            let state = if experiment.active() {
+                "running"
+            } else if experiment.data_ready() {
+                "data_ready"
+            } else {
+                "dashboard"
+            };
+            let _ = writeln!(
+                self.tx,
+                "{{\"type\":\"experiment_state\",\"id\":0,\"state\":\"{state}\",\"run\":{}}}",
+                experiment.run
+            );
+            return;
+        }
         // At most one USB OUT packet and one command per poll. Retain surplus
         // commands until their predecessor's response has left the TX buffer.
         if self.rx_pos == self.rx_len {
@@ -183,14 +255,112 @@ impl Console {
             let byte = self.rx[self.rx_pos];
             self.rx_pos += 1;
             if let Some(command) = self.commands.push(byte) {
-                if command.is_ok() {
+                if experiment.owns_hardware()
+                    && !matches!(
+                        command,
+                        Ok(Command::Abort(_)
+                            | Command::GetData(_, _)
+                            | Command::GetChunk(_, _, _)
+                            | Command::AckData(_, _, _, _))
+                    )
+                {
+                    let id = command.as_ref().map(|c| c.id()).unwrap_or(0);
+                    let _ = writeln!(
+                        self.tx,
+                        "{{\"type\":\"error\",\"id\":{id},\"message\":\"Experiment busy; retained data must be acknowledged\"}}"
+                    );
+                    return;
+                }
+                if command.is_ok() && !experiment.owns_hardware() {
                     crate::motor::heartbeat(now);
                     crate::usb_host::heartbeat(now);
                 }
                 let result = match command {
+                    Ok(Command::Start(id, config)) => {
+                        let result = experiment.accept(
+                            config,
+                            &crate::usb_host::telemetry(),
+                            pressure,
+                            crate::motor::snapshot().running,
+                            now,
+                        );
+                        match result {
+                            Ok(()) => {
+                                self.notified = false;
+                                crate::usb_host::autonomous(true);
+                                log::set_max_level(log::LevelFilter::Off);
+                                interrupt::free(|cs| DIAGNOSTIC.borrow(cs).borrow_mut().clear());
+                                experiment.begin(now, &mut crate::usb_host::ExperimentActuator);
+                                writeln!(
+                                    self.tx,
+                                    "{{\"type\":\"experiment_ack\",\"id\":{id},\"run\":{},\"action\":\"start\"}}",
+                                    experiment.run
+                                )
+                            }
+                            Err(message) => writeln!(
+                                self.tx,
+                                "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
+                            ),
+                        }
+                    }
+                    Ok(Command::Abort(id)) => {
+                        crate::motor::stop();
+                        experiment.abort(&mut crate::usb_host::ExperimentActuator);
+                        writeln!(
+                            self.tx,
+                            "{{\"type\":\"experiment_ack\",\"id\":{id},\"run\":{},\"action\":\"abort\"}}",
+                            experiment.run
+                        )
+                    }
+                    Ok(Command::GetData(id, run)) => match experiment.transfer(run) {
+                        Ok(()) => experiment.metadata(&mut self.tx, id),
+                        Err(message) => writeln!(
+                            self.tx,
+                            "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
+                        ),
+                    },
+                    Ok(Command::GetChunk(id, run, offset)) => {
+                        match experiment.chunk(run, offset as usize) {
+                            Ok(records) => {
+                                let bytes = records.len() * crate::experiment_data::RECORD_BYTES;
+                                let header = writeln!(
+                                    self.tx,
+                                    "{{\"type\":\"data_chunk\",\"id\":{id},\"run\":{run},\"offset\":{offset},\"bytes\":{bytes}}}"
+                                );
+                                for record in records {
+                                    let bytes = record.encode();
+                                    let end = self.tx.len + bytes.len();
+                                    self.tx.bytes[self.tx.len..end].copy_from_slice(&bytes);
+                                    self.tx.len = end;
+                                }
+                                header
+                            }
+                            Err(message) => writeln!(
+                                self.tx,
+                                "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
+                            ),
+                        }
+                    }
+                    Ok(Command::AckData(id, run, count, crc)) => {
+                        match experiment.acknowledge(run, count as usize, crc) {
+                            Ok(()) => {
+                                crate::usb_host::autonomous(false);
+                                log::set_max_level(log::LevelFilter::Info);
+                                self.notified = false;
+                                writeln!(
+                                    self.tx,
+                                    "{{\"type\":\"experiment_ack\",\"id\":{id},\"run\":{run},\"action\":\"data_received\"}}"
+                                )
+                            }
+                            Err(message) => writeln!(
+                                self.tx,
+                                "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
+                            ),
+                        }
+                    }
                     Ok(Command::Hello(id)) => writeln!(
                         self.tx,
-                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true}}",
+                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true}}",
                         env!("CARGO_PKG_VERSION")
                     ),
                     Ok(Command::Ping(id)) => {
@@ -250,7 +420,7 @@ impl Console {
             if self.snapshot(0, now, pot, pressure).is_err() {
                 self.tx.clear();
             }
-        } else {
+        } else if !experiment.owns_hardware() {
             interrupt::free(|cs| {
                 core::mem::swap(&mut self.tx, &mut *DIAGNOSTIC.borrow(cs).borrow_mut())
             });

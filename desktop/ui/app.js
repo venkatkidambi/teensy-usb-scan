@@ -1,3 +1,4 @@
+import {setupExperiments,experimentControls,experimentMessage} from './experiment.js';
 import {NativeSession,statusFlags,elapsed,pressureState,xeryonMoveCommand} from './protocol.mjs';
 const $=id=>document.getElementById(id), text=(id,value)=>{$(id).textContent=value;};
 const invoke=window.__TAURI__?.core.invoke;
@@ -6,11 +7,12 @@ const micronsPerCount=0.078;
 const positionNumber=new Intl.NumberFormat(undefined,{minimumFractionDigits:3,maximumFractionDigits:3});
 const position=counts=>positionNumber.format(counts*micronsPerCount);
 let session=null,connected=false,busy=false,demo=false,streaming=true,snapshot=null,received=0,hello=null;
-let pressureHistory=[],lastPressure=null;
+let pressureHistory=[],lastPressure=null,experimentUnresolved=false;
 let history=[],logs=[],epoch=null,lastSample=null,lastPong=0,lastPing=0,demoTimer=null;
 function activity(message){logs.push(`${new Date().toLocaleTimeString()}  ${message}`);if(logs.length>100)logs.shift();text('log',logs.join('\n'));}
 function notice(message,warn=false){text('notice',message);$('notice').classList.toggle('warn',warn);}
 function controls(){
+  for(const id of ['xeryon-distance','plunger-distance','plunger-speed'])$(id).disabled=!!session?.experimentOwned;
   text('connect',busy?'Please wait…':connected||demo?'Disconnect':'Connect Teensy');
   $('connect').disabled=busy||(!connected&&!demo&&!$('port').value);
   $('port').disabled=$('refresh').disabled=busy||connected||!!session;
@@ -21,6 +23,8 @@ function controls(){
   for(const id of ['xeryon-up','xeryon-down'])$(id).disabled=!!xeryonBlocked()||!!session?.pending;
   $('xeryon-stop').disabled=!connected||!hello?.xeryon||!snapshot?.mounted||snapshot.cdc!==2||snapshot.vid!==0x04d8||snapshot.pid!==0xef4a;
   text('stream',streaming?'Pause stream':'Resume stream');
+  if(session?.experimentOwned)for(const id of ['ping','snapshot','stream','plunger-up','plunger-down','plunger-zero','plunger-stop','xeryon-up','xeryon-down','xeryon-stop','xeryon-speed','xeryon-distance','plunger-speed','plunger-distance'])$(id).disabled=true;
+  experimentControls();
 }
 function xeryonBlocked(){
   if(!connected)return 'Connect Teensy to move the actuator.';
@@ -49,6 +53,16 @@ async function refresh(){
   }catch(e){notice(`Port discovery failed: ${e}`,true);}finally{controls();}
 }
 function accept(m){
+  if(m.type.startsWith('experiment_')){
+    if(m.type==='experiment_state')experimentUnresolved=m.state!=='dashboard';
+    if(m.type==='experiment_ack'&&m.action==='data_received')experimentUnresolved=false;
+    experimentMessage(m);
+    if(m.type==='experiment_ack'&&m.action==='data_received'){
+      lastPong=performance.now();lastPing=0;
+      if(connected&&!hello)void request('HELLO',true).catch(()=>{});
+    }
+    render();return;
+  }
   if(m.type==='log'){activity(m.message);return;}
   if(m.type==='hello'){hello=m;text('session-label','PROTOCOL 01');}
   if(m.type==='pong')lastPong=performance.now();
@@ -86,6 +100,8 @@ async function request(command,quiet=false){
   }catch(e){notice(String(e.message??e),true);activity(String(e.message??e));throw e;}finally{controls();}
 }
 async function disconnect(reason='Disconnected'){
+  if(session?.experimentOwned)experimentUnresolved=true;
+  if(experimentUnresolved)reason+=' · Autonomous operation may continue; reconnect to recover or ABORT.';
   const old=session;session=null;connected=false;demo=false;busy=true;
   clearInterval(demoTimer);demoTimer=null;reset();controls();notice(reason);activity(reason);
   try{await old?.close();}catch(e){activity(`Close: ${e}`);}finally{busy=false;controls();render();}
@@ -95,7 +111,9 @@ $('connect').addEventListener('click',async()=>{
   busy=true;reset();controls();
   try{
     const current=new NativeSession(invoke,m=>{if(session===current)accept(m);},e=>{if(session===current)void disconnect(`Connection lost: ${e.message??e}`);},e=>activity(`Ignored serial input: ${e.message??e}`));
-    session=current;await current.open($('port').value);await request('HELLO');
+    session=current;await current.open($('port').value);await current.waitForStartup();
+    if(current.experimentOwned){connected=true;notice('Autonomous experiment recovered. Normal desktop traffic is suspended.');return;}
+    await request('HELLO');
     if(session!==current)throw Error('Connection closed during handshake');
     connected=true;await request('PING');await request('SNAPSHOT');
     activity('Native serial connection verified');
@@ -125,8 +143,8 @@ $('plunger-stop').addEventListener('click',()=>void request('PLUNGER_STOP').catc
 function age(s){return snapshot&&s?elapsed(snapshot.ms,s.ms)+performance.now()-received:Infinity;}
 function ageText(s){const ms=age(s);return Number.isFinite(ms)?`${ms>=3000?'Stale · ':'Updated '}${(ms/1000).toFixed(1)}s ago`:'Awaiting feedback';}
 function render(){
-  const v=snapshot?.values??{},active=connected||demo,stalled=connected&&lastPong>0&&performance.now()-lastPong>6000;
-  text('connection',demo?'Demo · simulated':stalled?'Link unresponsive':connected?'Connected':'Disconnected');
+  const v=snapshot?.values??{},active=connected||demo,stalled=connected&&!session?.experimentOwned&&lastPong>0&&performance.now()-lastPong>6000;
+  text('connection',session?.experimentOwned?'Autonomous experiment':demo?'Demo · simulated':stalled?'Link unresponsive':connected?'Connected':'Disconnected');
   $('connection').className=`pill ${demo||stalled?'warn':connected?'live':''}`;
   for(const[id,tag]of[['epos','EPOS'],['dpos','DPOS']]){text(id,v[tag]?position(v[tag].value):'—');text(`${id}-age`,ageText(v[tag]));$(id).closest('.metric').classList.toggle('stale',!!v[tag]&&age(v[tag])>=3000);}
   const stat=v.STAT,key=stat?String(stat.value):'none';
@@ -195,6 +213,7 @@ $('demo').addEventListener('click',()=>{
   accept(make(60000));text('session-label','SIMULATED SESSION');notice('Demo mode — all readings are simulated. No serial port is open.');controls();
   demoTimer=setInterval(()=>accept(make(Math.floor(performance.now()-start)+60000)),100);
 });
-setInterval(()=>{if(connected&&session&&!session.pending&&performance.now()-lastPing>2000){lastPing=performance.now();void request('PING',true).catch(()=>{});}render();if(history.length||pressureHistory.length)draw();},500);
+setInterval(()=>{if(connected&&session&&!session.experimentOwned&&!session.pending&&performance.now()-lastPing>2000){lastPing=performance.now();void request('PING',true).catch(()=>{});}render();if(history.length||pressureHistory.length)draw();},500);
 $('xeryon-speed').value='';
+setupExperiments({state:()=>({session,connected,hello,snapshot,experimentUnresolved}),positionAge:()=>age(snapshot?.values.EPOS),invoke,controls});
 render();controls();void refresh();

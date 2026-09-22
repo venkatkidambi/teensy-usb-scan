@@ -1,5 +1,14 @@
 # Teensy Panel desktop application
 
+Three modes are available: **Dashboard**, **Quasi-static**, and **Sinusoidal**.
+Experiment configuration is validated in Rust before START; the Teensy performs
+all motion scheduling and acquisition. Use current copies fresh encoder position.
+Normal PC traffic pauses until the retained dataset is downloaded and verified.
+ABORT stays available. Results show both plots and the completed/aborted/faulted
+outcome; Save CSV exports the verified native result on demand. Reconnecting
+recovers an active run or downloads its retained data without sending a heartbeat.
+See [the experiment design and limits](../EXPERIMENTS.md).
+
 Tauri 2 + plain HTML/CSS/JavaScript, with serial IO in Rust. The release app
 embeds its UI and needs no Python, Node, browser tab, or HTTP server.
 
@@ -85,7 +94,7 @@ The separate desktop Cargo.lock pins its dependencies and does not alter firmwar
 
 ## Architecture
 
-- `src/main.rs`: five local Tauri commands, app state, and port cleanup on exit.
+- `src/main.rs`: local serial/experiment Tauri commands, retained result state, and port cleanup on exit.
 - `src/serial.rs`: native port discovery, exclusive connection ownership, bounded
   command validation, and a worker with a 20 ms read timeout. Eight queued commands,
   32 replies, 32 logs, one latest unsolicited snapshot; lines capped at 4096 bytes.
@@ -93,6 +102,8 @@ The separate desktop Cargo.lock pins its dependencies and does not alter firmwar
 - `ui/protocol.mjs`: schema validation, session/request IDs, expected reply types,
   2.5-second request timeout, and one in-flight request. IPC polling is serial and
   scheduled every 50 ms after the previous call finishes, preventing overlapping polls.
+- `src/experiment.rs`: configuration units/validation, bounded binary framing, dataset CRC and CSV generation.
+- `ui/experiment.js`: configuration tabs, experiment status, result plots and Save CSV.
 - `ui/app.js`: local port picker, telemetry and flags, bounded Canvas history,
   heartbeat, stale indicators, an explicitly simulated demo, and wired-plunger controls.
 

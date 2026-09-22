@@ -23,7 +23,7 @@ pub fn write_move(
 pub const MIN_POSITION: i32 = -(1 << 25);
 pub const MAX_POSITION: i32 = (1 << 25) - 1;
 pub const MAX_TRAVEL_NM: u32 = 2_617_245_618;
-const FAULTS: i64 = (1 << 2) | (1 << 3) | (1 << 12) | (1 << 16) | (1 << 18) | (1 << 21);
+pub const FAULTS: i64 = (1 << 2) | (1 << 3) | (1 << 12) | (1 << 16) | (1 << 18) | (1 << 21);
 
 pub fn ready(t: &Telemetry) -> bool {
     t.mounted && t.cdc == 2 && t.vid == 0x04d8 && t.pid == 0xef4a
@@ -218,6 +218,9 @@ impl Motion {
     }
     /// True requests a best-effort STOP; reaching a target requires subsequent feedback.
     pub fn poll(&mut self, t: &Telemetry, now: u32) -> bool {
+        self.poll_policy(t, now, false)
+    }
+    pub fn poll_policy(&mut self, t: &Telemetry, now: u32, autonomous: bool) -> bool {
         if self.state != 1 {
             return false;
         }
@@ -231,7 +234,7 @@ impl Motion {
             Some("controller fault")
         } else if now.wrapping_sub(self.started) >= 60_000 {
             Some("move deadline")
-        } else if now.wrapping_sub(self.heartbeat) >= 5000 {
+        } else if !autonomous && now.wrapping_sub(self.heartbeat) >= 5000 {
             Some("desktop heartbeat missing")
         } else {
             None

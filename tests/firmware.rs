@@ -52,3 +52,8 @@ fn pressure_snapshot_preserves_i2c_values_and_identity() {
     assert!(json.contains("\"raw\":16777215,\"average\":16777215"));
     assert!(json.contains("\"sensor\":\"i2c\",\"address\":92,\"temperature\":65535,\"who\":177"));
 }
+
+#[path = "../src/experiment.rs"]
+mod experiment;
+#[path = "../src/experiment_data.rs"]
+mod experiment_data;

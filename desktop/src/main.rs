@@ -1,11 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod experiment;
+#[allow(dead_code)]
+#[path = "../../src/experiment_data.rs"]
+mod experiment_data;
 mod serial;
 #[cfg(feature = "smoke-test")]
 mod smoke;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use tauri::Manager;
 
@@ -13,6 +17,8 @@ use tauri::Manager;
 struct Backend {
     connection: Mutex<Option<serial::Connection>>,
     next: AtomicU32,
+    archive: Arc<Mutex<Option<experiment::Dataset>>>,
+    experiment_owned: Arc<AtomicBool>,
 }
 
 impl Backend {
@@ -55,7 +61,12 @@ async fn serial_connect(
             return Err("Disconnect the current port first".into());
         }
         let id = state.next.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-        *connection = Some(serial::Connection::open(&port, id)?);
+        *connection = Some(serial::Connection::open(
+            &port,
+            id,
+            state.archive.clone(),
+            state.experiment_owned.clone(),
+        )?);
         Ok(id)
     })
     .await
@@ -106,6 +117,41 @@ async fn serial_disconnect(
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn experiment_start(
+    session: u32,
+    id: u32,
+    config: experiment::Input,
+    state: tauri::State<'_, Arc<Backend>>,
+) -> Result<(), String> {
+    let command = config.command(id)?;
+    state.with_session(session, |connection| connection.send(command))
+}
+
+#[tauri::command]
+fn experiment_result(
+    state: tauri::State<'_, Arc<Backend>>,
+) -> Result<Option<experiment::Dataset>, String> {
+    Ok(state.archive.lock().map_err(|e| e.to_string())?.clone())
+}
+
+#[tauri::command]
+fn experiment_csv(state: tauri::State<'_, Arc<Backend>>) -> Result<String, String> {
+    // Serialize export with START submission and preserve ownership across disconnect.
+    let _connection = state.connection.lock().map_err(|e| e.to_string())?;
+    if state.experiment_owned.load(Ordering::Acquire) {
+        return Err("CSV export is disabled until autonomous ownership is resolved".into());
+    }
+    // UI offers an explicit Save; CSV is constructed only from a verified result.
+    state
+        .archive
+        .lock()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .map(|d| d.csv())
+        .ok_or("No verified experiment dataset".into())
+}
+
 fn main() {
     let builder = tauri::Builder::default()
         .manage(Arc::new(Backend::default()))
@@ -114,7 +160,10 @@ fn main() {
             serial_connect,
             serial_send,
             serial_poll,
-            serial_disconnect
+            serial_disconnect,
+            experiment_start,
+            experiment_result,
+            experiment_csv
         ])
         .on_page_load(|window, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Started {
@@ -139,6 +188,9 @@ fn main() {
             serial_send,
             serial_poll,
             serial_disconnect,
+            experiment_start,
+            experiment_result,
+            experiment_csv,
             smoke::smoke_report
         ])
         .setup(|app| {

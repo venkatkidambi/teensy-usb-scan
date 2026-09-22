@@ -8,7 +8,7 @@ use std::{
         mpsc::{self, SyncSender},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Serialize)]
@@ -49,7 +49,7 @@ pub fn ports() -> Result<Vec<Port>, String> {
 
 // This allowlist mirrors firmware protocol v1. No arbitrary serial writes.
 pub fn validate_command(command: &str) -> bool {
-    if command.len() > 64 || command.contains(['\r', '\n']) {
+    if command.len() > 128 || command.contains(['\r', '\n']) {
         return false;
     }
     let parts: Vec<_> = command.split_ascii_whitespace().collect();
@@ -59,9 +59,13 @@ pub fn validate_command(command: &str) -> bool {
     {
         return false;
     }
+    if crate::experiment::valid_start(&parts) {
+        return true;
+    }
     match parts.as_slice() {
         [
-            "HELLO" | "PING" | "SNAPSHOT" | "PLUNGER_STOP" | "PLUNGER_ZERO" | "XERYON_STOP",
+            "HELLO" | "PING" | "SNAPSHOT" | "PLUNGER_STOP" | "PLUNGER_ZERO" | "XERYON_STOP"
+            | "ABORT",
             _,
         ]
         | ["STREAM", _, "0" | "1"] => true,
@@ -97,6 +101,9 @@ pub struct Inbox {
     sequence: u64,
     error: Option<String>,
     coalesced: u64,
+    owned: bool,
+    start_id: Option<u32>,
+    dataset: Option<crate::experiment::Dataset>,
 }
 
 impl Inbox {
@@ -135,6 +142,8 @@ impl Inbox {
             closed,
             error: self.error.clone(),
             coalesced: self.coalesced,
+            experiment_owned: self.owned,
+            dataset: self.dataset.take(),
         }
     }
 }
@@ -146,40 +155,8 @@ pub struct Batch {
     pub closed: bool,
     pub error: Option<String>,
     pub coalesced: u64,
-}
-
-#[derive(Default)]
-struct Lines {
-    bytes: Vec<u8>,
-    dropping: bool,
-}
-impl Lines {
-    fn feed(&mut self, bytes: &[u8], mut line: impl FnMut(String)) {
-        for &b in bytes {
-            if b == b'\n' {
-                if self.dropping {
-                    line("# Oversized serial line discarded".into());
-                } else if !self.bytes.is_empty() {
-                    if self.bytes.last() == Some(&b'\r') {
-                        self.bytes.pop();
-                    }
-                    match String::from_utf8(self.bytes.clone()) {
-                        Ok(s) => line(s),
-                        Err(_) => line("# Invalid UTF-8 serial line discarded".into()),
-                    }
-                }
-                self.bytes.clear();
-                self.dropping = false;
-            } else if !self.dropping {
-                if self.bytes.len() == 4096 {
-                    self.bytes.clear();
-                    self.dropping = true;
-                } else {
-                    self.bytes.push(b);
-                }
-            }
-        }
-    }
+    pub experiment_owned: bool,
+    pub dataset: Option<crate::experiment::Dataset>,
 }
 
 pub struct Connection {
@@ -189,10 +166,16 @@ pub struct Connection {
     stop: Arc<AtomicBool>,
     finished: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    ownership: Arc<AtomicBool>,
 }
 
 impl Connection {
-    pub fn open(name: &str, id: u32) -> Result<Self, String> {
+    pub fn open(
+        name: &str,
+        id: u32,
+        archive: Arc<Mutex<Option<crate::experiment::Dataset>>>,
+        ownership: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
         if !ports()?.iter().any(|p| p.name == name) {
             return Err("Port is no longer available; refresh the list".into());
         }
@@ -213,15 +196,23 @@ impl Connection {
         let stop = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
         let (queue, cancel, done) = (inbox.clone(), stop.clone(), finished.clone());
+        let worker_ownership = ownership.clone();
         let worker = thread::Builder::new()
             .name("teensy-serial".into())
             .spawn(move || {
                 let mut buffer = [0; 1024];
-                let mut lines = Lines::default();
+                let mut decoder = crate::experiment::Decoder::default();
+                let mut download = crate::experiment::Download::default();
+                let mut deadline: Option<Instant> = None;
                 let result = (|| -> io::Result<()> {
                     while !cancel.load(Ordering::Relaxed) {
                         if queue.lock().unwrap().error.is_some() {
                             break;
+                        }
+                        if deadline.is_some_and(|d| Instant::now() >= d) {
+                            return Err(io::Error::other(
+                                "Dataset transfer timed out; reconnect to retry retained data",
+                            ));
                         }
                         // Bounded writes before returning to reception.
                         for command in rx.try_iter().take(8) {
@@ -236,7 +227,106 @@ impl Connection {
                                 ));
                             }
                             Ok(n) => {
-                                lines.feed(&buffer[..n], |line| queue.lock().unwrap().push(line))
+                                for &byte in &buffer[..n] {
+                                    let Some(event) =
+                                        decoder.push(byte).map_err(io::Error::other)?
+                                    else {
+                                        continue;
+                                    };
+                                    let mut next = None;
+                                    match event {
+                                        crate::experiment::Event::Line(line) => {
+                                            let value =
+                                                serde_json::from_str::<serde_json::Value>(&line)
+                                                    .unwrap_or_default();
+                                            let mut q = queue.lock().unwrap();
+                                            match value["type"].as_str() {
+                                                Some("experiment_state") => {
+                                                    q.owned = value["state"] != "dashboard";
+                                                    worker_ownership
+                                                        .store(q.owned, Ordering::Release);
+                                                    if value["state"] == "data_ready" {
+                                                        let run =
+                                                            crate::experiment::uint(&value, "run")
+                                                                .map_err(io::Error::other)?;
+                                                        next = Some(download.begin(run));
+                                                    }
+                                                    q.push(line);
+                                                }
+                                                Some("experiment_ack") => {
+                                                    if value["action"] == "start" {
+                                                        q.owned = true;
+                                                        worker_ownership
+                                                            .store(true, Ordering::Release);
+                                                        q.start_id = None;
+                                                    }
+                                                    if value["action"] == "data_received"
+                                                        && value["id"]
+                                                            == crate::experiment::DOWNLOAD_ID
+                                                    {
+                                                        q.owned = false;
+                                                        worker_ownership
+                                                            .store(false, Ordering::Release);
+                                                        deadline = None;
+                                                    }
+                                                    q.push(line);
+                                                }
+                                                Some("data_meta") => {
+                                                    download
+                                                        .metadata(value)
+                                                        .map_err(io::Error::other)?;
+                                                    let (command, dataset) = download
+                                                        .next()
+                                                        .map_err(io::Error::other)?;
+                                                    if let Some(dataset) = dataset {
+                                                        *archive.lock().unwrap() =
+                                                            Some(dataset.clone());
+                                                        q.dataset = Some(dataset);
+                                                    }
+                                                    next = Some(command);
+                                                }
+                                                Some("error") => {
+                                                    if value["id"] == crate::experiment::DOWNLOAD_ID
+                                                    {
+                                                        return Err(io::Error::other(
+                                                            value["message"].as_str().unwrap_or(
+                                                                "Dataset transfer rejected",
+                                                            ),
+                                                        ));
+                                                    }
+                                                    if q.start_id
+                                                        .is_some_and(|id| value["id"] == id)
+                                                    {
+                                                        q.owned = false;
+                                                        worker_ownership
+                                                            .store(false, Ordering::Release);
+                                                        q.start_id = None;
+                                                    }
+                                                    q.push(line);
+                                                }
+                                                _ => q.push(line),
+                                            }
+                                        }
+                                        crate::experiment::Event::Chunk(header, bytes) => {
+                                            download
+                                                .chunk(header, &bytes)
+                                                .map_err(io::Error::other)?;
+                                            let (command, dataset) =
+                                                download.next().map_err(io::Error::other)?;
+                                            if let Some(dataset) = dataset {
+                                                // Retain the complete verified copy before releasing Teensy RAM.
+                                                *archive.lock().unwrap() = Some(dataset.clone());
+                                                queue.lock().unwrap().dataset = Some(dataset);
+                                            }
+                                            next = Some(command);
+                                        }
+                                    }
+                                    if let Some(command) = next {
+                                        port.write_all(command.as_bytes())?;
+                                        port.write_all(b"\n")?;
+                                        deadline = Some(Instant::now() + Duration::from_secs(5));
+                                    }
+                                }
                             }
                             Err(e)
                                 if matches!(
@@ -264,6 +354,7 @@ impl Connection {
             stop,
             finished,
             worker: Some(worker),
+            ownership,
         })
     }
     pub fn send(&self, command: String) -> Result<(), String> {
@@ -273,9 +364,24 @@ impl Connection {
         if self.finished.load(Ordering::Acquire) {
             return Err("Serial connection closed".into());
         }
+        let mut q = self.inbox.lock().map_err(|e| e.to_string())?;
+        let mut words = command.split_ascii_whitespace();
+        let name = words.next();
+        let id = words.next().and_then(|s| s.parse::<u32>().ok());
+        let abort = name == Some("ABORT");
+        if q.owned && !abort {
+            return Err("Experiment owns hardware; only ABORT is allowed".into());
+        }
+        let start_id = if name == Some("START") { id } else { None };
         self.tx
             .try_send(command)
-            .map_err(|_| "Serial command queue busy or disconnected".into())
+            .map_err(|_| "Serial command queue busy or disconnected")?;
+        if let Some(id) = start_id {
+            q.owned = true;
+            self.ownership.store(true, Ordering::Release);
+            q.start_id = Some(id);
+        }
+        Ok(())
     }
     pub fn poll(&self) -> Batch {
         self.inbox
@@ -296,6 +402,36 @@ impl Drop for Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ownership_blocks_normal_traffic_after_start_but_keeps_abort() {
+        let (tx, rx) = mpsc::sync_channel(8);
+        let c = Connection {
+            id: 1,
+            tx,
+            inbox: Arc::new(Mutex::new(Inbox::default())),
+            stop: Arc::new(AtomicBool::new(false)),
+            finished: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            ownership: Arc::new(AtomicBool::new(false)),
+        };
+        c.send("START 1 S 0 780 1000 1".into()).unwrap();
+        for command in [
+            "PING 2",
+            "SNAPSHOT 3",
+            "STREAM 4 1",
+            "PLUNGER_STOP 5",
+            "XERYON_MOVE 6 U 78",
+            "START 7 Q 0 78 1 1",
+        ] {
+            assert!(c.send(command.into()).is_err(), "{command}");
+        }
+        c.send("ABORT 8".into()).unwrap();
+        assert_eq!(
+            rx.try_iter().collect::<Vec<_>>(),
+            ["START 1 S 0 780 1000 1", "ABORT 8"]
+        );
+        assert!(c.ownership.load(Ordering::Acquire));
+    }
     #[test]
     fn only_supported_requests_are_allowed() {
         for command in [
@@ -353,15 +489,24 @@ mod tests {
     }
     #[test]
     fn line_fragmentation_overflow_and_recovery() {
-        let mut parser = Lines::default();
+        let mut parser = crate::experiment::Decoder::default();
         let mut lines = Vec::new();
-        parser.feed(b"one\r", |s| lines.push(s));
-        parser.feed(b"\ntwo\n", |s| lines.push(s));
-        assert_eq!(lines, ["one", "two"]);
-        parser.feed(&[b'x'; 5000], |s| lines.push(s));
-        parser.feed(b"\nthree\n", |s| lines.push(s));
+        let mut feed = |bytes: &[u8]| {
+            for &byte in bytes {
+                if let Some(crate::experiment::Event::Line(line)) = parser.push(byte).unwrap() {
+                    lines.push(line);
+                }
+            }
+        };
+        feed(b"one\r");
+        feed(b"\ntwo\n");
+        feed(&[b'x'; 5000]);
+        feed(b"\nthree\n");
+        feed(b"\xff\n");
+        assert_eq!(&lines[..2], ["one", "two"]);
         assert!(lines[2].contains("Oversized"));
         assert_eq!(lines[3], "three");
+        assert!(lines[4].contains("Invalid UTF-8"));
     }
     #[test]
     fn slow_ui_coalesces_snapshots_but_keeps_replies() {

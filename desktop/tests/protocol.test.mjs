@@ -173,3 +173,54 @@ test('Xeryon reply resolves the move and motion telemetry remains optional',asyn
     assert.equal((await s.request('XERYON_STOP')).action,'stop');
   }finally{await s.close();}
 });
+
+
+test('experiment session suppresses normal requests and ABORT preempts START',async()=>{
+  const sent=[],queue=[];
+  const s=new NativeSession(async(name,args)=>{
+    if(name==='serial_connect')return 7;
+    if(name==='serial_poll')return {session:7,messages:queue.splice(0),closed:false,coalesced:0};
+    if(name==='experiment_start'){sent.push({name,...args});return;}
+    if(name==='serial_send'){sent.push(args.command);return;}
+  },()=>{},assert.fail,assert.fail,1000);
+  await s.open('COM6');
+  const start=s.startExperiment({kind:'sinusoidal',start_um:0,increment_um:1,timing:1,repeats:1});
+  const interrupted=assert.rejects(start,/Interrupted by Stop/);
+  assert(s.experimentOwned);
+  for(const command of ['PING','SNAPSHOT','STREAM 1','XERYON_MOVE U 78','PLUNGER_STOP'])await assert.rejects(s.request(command),/only ABORT/);
+  const abort=s.request('ABORT');
+  queue.push(JSON.stringify({type:'experiment_ack',id:2,run:1,action:'abort'}));
+  await abort;await interrupted;
+  assert.equal(sent.length,2);assert.equal(sent[0].name,'experiment_start');assert.equal(sent[1],'ABORT 2');
+  assert(s.experimentOwned); // abort does not release retained data
+  queue.push(JSON.stringify({type:'experiment_ack',id:0xf0000000,run:1,action:'data_received'}));
+  await new Promise(resolve=>setTimeout(resolve,60));assert(!s.experimentOwned);
+  await s.close();
+});
+
+test('reconnecting to an autonomous run uses passive state reception',async()=>{
+  const queue=[JSON.stringify({type:'experiment_state',id:0,run:9,state:'running'})],sent=[];
+  const s=new NativeSession(async(name,args)=>{
+    if(name==='serial_connect')return 7;
+    if(name==='serial_poll')return {session:7,messages:queue.splice(0),closed:false,coalesced:0,experiment_owned:true};
+    if(name==='serial_send')sent.push(args.command);
+  },()=>{},assert.fail,assert.fail,500);
+  try{await s.open('COM6');await s.waitForStartup();assert(s.experimentOwned);await assert.rejects(s.request('HELLO'),/only ABORT/);assert.deepEqual(sent,[]);}
+  finally{await s.close();}
+});
+
+
+test('ABORT cannot overtake a START still being submitted through native IPC',async()=>{
+  const sent=[];let acceptStart;
+  const s=new NativeSession(async(name,args)=>{
+    if(name==='serial_connect')return 7;
+    if(name==='serial_poll')return {session:7,messages:[],closed:false,coalesced:0};
+    if(name==='experiment_start'){await new Promise(resolve=>{acceptStart=resolve;});sent.push('START');}
+    if(name==='serial_send')sent.push(args.command);
+  },()=>{},assert.fail,assert.fail,500);
+  await s.open('COM6');
+  const starting=s.startExperiment({});const interrupted=assert.rejects(starting,/Interrupted by Stop/);
+  const abort=s.request('ABORT');const aborted=assert.rejects(abort,/Connection closed/);
+  assert.deepEqual(sent,[]);acceptStart();await new Promise(resolve=>setTimeout(resolve,1));
+  assert.deepEqual(sent,['START','ABORT 2']);await s.close();await interrupted;await aborted;
+});
