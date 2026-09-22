@@ -35,15 +35,16 @@ dependencies; there is no frontend framework or additional runtime.
 
 ## Xeryon manual movement
 
-Flash firmware 0.1.5 with `.\dev.cmd`, connect Teensy, then use **Xeryon movement**:
-enter travel in µm and click **Up (+)** or **Down (−)**. Travel is relative to the
+Flash firmware 0.1.6 with `.\dev.cmd`, connect Teensy, then use **Xeryon movement**:
+enter travel in µm and speed in µm/s, then click **Up (+)** or **Down (−)**. Travel is relative to the
 latest encoder position and rounded to 0.078 µm/count. Up increases the encoder
-value; Down decreases it. The XD-C uses its current speed and tuning to reach
-and hold the target. **Stop** requests an interruption.
+value; Down decreases it. Speed is a positive whole number (default 10000 µm/s)
+and is sent before each target. The XD-C uses that speed and its existing tuning
+to reach and hold the target. **Stop** requests an interruption.
 
 The panel shows the requested target and waits for controller feedback before
 reporting completion. Controls require fresh position/status and firmware's
-`xeryon: true` capability. Older firmware remains viewable but cannot move Xeryon.
+`xeryon_speed: true` capability. Older firmware remains viewable but cannot move Xeryon.
 The plunger controls operate the separate wired motor. See the root README for
 motion timeout behavior and hardware-validation limits.
 

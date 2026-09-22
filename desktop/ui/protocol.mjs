@@ -52,6 +52,7 @@ export function parseMessage(line) {
     }
   } else if(m.type==='hello') {
     if(m.protocol!==1||m.board!=='Teensy 4.1'||typeof m.firmware!=='string'||typeof m.motion!=='boolean'||typeof m.pressure!=='boolean') throw Error('Incompatible firmware; upload this project’s telemetry build');
+    if(m.xeryon_speed!==undefined&&typeof m.xeryon_speed!=='boolean') throw Error('Invalid Xeryon speed capability');
     if(m.xeryon!==undefined&&typeof m.xeryon!=='boolean') throw Error('Invalid Xeryon capability');
   } else if(m.type==='pong') { if(!u32(m.ms)) throw Error('Invalid pong'); }
   else if(m.type==='ack') { if(typeof m.stream!=='boolean') throw Error('Invalid acknowledgement'); }
@@ -106,8 +107,8 @@ export class NativeSession {
     if(this.pending) return Promise.reject(Error('Wait for the current request'));
     const move=/^PLUNGER_MOVE [UD] ([0-9]+) ([0-9]+)$/.exec(command);
     const validMove=move&&+move[1]>0&&+move[1]<=255&&Number.isSafeInteger(+move[2])&&+move[2]>0&&Math.floor((+move[2]*16688+500)/1000)<=2147483647;
-    const xeryonMove=/^XERYON_MOVE [UD] ([0-9]+)$/.exec(command);
-    const validXeryon=xeryonMove&&Number.isSafeInteger(+xeryonMove[1])&&+xeryonMove[1]>=78&&+xeryonMove[1]<=2617245618;
+    const xeryonMove=/^XERYON_MOVE [UD] ([0-9]+) ([0-9]+)$/.exec(command);
+    const validXeryon=xeryonMove&&Number.isSafeInteger(+xeryonMove[1])&&+xeryonMove[1]>=78&&+xeryonMove[1]<=2617245618&&Number.isInteger(+xeryonMove[2])&&+xeryonMove[2]>=1&&+xeryonMove[2]<=16777215;
     if(!validMove&&!validXeryon&&!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP'].includes(command)) return Promise.reject(Error('Unsupported command'));
     const [name,...args]=command.split(' ');const arg=args.length?args.join(' '):undefined;const id=this.id=this.id===0xffffffff?1:this.id+1;
     return new Promise((resolve,reject)=>{

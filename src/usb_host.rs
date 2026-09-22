@@ -31,15 +31,14 @@ pub fn heartbeat(now: u32) {
     cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().heartbeat(now));
 }
 
-pub fn move_xeryon(up: bool, nm: u32, now: u32) -> Result<i32, &'static str> {
-    use core::fmt::Write;
+pub fn move_xeryon(up: bool, nm: u32, speed: u32, now: u32) -> Result<i32, &'static str> {
     let t = telemetry();
     if t.xeryon_motion.is_some_and(|m| m.state == 1) {
         return Err("Wait for the Xeryon move to finish or press Stop");
     }
     let target = crate::xeryon_motion::target(&t, up, nm, now)?;
     let mut frame = crate::protocol::Frame::new();
-    writeln!(frame, "DPOS={target}").map_err(|_| "Xeryon command too long")?;
+    crate::xeryon_motion::write_move(&mut frame, target, speed)?;
     // SAFETY: called only in main context; C copies the complete command.
     if !unsafe {
         usb_serial_send(

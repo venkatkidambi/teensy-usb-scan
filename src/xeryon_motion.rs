@@ -1,6 +1,20 @@
 //! Finite Xeryon positioning, in the existing 78 nm encoder calibration.
 use crate::protocol::Telemetry;
 
+pub const MAX_SPEED: u32 = 0x00ff_ffff;
+
+// Queue speed and target together so backpressure cannot enqueue only the move.
+pub fn write_move(
+    out: &mut impl core::fmt::Write,
+    target: i32,
+    speed: u32,
+) -> Result<(), &'static str> {
+    if !(1..=MAX_SPEED).contains(&speed) {
+        return Err("Xeryon speed must be 1..16777215 um/s");
+    }
+    write!(out, "SSPD={speed}\nDPOS={target}\n").map_err(|_| "Xeryon command too long")
+}
+
 pub const MIN_POSITION: i32 = -(1 << 25);
 pub const MAX_POSITION: i32 = (1 << 25) - 1;
 pub const MAX_TRAVEL_NM: u32 = 2_617_245_618;
@@ -23,6 +37,21 @@ mod tests {
         t.record(b"DPOS", 100, now);
         t.record(b"STAT", 1344, now);
         t
+    }
+    #[test]
+    fn speed_precedes_position_and_fits_one_transport_write() {
+        for speed in [1, 10000, MAX_SPEED] {
+            let mut frame = crate::protocol::Frame::new();
+            write_move(&mut frame, MIN_POSITION, speed).unwrap();
+            let text = core::str::from_utf8(frame.pending()).unwrap();
+            assert_eq!(text, format!("SSPD={speed}\nDPOS=-33554432\n"));
+            assert!(frame.pending().len() <= 32);
+        }
+        for speed in [0, MAX_SPEED + 1, u32::MAX] {
+            let mut frame = crate::protocol::Frame::new();
+            assert!(write_move(&mut frame, 100, speed).is_err());
+            assert!(frame.pending().is_empty());
+        }
     }
     #[test]
     fn relative_target_rounding_range_and_readiness() {

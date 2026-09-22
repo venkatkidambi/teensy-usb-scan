@@ -3,9 +3,18 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Teensy Panel</title><link rel="stylesheet" href="style.css"><script type="module" src="app.js"></script></head>
 <body>
 <main>
-  <section class="heading"><div><h1>Teensy Panel</h1></div><span id="connection" class="pill" role="status">Disconnected</span></section>
-  <section class="connection-bar" aria-label="Serial connection"><label for="port">USB serial port</label><select id="port"><option value="">Scanning ports…</option></select><button id="refresh" title="Refresh serial ports">Refresh</button><button id="connect" class="primary">Connect Teensy</button><button id="demo" class="text-button">Demo</button></section>
-  <div id="notice" class="notice" role="status">Select the Teensy’s primary USB port. Close any other application using COM6.</div>
+  <section class="heading"><h1>Teensy Panel</h1></section>
+  <section class="panel connection-panel" aria-label="Connection and status">
+    <div class="panel-heading"><h2>Connection and status</h2><span id="connection" class="pill" role="status">Disconnected</span></div>
+    <div class="connection-bar" aria-label="Serial connection"><label for="port">USB serial port</label><select id="port"><option value="">Scanning ports…</option></select><button id="refresh" title="Refresh serial ports">Refresh</button><button id="connect" class="primary">Connect Teensy</button><button id="demo" class="text-button">Demo</button></div>
+    <div id="notice" class="notice" role="status">Select the Teensy’s primary USB port. Close any other application using COM6.</div>
+    <div class="devices" aria-label="Hardware status">
+      <div class="device"><h3>Teensy 4.1 <span id="board-state" class="tag">Offline</span></h3><p id="firmware">USB1 · waiting for connection</p><small id="uptime">Bare-metal firmware</small></div>
+      <div class="device"><h3>Xeryon XD-C <span id="actuator-state" class="tag">Unknown</span></h3><p id="actuator-detail">USB2 host · 04d8:ef4a</p><small id="serial">Serial number —</small></div>
+      <div class="device"><h3>Pressure input <span id="pressure-state" class="tag">Offline</span></h3><p id="pressure-sensor">I²C · address 0x5C</p><small>Raw counts · physical units uncalibrated</small></div>
+    </div>
+    <div class="controller-status"><div class="controller-heading"><h3>Controller status</h3><p id="stat-word">Waiting for STAT</p></div><div id="flags" class="flags"><p class="empty-copy">Active status flags appear with XD-C feedback.</p></div><div id="stat-age" class="status-age">No status received</div></div>
+  </section>
   <section class="metrics" aria-label="Actuator readings">
     <article class="metric"><div class="metric-label">Encoder position</div><div class="reading"><strong id="epos">—</strong><small>µm</small></div><div class="metric-foot"><span id="epos-age">Awaiting feedback</span><span>EPOS</span></div></article>
     <article class="metric"><div class="metric-label">Target position</div><div class="reading"><strong id="dpos">—</strong><small>µm</small></div><div class="metric-foot"><span id="dpos-age">Awaiting feedback</span><span>DPOS</span></div></article>
@@ -14,6 +23,7 @@
     <div class="panel-heading"><div><h2>Xeryon movement</h2><p id="xeryon-motion-state">Connect Teensy to move the actuator.</p></div></div>
     <div class="plunger-controls">
       <label>Travel (µm)<input id="xeryon-distance" type="number" min="0.078" max="2617245.618" step="0.001" value="10"></label>
+      <label>Speed (µm/s)<input id="xeryon-speed" type="number" min="1" max="16777215" step="1" value="10000"></label>
       <button id="xeryon-up" disabled>Up (+)</button><button id="xeryon-down" disabled>Down (−)</button>
       <button id="xeryon-stop" class="stop-button" disabled>Stop</button>
     </div>
@@ -21,7 +31,13 @@
   </section>
   <div class="main-grid">
     <section class="panel"><div class="panel-heading"><div><h2>Position over time</h2><p>Microns (µm) · last 60 seconds</p></div><span id="stream-state" class="tag">NO DATA</span></div><div class="plot-wrap"><canvas id="plot" role="img" aria-label="Encoder and target position in microns over time"></canvas><div id="empty"><strong>No position data</strong><p>Position feedback will appear here.</p></div></div><div class="panel-foot"><span class="legend">━ Encoder &nbsp; <span>┄ Target</span></span><span id="samples">0 samples</span></div></section>
-    <section class="panel"><div class="panel-heading"><div><h2>Controller status</h2><p id="stat-word">Waiting for STAT</p></div></div><div id="flags" class="flags"><p class="empty-copy">Active status flags appear with XD-C feedback.</p></div><div id="stat-age" class="panel-foot">No status received</div></section>
+    <section class="panel pressure-panel" aria-label="Pressure readings">
+      <div class="panel-heading"><div><h2>Pressure signal</h2><p>Raw counts · last 60 seconds</p></div><span id="pressure-age" class="tag">NO DATA</span></div>
+      <p id="pressure-detail" class="pressure-detail">Raw readings appear when the I²C sensor responds.</p>
+      <div class="pressure-readings"><span>Raw <strong id="pressure-raw">—</strong></span><span>Average <strong id="pressure-average">—</strong></span><span>Samples <strong id="pressure-samples">0</strong></span></div>
+      <div class="plot-wrap"><canvas id="pressure-plot" role="img" aria-label="Raw and averaged pressure counts over time"></canvas></div>
+      <div class="panel-foot"><span class="legend">━ Average &nbsp; <span>┄ Raw</span></span><span>16-sample average · uncalibrated</span></div>
+    </section>
   </div>
   <section class="panel plunger-panel" aria-label="Plunger motor">
     <div class="panel-heading"><div><h2>Plunger motor</h2><p id="plunger-state">Waiting for connection</p></div><div><strong id="plunger-position">—</strong> µm</div></div>
@@ -32,19 +48,7 @@
     </div>
     <div class="panel-foot"><span id="plunger-pot">Potentiometer —</span><span>16,688 counts/mm</span></div>
   </section>
-  <section class="panel pressure-panel" aria-label="Pressure readings">
-    <div class="panel-heading"><div><h2>Pressure signal</h2><p>Raw counts · last 60 seconds</p></div><span id="pressure-age" class="tag">NO DATA</span></div>
-    <p id="pressure-detail" class="pressure-detail">Raw readings appear when the I²C sensor responds.</p>
-    <div class="pressure-readings"><span>Raw <strong id="pressure-raw">—</strong></span><span>Average <strong id="pressure-average">—</strong></span><span>Samples <strong id="pressure-samples">0</strong></span></div>
-    <div class="plot-wrap"><canvas id="pressure-plot" role="img" aria-label="Raw and averaged pressure Raw counts over time"></canvas></div>
-    <div class="panel-foot"><span class="legend">━ Average &nbsp; <span>┄ Raw</span></span><span>16-sample average · uncalibrated</span></div>
-  </section>
-  <section class="devices" aria-label="Hardware">
-    <article class="panel device"><div><h2>Teensy 4.1 <span id="board-state" class="tag">Offline</span></h2><p id="firmware">USB1 · waiting for connection</p><small id="uptime">Bare-metal firmware</small></div></article>
-    <article class="panel device"><div><h2>Xeryon XD-C <span id="actuator-state" class="tag">Unknown</span></h2><p id="actuator-detail">USB2 host · 04d8:ef4a</p><small id="serial">Serial number —</small></div></article>
-    <article class="panel device"><div><h2>Pressure input <span id="pressure-state" class="tag">Offline</span></h2><p id="pressure-sensor">I²C · address 0x5C</p><small>Raw Raw counts · physical units uncalibrated</small></div></article>
-  </section>
   <section class="panel diagnostics"><div class="panel-heading"><div><h2>Connection diagnostics</h2><p>Connection and telemetry</p></div><div class="tools"><button id="ping" disabled>Ping</button><button id="snapshot" disabled>Read snapshot</button><button id="stream" disabled>Pause stream</button></div></div><div class="counters"><span>Round trip <b id="rtt">—</b></span><span>Records <b id="records">0</b></span><span>Malformed <b id="malformed">0</b></span><span>Skipped snapshots <b id="skipped">0</b></span><span>Desktop coalesced <b id="coalesced">0</b></span></div><details><summary>Activity log <span>Last 100 events</span></summary><pre id="log">Waiting for connection.</pre></details></section>
-  <footer><p>Xeryon travel uses the controller’s current speed setting. Plunger controls operate the separate wired motor.</p><span id="session-label">NO SESSION</span></footer>
+  <footer><p>Xeryon moves use the entered speed. Plunger controls operate the separate wired motor.</p><span id="session-label">NO SESSION</span></footer>
 </main>
 </body></html>

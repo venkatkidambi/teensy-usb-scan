@@ -119,13 +119,13 @@ test('Xeryon travel units, schema, framing and Stop preemption',async()=>{
   const b=backend(false),s=new NativeSession(b.invoke,()=>{},assert.fail,assert.fail,500);
   await s.open('COM6');
   try{
-    for(const cmd of ['XERYON_MOVE U 0','XERYON_MOVE U 77','XERYON_MOVE D -100','XERYON_MOVE X 100','XERYON_MOVE U 2617245619','XERYON_MOVE U 1.5','DPOS=100'])await assert.rejects(s.request(cmd),/Unsupported/);
-    const moving=s.request('XERYON_MOVE D 10000');
+    for(const cmd of ['XERYON_MOVE U 10000','XERYON_MOVE U 10000 0','XERYON_MOVE U 10000 16777216','XERYON_MOVE U 10000 -1','XERYON_MOVE U 10000 1.5','XERYON_MOVE U 0 10000','XERYON_MOVE U 77 10000','XERYON_MOVE D -100 10000','XERYON_MOVE X 100 10000','XERYON_MOVE U 2617245619 10000','XERYON_MOVE U 1.5 10000','DPOS=100'])await assert.rejects(s.request(cmd),/Unsupported/);
+    const moving=s.request('XERYON_MOVE D 10000 10000');
     assert.equal(s.pending.expected,'xeryon_ack');
     const interrupted=assert.rejects(moving,/Interrupted by Stop/);
     const stopping=s.request('XERYON_STOP');
     const closed=assert.rejects(stopping,/Connection closed/);
-    assert.deepEqual(b.sent,['XERYON_MOVE 1 D 10000','XERYON_STOP 2']);
+    assert.deepEqual(b.sent,['XERYON_MOVE 1 D 10000 10000','XERYON_STOP 2']);
     await s.close();await interrupted;await closed;
   }finally{await s.close();}
 });
@@ -135,8 +135,11 @@ test('Xeryon reply resolves the move and motion telemetry remains optional',asyn
   const snapshot={type:'snapshot',id:0,ms:100,epoch:1,vid:1240,pid:61258,mounted:true,cdc:2,records:3,malformed:0,skipped:0,values:{},xeryon_motion:{state:1,target:228}};
   assert.deepEqual(parseMessage(JSON.stringify(snapshot)).xeryon_motion,{state:1,target:228});
   for(const motion of [{state:5,target:0},{state:1,target:33554432},{state:1,target:1.5},null])assert.throws(()=>parseMessage(JSON.stringify({...snapshot,xeryon_motion:motion})),/Xeryon/);
-  const hello={type:'hello',id:1,protocol:1,board:'Teensy 4.1',firmware:'0.1.5',motion:true,pressure:true,xeryon:true};
+  const hello={type:'hello',id:1,protocol:1,board:'Teensy 4.1',firmware:'0.1.5',motion:true,pressure:true,xeryon:true,xeryon_speed:true};
   assert.equal(parseMessage(JSON.stringify(hello)).xeryon,true);
+  assert.equal(parseMessage(JSON.stringify(hello)).xeryon_speed,true);
+  assert.throws(()=>parseMessage(JSON.stringify({...hello,xeryon_speed:1})),/speed capability/);
+  delete hello.xeryon_speed;assert.equal(parseMessage(JSON.stringify(hello)).xeryon_speed,undefined);
   delete hello.xeryon;assert.equal(parseMessage(JSON.stringify(hello)).xeryon,undefined);
   const queue=[];
   const s=new NativeSession(async(name,args)=>{
@@ -149,7 +152,7 @@ test('Xeryon reply resolves the move and motion telemetry remains optional',asyn
   },()=>{},assert.fail,assert.fail,500);
   try{
     await s.open('COM6');
-    assert.equal((await s.request('XERYON_MOVE U 10000')).target,228);
+    assert.equal((await s.request('XERYON_MOVE U 10000 10000')).target,228);
     assert.equal((await s.request('XERYON_STOP')).action,'stop');
   }finally{await s.close();}
 });

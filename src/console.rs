@@ -190,14 +190,14 @@ impl Console {
                 let result = match command {
                     Ok(Command::Hello(id)) => writeln!(
                         self.tx,
-                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"xeryon\":true,\"pressure\":true}}",
+                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"xeryon\":true,\"xeryon_speed\":true,\"pressure\":true}}",
                         env!("CARGO_PKG_VERSION")
                     ),
                     Ok(Command::Ping(id)) => {
                         writeln!(self.tx, "{{\"type\":\"pong\",\"id\":{id},\"ms\":{now}}}")
                     }
-                    Ok(Command::XeryonMove(id, up, nm)) => {
-                        match crate::usb_host::move_xeryon(up, nm, now) {
+                    Ok(Command::XeryonMove(id, up, nm, speed)) => {
+                        match crate::usb_host::move_xeryon(up, nm, speed, now) {
                             Ok(target) => writeln!(
                                 self.tx,
                                 "{{\"type\":\"xeryon_ack\",\"id\":{id},\"action\":\"move\",\"target\":{target}}}"

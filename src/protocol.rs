@@ -160,7 +160,7 @@ pub enum Command {
     Move(u32, bool, u8, u32),
     Stop(u32),
     Zero(u32),
-    XeryonMove(u32, bool, u32),
+    XeryonMove(u32, bool, u32, u32),
     XeryonStop(u32),
 }
 
@@ -185,7 +185,11 @@ impl Command {
                 if !(78..=crate::xeryon_motion::MAX_TRAVEL_NM).contains(&nm) {
                     return Err(());
                 }
-                Self::XeryonMove(id, up, nm)
+                let speed = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
+                if !(1..=crate::xeryon_motion::MAX_SPEED).contains(&speed) {
+                    return Err(());
+                }
+                Self::XeryonMove(id, up, nm, speed)
             }
             "PLUNGER_STOP" => Self::Stop(id),
             "PLUNGER_ZERO" => Self::Zero(id),
@@ -328,22 +332,27 @@ mod tests {
     #[test]
     fn xeryon_commands_are_bounded() {
         assert_eq!(
-            Command::parse(b"XERYON_MOVE 1 U 10000"),
-            Ok(Command::XeryonMove(1, true, 10000))
+            Command::parse(b"XERYON_MOVE 1 U 10000 10000"),
+            Ok(Command::XeryonMove(1, true, 10000, 10000))
         );
         assert_eq!(
-            Command::parse(b"XERYON_MOVE 2 D 78"),
-            Ok(Command::XeryonMove(2, false, 78))
+            Command::parse(b"XERYON_MOVE 2 D 78 10000"),
+            Ok(Command::XeryonMove(2, false, 78, 10000))
         );
         assert_eq!(Command::parse(b"XERYON_STOP 3"), Ok(Command::XeryonStop(3)));
         for bad in [
-            "XERYON_MOVE 1 U 0",
-            "XERYON_MOVE 1 U 77",
-            "XERYON_MOVE 1 U 2617245619",
-            "XERYON_MOVE 1 X 100",
-            "XERYON_MOVE 1 D -100",
-            "XERYON_MOVE 1 U 1.5",
-            "XERYON_MOVE 1 U 100 extra",
+            "XERYON_MOVE 1 U 10000",
+            "XERYON_MOVE 1 U 10000 0",
+            "XERYON_MOVE 1 U 10000 16777216",
+            "XERYON_MOVE 1 U 10000 -1",
+            "XERYON_MOVE 1 U 10000 1.5",
+            "XERYON_MOVE 1 U 0 10000",
+            "XERYON_MOVE 1 U 77 10000",
+            "XERYON_MOVE 1 U 2617245619 10000",
+            "XERYON_MOVE 1 X 100 10000",
+            "XERYON_MOVE 1 D -100 10000",
+            "XERYON_MOVE 1 U 1.5 10000",
+            "XERYON_MOVE 1 U 100 extra 10000",
             "XERYON_STOP 0",
             "XERYON_STOP 1 extra",
         ] {
