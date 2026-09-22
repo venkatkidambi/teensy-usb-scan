@@ -17,12 +17,17 @@ This opens the native desktop window with Vite on `127.0.0.1:1420`. CSS changes
 update in place; HTML/JavaScript edits reload the UI (reconnect the serial port
 after reload). Rust changes rebuild and restart the app. No browser tab opens.
 The launcher detects the native Rust host target on Windows, macOS, and Linux.
-On Windows, run `.\dev.cmd` from the repository root for a single-command setup
-and launch. It runs an incremental dependency install, then starts development
-using `npm.cmd`, avoiding PowerShell's blocked `npm.ps1` launcher. No administrator
-access or execution-policy changes are needed. Extra arguments are forwarded to
-the development command. You can also use `npm.cmd install` and `npm.cmd run dev`
-directly. The bare `npm` command may still be blocked by PowerShell's policy.
+On Windows, run **`.\dev.cmd`** from the repository root to install dependencies,
+build and reflash the Teensy, then open the frontend in development mode. Close
+any existing app or serial terminal first. The upload uses `upload.config.json`;
+press the Teensy Program button if the loader waits. Installation or upload
+failures stop the launcher before development starts. Firmware upload prerequisites
+are listed in the root README's Windows upload section.
+The launcher uses `npm.cmd`, avoiding PowerShell's blocked `npm.ps1`, and scopes
+the upload execution-policy bypass to its PowerShell process. Extra arguments are
+forwarded only to the development command. For frontend-only development, use
+`npm.cmd install` and `npm.cmd run dev` directly. The bare `npm` command may still
+be blocked by PowerShell's policy.
 
 `npm run build` embeds the optimized Vite assets in the release executable.
 `npm test` runs the JavaScript protocol tests. Vite and the Tauri CLI are dev-only

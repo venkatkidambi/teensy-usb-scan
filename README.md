@@ -20,8 +20,13 @@ from the Xeryon XD-C (`04d8:ef4a`). The onboard LED still toggles every 500 ms.
 This is a **Tauri 2 desktop app** with native Rust serial access. There is no Python,
 browser tab, Web Serial, or Node runtime dependency in the release app.
 For development, install Node 22.12+ and run `npm install`, then `npm run dev`
-from this repository root. On Windows, `.\dev.cmd` installs dependencies and starts
-development using `npm.cmd`, with no PowerShell execution-policy changes needed.
+from this repository root. On Windows, **`.\dev.cmd`** installs dependencies,
+builds and reflashes the Teensy, then starts the desktop frontend in development
+mode. Close any existing app or serial terminal first, and press the Teensy Program
+button if the loader waits. Installation or upload failures stop the launcher.
+It uses the loader path in `upload.config.json`; extra arguments go to the desktop
+development command. For frontend-only development, use `npm.cmd run dev`.
+No persistent PowerShell execution-policy changes are needed.
 Vite serves the UI on loopback inside the Tauri window;
 CSS updates live, while JavaScript/HTML edits reload the UI and require reconnecting.
 Rust edits rebuild and restart the app. `npm run build` produces a release executable.

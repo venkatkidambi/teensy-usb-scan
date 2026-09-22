@@ -12,6 +12,12 @@ if errorlevel 1 exit /b 1
 rem An incremental install also picks up dependency changes after a git pull.
 call npm.cmd install --no-audit --no-fund
 if errorlevel 1 goto finish
+
+echo Building and flashing Teensy firmware...
+call "%~dp0upload.cmd"
+if errorlevel 1 goto finish
+
+echo Starting the desktop frontend...
 call npm.cmd run dev -- %*
 
 :finish
