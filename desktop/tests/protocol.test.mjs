@@ -112,6 +112,7 @@ test('Xeryon travel units, schema, framing and Stop preemption',async()=>{
   assert.equal(xeryonTravelNm('0.078'),78);
   assert.equal(xeryonTravelNm('1.234'),1234);
   assert.equal(xeryonMoveCommand('U','10','10000',true),'XERYON_MOVE U 10000 10000');
+  assert.equal(xeryonMoveCommand('U','10','',true),'XERYON_MOVE U 10000');
   assert.equal(xeryonMoveCommand('U','10','10000',false),'XERYON_MOVE U 10000');
   for(const value of ['0','-1','0.077','1.2345','Infinity','1e3','2617245.619'])assert.throws(()=>xeryonTravelNm(value));
   const ack={type:'xeryon_ack',id:1,action:'move',target:-28};
@@ -148,10 +149,13 @@ test('Xeryon reply resolves the move and motion telemetry remains optional',asyn
   const snapshot={type:'snapshot',id:0,ms:100,epoch:1,vid:1240,pid:61258,mounted:true,cdc:2,records:3,malformed:0,skipped:0,values:{},xeryon_motion:{state:1,target:228}};
   assert.deepEqual(parseMessage(JSON.stringify(snapshot)).xeryon_motion,{state:1,target:228});
   for(const motion of [{state:5,target:0},{state:1,target:33554432},{state:1,target:1.5},null])assert.throws(()=>parseMessage(JSON.stringify({...snapshot,xeryon_motion:motion})),/Xeryon/);
-  const hello={type:'hello',id:1,protocol:1,board:'Teensy 4.1',firmware:'0.1.5',motion:true,pressure:true,xeryon:true,xeryon_speed:true};
+  const hello={type:'hello',id:1,protocol:1,board:'Teensy 4.1',firmware:'0.1.7',motion:true,pressure:true,xeryon:true,xeryon_speed:true,xeryon_optional_speed:true};
   assert.equal(parseMessage(JSON.stringify(hello)).xeryon,true);
   assert.equal(parseMessage(JSON.stringify(hello)).xeryon_speed,true);
+  assert.equal(parseMessage(JSON.stringify(hello)).xeryon_optional_speed,true);
   assert.throws(()=>parseMessage(JSON.stringify({...hello,xeryon_speed:1})),/speed capability/);
+  assert.throws(()=>parseMessage(JSON.stringify({...hello,xeryon_optional_speed:1})),/optional speed capability/);
+  delete hello.xeryon_optional_speed;assert.equal(parseMessage(JSON.stringify(hello)).xeryon_optional_speed,undefined);
   delete hello.xeryon_speed;assert.equal(parseMessage(JSON.stringify(hello)).xeryon_speed,undefined);
   delete hello.xeryon;assert.equal(parseMessage(JSON.stringify(hello)).xeryon,undefined);
   const queue=[];

@@ -35,11 +35,11 @@ dependencies; there is no frontend framework or additional runtime.
 
 ## Xeryon manual movement
 
-Flash firmware 0.1.6 with `.\dev.cmd`, connect Teensy, then use **Xeryon movement**:
-enter travel in µm and speed in µm/s, then click **Up (+)** or **Down (−)**. Travel is relative to the
+Flash current firmware with `.\dev.cmd`, connect Teensy, then use **Xeryon movement**:
+enter travel in µm, optionally enter speed in µm/s, then click **Up (+)** or **Down (−)**. Travel is relative to the
 latest encoder position and rounded to 0.078 µm/count. Up increases the encoder
-value; Down decreases it. Speed is a positive whole number (default 10000 µm/s)
-and is sent before each target. The XD-C uses that speed and its existing tuning
+value; Down decreases it. If entered, speed is a positive whole number and is
+sent before the target. If left blank, the XD-C keeps its current speed setting and existing tuning
 to reach and hold the target. **Stop** requests an interruption.
 
 The panel shows the requested target and waits for controller feedback before

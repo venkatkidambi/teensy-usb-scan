@@ -14,7 +14,7 @@ export function xeryonTravelNm(value) {
 }
 export function xeryonMoveCommand(direction, travel, speed, speedSupported) {
   const move=`XERYON_MOVE ${direction} ${xeryonTravelNm(travel)}`;
-  return speedSupported?`${move} ${Number(speed)}`:move;
+  return speedSupported&&String(speed).trim()!==''?`${move} ${Number(speed)}`:move;
 }
 const tags = new Set(['EPOS','DPOS','STAT','SRNO','SOFT','FREQ','TIME','SYNC']);
 export function pressureState(p) {
@@ -57,6 +57,7 @@ export function parseMessage(line) {
   } else if(m.type==='hello') {
     if(m.protocol!==1||m.board!=='Teensy 4.1'||typeof m.firmware!=='string'||typeof m.motion!=='boolean'||typeof m.pressure!=='boolean') throw Error('Incompatible firmware; upload this project’s telemetry build');
     if(m.xeryon_speed!==undefined&&typeof m.xeryon_speed!=='boolean') throw Error('Invalid Xeryon speed capability');
+    if(m.xeryon_optional_speed!==undefined&&typeof m.xeryon_optional_speed!=='boolean') throw Error('Invalid Xeryon optional speed capability');
     if(m.xeryon!==undefined&&typeof m.xeryon!=='boolean') throw Error('Invalid Xeryon capability');
   } else if(m.type==='pong') { if(!u32(m.ms)) throw Error('Invalid pong'); }
   else if(m.type==='ack') { if(typeof m.stream!=='boolean') throw Error('Invalid acknowledgement'); }

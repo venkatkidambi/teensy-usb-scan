@@ -25,6 +25,7 @@ function controls(){
 function xeryonBlocked(){
   if(!connected)return 'Connect Teensy to move the actuator.';
   if(!hello?.xeryon)return 'Upload current firmware to enable Xeryon movement.';
+  if(hello.xeryon_speed&&!hello.xeryon_optional_speed&&$('xeryon-speed').value.trim()==='')return 'This firmware requires a speed. Enter one, or flash current firmware to use the controller setting.';
   if(!snapshot?.mounted||snapshot.cdc!==2||snapshot.vid!==0x04d8||snapshot.pid!==0xef4a)return 'Connect the Xeryon to the USB2 host port.';
   const v=snapshot.values;
   if(age(v.EPOS)>=3000||age(v.STAT)>=3000)return 'Waiting for fresh position and status.';
@@ -102,6 +103,7 @@ $('connect').addEventListener('click',async()=>{
   finally{busy=false;controls();render();}
 });
 $('refresh').addEventListener('click',refresh);$('port').addEventListener('change',controls);
+$('xeryon-speed').addEventListener('input',render);
 for(const[id,command]of[['ping','PING'],['snapshot','SNAPSHOT']])$(id).addEventListener('click',()=>void request(command).catch(()=>{}));
 $('stream').addEventListener('click',()=>void request(streaming?'STREAM 0':'STREAM 1').catch(()=>{}));
 for(const [id,direction] of [['plunger-up','U'],['plunger-down','D']])$(id).addEventListener('click',()=>{
@@ -111,7 +113,7 @@ for(const [id,direction] of [['plunger-up','U'],['plunger-down','D']])$(id).addE
 });
 for(const [id,direction] of [['xeryon-up','U'],['xeryon-down','D']])$(id).addEventListener('click',()=>{
   const distance=$('xeryon-distance'),speed=$('xeryon-speed');
-  if(!distance.reportValidity()||(hello?.xeryon_speed&&!speed.reportValidity())||xeryonBlocked())return;
+  if(!distance.reportValidity()||(hello?.xeryon_speed&&speed.value.trim()!==''&&!speed.reportValidity())||xeryonBlocked())return;
   try{
     void request(xeryonMoveCommand(direction,distance.value,speed.value,hello?.xeryon_speed)).catch(()=>{});
   }
@@ -146,7 +148,7 @@ function render(){
   text('pressure-detail',!active?'Raw readings appear when the I²C sensor responds.':!pressure?'Waiting for pressure telemetry.':`${pressureState(pressure)} · transfer errors ${pressure.errors??0}${pressure.sensor==='i2c'?` · WHO_AM_I ${pressure.who===null?'unavailable':`0x${pressure.who.toString(16).padStart(2,'0')}`} · temperature (raw) ${pressureValid?pressure.temperature:'—'}`:''}${pressure.pins?` · DT ${pressure.pins.dout_high?'HIGH':'LOW'} · SCK ${pressure.pins.sck_high?'HIGH (should be LOW)':'LOW'}`:''}`);
   const xm=snapshot?.xeryon_motion;
   $('xeryon-speed').disabled=!connected||!hello?.xeryon_speed;
-  text('xeryon-motion-state',demo?'Demo — motion controls are disabled.':xeryonBlocked()||(xm?.state===2?'Target reached.':xm?.state===3?'Stop requested.':xm?.state===4?'Move interrupted — check feedback and the activity log.':hello?.xeryon_speed?'Ready. Enter travel and speed, then choose Up or Down.':'Ready. Speed uses the controller setting with this firmware. Enter travel, then choose Up or Down.'));
+  text('xeryon-motion-state',demo?'Demo — motion controls are disabled.':xeryonBlocked()||(xm?.state===2?'Target reached.':xm?.state===3?'Stop requested.':xm?.state===4?'Move interrupted — check feedback and the activity log.':hello?.xeryon_speed?'Ready. Enter travel; leave speed blank to use the controller setting.':'Ready. Speed uses the controller setting with this firmware. Enter travel, then choose Up or Down.'));
   text('xeryon-target',xm?.target!=null?`Requested target ${position(xm.target)} µm`:'Travel rounds to the nearest 0.078 µm.');
   const plunger=snapshot?.plunger;
   text('plunger-position',plunger?positionNumber.format(plunger.counts*1000/plunger.counts_per_mm):'—');
@@ -194,4 +196,5 @@ $('demo').addEventListener('click',()=>{
   demoTimer=setInterval(()=>accept(make(Math.floor(performance.now()-start)+60000)),100);
 });
 setInterval(()=>{if(connected&&session&&!session.pending&&performance.now()-lastPing>2000){lastPing=performance.now();void request('PING',true).catch(()=>{});}render();if(history.length||pressureHistory.length)draw();},500);
+$('xeryon-speed').value='';
 render();controls();void refresh();

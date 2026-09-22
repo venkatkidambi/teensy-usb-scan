@@ -51,18 +51,23 @@ The firmware sends `{"type":"error","id":0,"message":"invalid command"}` for
 malformed commands after LF. Only the listed commands are accepted; arbitrary Xeryon commands are rejected. Pausing display updates never pauses actuator reception.
 
 Xeryon-enabled firmware adds `xeryon: true` to HELLO; firmware 0.1.6+ also
-adds `xeryon_speed: true` for speed-controlled moves. For older Xeryon firmware,
+adds `xeryon_speed: true` for speed-controlled moves. Firmware 0.1.7 adds
+`xeryon_optional_speed: true` for moves that retain the controller's speed.
+For older Xeryon firmware,
 the UI sends the original `XERYON_MOVE <id> <U|D> <nm>` command and disables the
 speed input. The controller keeps its existing speed setting in this mode.
 With `xeryon_speed: true`, the UI includes integer speed 1–16777215 **µm/s**
-after integer distance 78–2617245618 **nm**. The desktop accepts both command
-shapes so it can connect to either firmware version.
+after integer distance 78–2617245618 **nm** only when a speed is entered.
+Leaving it blank sends the original command and preserves the controller's
+current speed setting on firmware 0.1.7+. Firmware 0.1.6 requires an entered
+speed; the UI reports this before a move. The desktop accepts both command shapes.
 The UI converts µm to nm, allowing three decimal places. Firmware rounds travel
 to counts as `(nm + 39) / 78`, then adds/subtracts from the latest EPOS. It checks
 signed 26-bit EPOS/target bounds [-33554432, 33554431], known USB identity,
 ready CDC, fresh EPOS/STAT (<3 seconds), motion state and controller faults.
-It queues `SSPD=<speed>\nDPOS=<target>\n` together in one bounded USB write,
-so speed precedes movement. Limits, homing and tuning are unchanged. Settings
+With an entered speed, it queues `SSPD=<speed>\nDPOS=<target>\n` together in
+one bounded USB write, so speed precedes movement. Without one, it queues only
+`DPOS=<target>\n`. Limits, homing and tuning are unchanged. Settings
 are not saved to controller flash. The existing 60-second move deadline also
 applies to slow moves.
 

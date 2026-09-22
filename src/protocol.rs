@@ -160,7 +160,7 @@ pub enum Command {
     Move(u32, bool, u8, u32),
     Stop(u32),
     Zero(u32),
-    XeryonMove(u32, bool, u32, u32),
+    XeryonMove(u32, bool, u32, Option<u32>),
     XeryonStop(u32),
 }
 
@@ -185,8 +185,14 @@ impl Command {
                 if !(78..=crate::xeryon_motion::MAX_TRAVEL_NM).contains(&nm) {
                     return Err(());
                 }
-                let speed = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
-                if !(1..=crate::xeryon_motion::MAX_SPEED).contains(&speed) {
+                let speed = words
+                    .next()
+                    .map(|value| value.parse::<u32>())
+                    .transpose()
+                    .map_err(|_| ())?;
+                if speed
+                    .is_some_and(|value| !(1..=crate::xeryon_motion::MAX_SPEED).contains(&value))
+                {
                     return Err(());
                 }
                 Self::XeryonMove(id, up, nm, speed)
@@ -333,15 +339,18 @@ mod tests {
     fn xeryon_commands_are_bounded() {
         assert_eq!(
             Command::parse(b"XERYON_MOVE 1 U 10000 10000"),
-            Ok(Command::XeryonMove(1, true, 10000, 10000))
+            Ok(Command::XeryonMove(1, true, 10000, Some(10000)))
         );
         assert_eq!(
             Command::parse(b"XERYON_MOVE 2 D 78 10000"),
-            Ok(Command::XeryonMove(2, false, 78, 10000))
+            Ok(Command::XeryonMove(2, false, 78, Some(10000)))
+        );
+        assert_eq!(
+            Command::parse(b"XERYON_MOVE 3 U 10000"),
+            Ok(Command::XeryonMove(3, true, 10000, None))
         );
         assert_eq!(Command::parse(b"XERYON_STOP 3"), Ok(Command::XeryonStop(3)));
         for bad in [
-            "XERYON_MOVE 1 U 10000",
             "XERYON_MOVE 1 U 10000 0",
             "XERYON_MOVE 1 U 10000 16777216",
             "XERYON_MOVE 1 U 10000 -1",

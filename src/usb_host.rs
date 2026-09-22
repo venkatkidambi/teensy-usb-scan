@@ -31,7 +31,7 @@ pub fn heartbeat(now: u32) {
     cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().heartbeat(now));
 }
 
-pub fn move_xeryon(up: bool, nm: u32, speed: u32, now: u32) -> Result<i32, &'static str> {
+pub fn move_xeryon(up: bool, nm: u32, speed: Option<u32>, now: u32) -> Result<i32, &'static str> {
     let t = telemetry();
     if t.xeryon_motion.is_some_and(|m| m.state == 1) {
         return Err("Wait for the Xeryon move to finish or press Stop");

@@ -99,7 +99,7 @@ atomic measurement of every actuator property: each has its own reception time.
 USB2 supports one standard CDC ACM interface, opened at 115200 8-N-1 with DTR.
 Other USB protocols (including CANopen/SLCAN) are not implemented. A three-second
 CDC setup timeout or failed setup requires unplugging/reconnecting to retry.
-Explicit Xeryon moves send `SSPD` speed settings and `DPOS` targets; Stop sends `STOP`. No homing or saved configuration changes are made automatically. The PC command
+Explicit Xeryon moves send `DPOS` targets and, when speed is entered, an `SSPD` setting first; Stop sends `STOP`. No homing or saved configuration changes are made automatically. The PC command
 protocol is documented in [desktop/PROTOCOL.md](desktop/PROTOCOL.md).
 
 ## Tools and build
@@ -242,18 +242,18 @@ Plunger and I²C pressure support are implemented; their hardware timing, motion
 readings still need board validation. Pressure conversion to physical units
 requires transducer calibration.
 
-## Xeryon manual movement (firmware 0.1.6)
+## Xeryon manual movement
 
 On Windows run `.\dev.cmd` to flash the firmware and open the frontend. Connect
-Teensy, enter **Travel (µm)** and **Speed (µm/s)** in **Xeryon movement**, then click **Up (+)** or
+Teensy, enter **Travel (µm)** and optionally **Speed (µm/s)** in **Xeryon movement**, then click **Up (+)** or
 **Down (−)**. Up increases the encoder position; Down decreases it. Confirm how
 those directions correspond to your physical mounting. **Stop** interrupts a move.
 
 Firmware takes the latest EPOS, adds/subtracts the travel rounded to the nearest
 encoder count (0.078 µm), and sends a `DPOS` command. The XD-C moves to and holds
-that target using the entered speed and its existing tuning. Speed is a positive
-whole number in µm/s (default 10000); firmware sends `SSPD` immediately before
-`DPOS`. The controller accepts 1–16777215 µm/s; achievable speed depends on the stage. See the [XD-C manual, sections 4.1–4.3](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.1%20-%20JPL.pdf).
+that target using its current speed setting and existing tuning. Speed is optional;
+when entered, it must be a positive whole number in µm/s and firmware sends `SSPD`
+immediately before `DPOS`. The controller accepts 1–16777215 µm/s; achievable speed depends on the stage. See the [XD-C manual, sections 4.1–4.3](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.1%20-%20JPL.pdf).
 
 Moves require fresh encoder/status feedback and reject overlapping motion,
 controller faults, and targets outside the signed 26-bit range. This numeric
@@ -320,7 +320,7 @@ bus is reported as an error and may still require hardware intervention. Motor
 interrupts, USB servicing, and disconnect handling continue during acquisition.
 
 Update both firmware and desktop app. Flash with `./upload.sh` on macOS or
-`upload.cmd` on Windows, then reconnect and verify **Firmware 0.1.6**. The pressure
+`upload.cmd` on Windows, then reconnect and verify the current firmware version. The pressure
 panel should identify **I²C · address 0x5C** and report WHO_AM_I, raw temperature,
 and increasing pressure samples. Use **Read snapshot** to capture the `Hardware`
 log if it fails. Older firmware still reports HX711 diagnostics in the new app.
