@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {NativeSession,parseMessage,statusFlags,elapsed,pressureState} from '../ui/protocol.mjs';
+import {NativeSession,parseMessage,statusFlags,elapsed,pressureState,xeryonTravelNm} from '../ui/protocol.mjs';
 
 test('telemetry schema and status mapping',()=>{
   const m={type:'snapshot',id:0,ms:100,epoch:1,vid:1240,pid:61258,mounted:true,cdc:2,records:3,malformed:0,skipped:0,values:{STAT:{value:1344,ms:99}}};
@@ -104,4 +104,52 @@ test('I²C pressure accepts unsigned 24-bit values and validates sensor diagnost
   assert.equal(pressureState({...m.pressure,state:0}),'Initializing I²C sensor');
   assert.equal(pressureState({...m.pressure,state:3}),'I²C transfer timed out');
   assert.equal(pressureState({...m.pressure,state:4}),'I²C bus error / no acknowledgement');
+});
+
+
+test('Xeryon travel units, schema, framing and Stop preemption',async()=>{
+  assert.equal(xeryonTravelNm('10'),10000);
+  assert.equal(xeryonTravelNm('0.078'),78);
+  assert.equal(xeryonTravelNm('1.234'),1234);
+  for(const value of ['0','-1','0.077','1.2345','Infinity','1e3','2617245.619'])assert.throws(()=>xeryonTravelNm(value));
+  const ack={type:'xeryon_ack',id:1,action:'move',target:-28};
+  assert.deepEqual(parseMessage(JSON.stringify(ack)),ack);
+  assert.throws(()=>parseMessage(JSON.stringify({...ack,target:33554432})));
+  assert.throws(()=>parseMessage(JSON.stringify({...ack,action:'reset'})));
+  const b=backend(false),s=new NativeSession(b.invoke,()=>{},assert.fail,assert.fail,500);
+  await s.open('COM6');
+  try{
+    for(const cmd of ['XERYON_MOVE U 0','XERYON_MOVE U 77','XERYON_MOVE D -100','XERYON_MOVE X 100','XERYON_MOVE U 2617245619','XERYON_MOVE U 1.5','DPOS=100'])await assert.rejects(s.request(cmd),/Unsupported/);
+    const moving=s.request('XERYON_MOVE D 10000');
+    assert.equal(s.pending.expected,'xeryon_ack');
+    const interrupted=assert.rejects(moving,/Interrupted by Stop/);
+    const stopping=s.request('XERYON_STOP');
+    const closed=assert.rejects(stopping,/Connection closed/);
+    assert.deepEqual(b.sent,['XERYON_MOVE 1 D 10000','XERYON_STOP 2']);
+    await s.close();await interrupted;await closed;
+  }finally{await s.close();}
+});
+
+
+test('Xeryon reply resolves the move and motion telemetry remains optional',async()=>{
+  const snapshot={type:'snapshot',id:0,ms:100,epoch:1,vid:1240,pid:61258,mounted:true,cdc:2,records:3,malformed:0,skipped:0,values:{},xeryon_motion:{state:1,target:228}};
+  assert.deepEqual(parseMessage(JSON.stringify(snapshot)).xeryon_motion,{state:1,target:228});
+  for(const motion of [{state:5,target:0},{state:1,target:33554432},{state:1,target:1.5},null])assert.throws(()=>parseMessage(JSON.stringify({...snapshot,xeryon_motion:motion})),/Xeryon/);
+  const hello={type:'hello',id:1,protocol:1,board:'Teensy 4.1',firmware:'0.1.5',motion:true,pressure:true,xeryon:true};
+  assert.equal(parseMessage(JSON.stringify(hello)).xeryon,true);
+  delete hello.xeryon;assert.equal(parseMessage(JSON.stringify(hello)).xeryon,undefined);
+  const queue=[];
+  const s=new NativeSession(async(name,args)=>{
+    if(name==='serial_connect')return 7;
+    if(name==='serial_poll')return {session:7,messages:queue.splice(0),coalesced:0,closed:false};
+    if(name==='serial_send'){
+      const [cmd,id]=args.command.split(' ');
+      queue.push(JSON.stringify({type:'xeryon_ack',id:+id,action:cmd==='XERYON_MOVE'?'move':'stop',...(cmd==='XERYON_MOVE'?{target:228}:{})}));
+    }
+  },()=>{},assert.fail,assert.fail,500);
+  try{
+    await s.open('COM6');
+    assert.equal((await s.request('XERYON_MOVE U 10000')).target,228);
+    assert.equal((await s.request('XERYON_STOP')).action,'stop');
+  }finally{await s.close();}
 });

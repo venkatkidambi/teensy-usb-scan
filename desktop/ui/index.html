@@ -10,6 +10,15 @@
     <article class="metric"><div class="metric-label">Encoder position</div><div class="reading"><strong id="epos">—</strong><small>µm</small></div><div class="metric-foot"><span id="epos-age">Awaiting feedback</span><span>EPOS</span></div></article>
     <article class="metric"><div class="metric-label">Target position</div><div class="reading"><strong id="dpos">—</strong><small>µm</small></div><div class="metric-foot"><span id="dpos-age">Awaiting feedback</span><span>DPOS</span></div></article>
   </section>
+  <section class="panel" aria-label="Xeryon actuator control">
+    <div class="panel-heading"><div><h2>Xeryon movement</h2><p id="xeryon-motion-state">Connect Teensy to move the actuator.</p></div></div>
+    <div class="plunger-controls">
+      <label>Travel (µm)<input id="xeryon-distance" type="number" min="0.078" max="2617245.618" step="0.001" value="10"></label>
+      <button id="xeryon-up" disabled>Up (+)</button><button id="xeryon-down" disabled>Down (−)</button>
+      <button id="xeryon-stop" class="stop-button" disabled>Stop</button>
+    </div>
+    <div class="panel-foot"><span>Up increases encoder position; Down decreases it.</span><span id="xeryon-target">Travel rounds to the nearest 0.078 µm.</span></div>
+  </section>
   <div class="main-grid">
     <section class="panel"><div class="panel-heading"><div><h2>Position over time</h2><p>Microns (µm) · last 60 seconds</p></div><span id="stream-state" class="tag">NO DATA</span></div><div class="plot-wrap"><canvas id="plot" role="img" aria-label="Encoder and target position in microns over time"></canvas><div id="empty"><strong>No position data</strong><p>Position feedback will appear here.</p></div></div><div class="panel-foot"><span class="legend">━ Encoder &nbsp; <span>┄ Target</span></span><span id="samples">0 samples</span></div></section>
     <section class="panel"><div class="panel-heading"><div><h2>Controller status</h2><p id="stat-word">Waiting for STAT</p></div></div><div id="flags" class="flags"><p class="empty-copy">Active status flags appear with XD-C feedback.</p></div><div id="stat-age" class="panel-foot">No status received</div></section>
@@ -36,6 +45,6 @@
     <article class="panel device"><div><h2>Pressure input <span id="pressure-state" class="tag">Offline</span></h2><p id="pressure-sensor">I²C · address 0x5C</p><small>Raw Raw counts · physical units uncalibrated</small></div></article>
   </section>
   <section class="panel diagnostics"><div class="panel-heading"><div><h2>Connection diagnostics</h2><p>Connection and telemetry</p></div><div class="tools"><button id="ping" disabled>Ping</button><button id="snapshot" disabled>Read snapshot</button><button id="stream" disabled>Pause stream</button></div></div><div class="counters"><span>Round trip <b id="rtt">—</b></span><span>Records <b id="records">0</b></span><span>Malformed <b id="malformed">0</b></span><span>Skipped snapshots <b id="skipped">0</b></span><span>Desktop coalesced <b id="coalesced">0</b></span></div><details><summary>Activity log <span>Last 100 events</span></summary><pre id="log">Waiting for connection.</pre></details></section>
-  <footer><p>Plunger controls operate the wired motor. Xeryon remains read-only.</p><span id="session-label">NO SESSION</span></footer>
+  <footer><p>Xeryon travel uses the controller’s current speed setting. Plunger controls operate the separate wired motor.</p><span id="session-label">NO SESSION</span></footer>
 </main>
 </body></html>

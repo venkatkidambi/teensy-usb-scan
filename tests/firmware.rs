@@ -5,6 +5,8 @@ mod line;
 mod protocol;
 #[path = "../src/xeryon.rs"]
 mod xeryon;
+#[path = "../src/xeryon_motion.rs"]
+mod xeryon_motion;
 
 #[test]
 fn decoded_feedback_reaches_snapshot() {

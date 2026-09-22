@@ -7,6 +7,16 @@ static uint32_t now, events[5], reads, controls;
 static bool enumerated, accept = true;
 static tuh_xfer_cb_t pending;
 static uintptr_t token;
+static uint32_t available = 512, writes, flushes, clears;
+static char transmitted[33];
+uint32_t tuh_cdc_write_available(uint8_t idx) { assert(idx == 0); return available; }
+uint32_t tuh_cdc_write(uint8_t idx, const void *data, uint32_t len) {
+  assert(idx == 0 && len <= 32 && len <= available);
+  memcpy(transmitted, data, len); transmitted[len] = 0;
+  ++writes; return len;
+}
+uint32_t tuh_cdc_write_flush(uint8_t idx) { assert(idx == 0); ++flushes; return 0; }
+bool tuh_cdc_write_clear(uint8_t idx) { assert(idx == 0); ++clears; available = 512; return true; }
 
 uint32_t tusb_time_millis_api(void) { return now; }
 bool tuh_mounted(uint8_t address) { assert(address == 1); return enumerated; }
@@ -56,6 +66,8 @@ static void complete(tusb_xfer_result_t result) {
 }
 
 int main(void) {
+  const uint8_t move[] = "DPOS=-128\n";
+  assert(!usb_serial_send(move, sizeof(move)-1, false));
   usb_serial_task();
   assert(!controls && !reads);
   tuh_cdc_mount_cb(0);
@@ -73,9 +85,18 @@ int main(void) {
   usb_serial_task();
   complete(XFER_RESULT_SUCCESS);
   assert(events[1] == 1);
+  assert(usb_serial_send(move, sizeof(move)-1, false));
+  assert(writes == 1 && flushes == 1 && strcmp(transmitted, "DPOS=-128\n") == 0);
+  available = 2;
+  assert(!usb_serial_send(move, sizeof(move)-1, false));
+  assert(writes == 1); // No partial command on backpressure.
+  assert(usb_serial_send((const uint8_t *)"STOP\n", 5, true));
+  assert(clears == 1 && writes == 2 && strcmp(transmitted, "STOP\n") == 0);
+  assert(!usb_serial_send(move, 33, false));
   usb_serial_task();
   assert(reads == 1);
   tuh_cdc_umount_cb(0);
+  assert(!usb_serial_send(move, sizeof(move)-1, false));
   usb_serial_task();
   assert(reads == 1 && events[2] == 1);
 

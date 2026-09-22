@@ -18,6 +18,9 @@ works. Each request uses a nonzero u32 ID; only one request is in flight at a ti
 | `PLUNGER_MOVE 7 D 64 10` | `plunger_ack`, action `move` | Relative down travel |
 | `PLUNGER_STOP 8` | `plunger_ack`, action `stop` | Disable plunger motor |
 | `PLUNGER_ZERO 9` | `plunger_ack`, action `zero` | Zero encoder while stopped |
+| `XERYON_MOVE 10 U 10000` | `xeryon_ack`, action `move`, target counts | Move Xeryon up 10 µm (wire distance in nm) |
+| `XERYON_MOVE 11 D 10000` | `xeryon_ack`, action `move`, target counts | Move Xeryon down 10 µm |
+| `XERYON_STOP 12` | `xeryon_ack`, action `stop` | Queue Xeryon STOP |
 
 Responses are newline-delimited JSON. Example:
 
@@ -45,7 +48,31 @@ These are monitoring snapshots, not a lossless acquisition stream.
 
 Unsupported input is rejected by both the native command allowlist and firmware.
 The firmware sends `{"type":"error","id":0,"message":"invalid command"}` for
-malformed commands after LF. Only the listed commands are accepted; Xeryon remains read-only. Pausing display updates never pauses actuator reception.
+malformed commands after LF. Only the listed commands are accepted; arbitrary Xeryon commands are rejected. Pausing display updates never pauses actuator reception.
+
+Xeryon-enabled firmware (0.1.5+) adds `xeryon: true` to HELLO. The UI accepts
+older HELLO messages without this capability but disables Xeryon controls.
+`XERYON_MOVE` requires direction U/D and integer distance 78–2617245618 **nm**.
+The UI converts µm to nm, allowing three decimal places. Firmware rounds travel
+to counts as `(nm + 39) / 78`, then adds/subtracts from the latest EPOS. It checks
+signed 26-bit EPOS/target bounds [-33554432, 33554431], known USB identity,
+ready CDC, fresh EPOS/STAT (<3 seconds), motion state and controller faults.
+It sends `DPOS=<target>\n`, without changing speed, limits, homing, or tuning.
+
+`xeryon_ack` means a whole command was queued into the nonblocking USB2 transmit
+buffer; it is not an acknowledgement from the XD-C. `target` is encoder counts.
+Snapshots add `xeryon_motion: {state, target}`; target is counts or null.
+States: 0 idle, 1 awaiting target/reached feedback, 2 target reached,
+3 Stop requested, 4 move interrupted. Reached requires fresh matching DPOS
+received after the command, followed by STAT with bit 10 set. Overlapping moves
+are rejected. Stop discards unsent queued bytes, but cannot recall an in-flight
+USB packet. USB2 disconnection resets motion state and never replays commands.
+
+An active move requests best-effort STOP on USB1 disconnect, 3-second stale
+EPOS/STAT, controller faults, 5-second heartbeat timeout or 60-second deadline.
+Physical stop cannot be guaranteed if USB2 is unavailable. Desktop Stop preempts
+pending requests and closes USB1 if unacknowledged after 500 ms. Pausing snapshots
+does not pause firmware motion monitoring; periodic PING keeps its heartbeat alive.
 
 Plunger-enabled firmware reports `motion: true`. Snapshots include an additive
 `plunger` object: signed 32-bit `counts`, `counts_per_mm: 16688`, boolean `running`

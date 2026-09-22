@@ -12,13 +12,67 @@ static ATTACHES: AtomicU32 = AtomicU32::new(0);
 static REMOVES: AtomicU32 = AtomicU32::new(0);
 static INTERRUPTS: AtomicU32 = AtomicU32::new(0);
 static XD_C: AtomicBool = AtomicBool::new(false);
+static MOTION: cortex_m::interrupt::Mutex<RefCell<crate::xeryon_motion::Motion>> =
+    cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon_motion::Motion::new()));
 static TELEMETRY: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::Decoder>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::Decoder::new()));
 static CACHE: cortex_m::interrupt::Mutex<RefCell<crate::protocol::Telemetry>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::protocol::Telemetry::new()));
 
 pub fn telemetry() -> crate::protocol::Telemetry {
-    cortex_m::interrupt::free(|cs| *CACHE.borrow(cs).borrow())
+    cortex_m::interrupt::free(|cs| {
+        let mut t = *CACHE.borrow(cs).borrow();
+        t.xeryon_motion = Some(*MOTION.borrow(cs).borrow());
+        t
+    })
+}
+
+pub fn heartbeat(now: u32) {
+    cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().heartbeat(now));
+}
+
+pub fn move_xeryon(up: bool, nm: u32, now: u32) -> Result<i32, &'static str> {
+    use core::fmt::Write;
+    let t = telemetry();
+    if t.xeryon_motion.is_some_and(|m| m.state == 1) {
+        return Err("Wait for the Xeryon move to finish or press Stop");
+    }
+    let target = crate::xeryon_motion::target(&t, up, nm, now)?;
+    let mut frame = crate::protocol::Frame::new();
+    writeln!(frame, "DPOS={target}").map_err(|_| "Xeryon command too long")?;
+    // SAFETY: called only in main context; C copies the complete command.
+    if !unsafe {
+        usb_serial_send(
+            frame.pending().as_ptr(),
+            frame.pending().len() as u32,
+            false,
+        )
+    } {
+        return Err("Xeryon USB transmit unavailable");
+    }
+    cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().start(target, now));
+    Ok(target)
+}
+
+pub fn stop_xeryon() -> Result<(), &'static str> {
+    if !crate::xeryon_motion::ready(&telemetry()) {
+        return Err("Xeryon is not connected");
+    }
+    // SAFETY: main context, static command, bounded nonblocking copy.
+    let sent = unsafe { usb_serial_send(b"STOP\n".as_ptr(), 5, true) };
+    cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().state = if sent { 3 } else { 4 });
+    if sent {
+        Ok(())
+    } else {
+        Err("Xeryon Stop could not be queued")
+    }
+}
+
+pub fn disconnect_xeryon() {
+    let active = cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow().state == 1);
+    if active {
+        let _ = stop_xeryon();
+    }
 }
 
 fn reset_telemetry() {
@@ -28,6 +82,7 @@ fn reset_telemetry() {
 }
 
 unsafe extern "C" {
+    fn usb_serial_send(data: *const u8, len: u32, stop: bool) -> bool;
     fn scanner_init() -> bool;
     fn scanner_task();
     fn scanner_interrupt();
@@ -112,6 +167,16 @@ pub fn poll() {
     }
     // SAFETY: host task is called only from the single main-loop context.
     unsafe { scanner_task() };
+    let t = telemetry();
+    let stop = cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().poll(&t, millis()));
+    if stop {
+        let result = stop_xeryon();
+        cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().state = 4);
+        log::warn!(
+            "Xeryon motion interrupted (feedback, connection, fault or timeout); Stop queued={}",
+            result.is_ok()
+        );
+    }
 }
 
 pub fn report() {
@@ -208,6 +273,9 @@ extern "C" fn scanner_device(
 extern "C" fn scanner_removed(address: u8) {
     XD_C.store(false, Ordering::Relaxed);
     reset_telemetry();
+    cortex_m::interrupt::free(|cs| {
+        *MOTION.borrow(cs).borrow_mut() = crate::xeryon_motion::Motion::new()
+    });
     cortex_m::interrupt::free(|cs| CACHE.borrow(cs).borrow_mut().reset());
     log::info!("Device removed: address={}", address);
 }
@@ -230,7 +298,7 @@ extern "C" fn scanner_serial_event(event: u8, address: u8, interface: u8) {
     });
     let message = match event {
         0 => "CDC ACM detected",
-        1 => "CDC ACM open: 115200 8-N-1, DTR asserted; receiving only",
+        1 => "CDC ACM open: 115200 8-N-1, DTR asserted",
         2 => "CDC ACM disconnected",
         3 => "CDC ACM setup failed; unplug/reconnect to retry",
         4 => "CDC ACM setup timed out; unplug/reconnect to retry",

@@ -26,11 +26,13 @@ pub struct Telemetry {
     pub plunger_io: Option<crate::plunger::Io>,
     pub pressure: Option<crate::pressure::Reading>,
     pub plunger: Option<(crate::plunger::Motion, Option<u16>)>,
+    pub xeryon_motion: Option<crate::xeryon_motion::Motion>,
 }
 
 impl Telemetry {
     pub const fn new() -> Self {
         Self {
+            xeryon_motion: None,
             plunger_io: None,
             pressure: None,
             plunger: None,
@@ -85,6 +87,18 @@ impl Telemetry {
             }
         }
         out.write_str("}")?;
+        if let Some(m) = self.xeryon_motion {
+            write!(
+                out,
+                ",\"xeryon_motion\":{{\"state\":{},\"target\":",
+                m.state
+            )?;
+            match m.target {
+                Some(target) => write!(out, "{target}")?,
+                None => out.write_str("null")?,
+            }
+            out.write_str("}")?;
+        }
         if let Some((motor, pot)) = self.plunger {
             write!(
                 out,
@@ -146,6 +160,8 @@ pub enum Command {
     Move(u32, bool, u8, u32),
     Stop(u32),
     Zero(u32),
+    XeryonMove(u32, bool, u32),
+    XeryonStop(u32),
 }
 
 impl Command {
@@ -158,6 +174,19 @@ impl Command {
             return Err(());
         }
         let command = match name {
+            "XERYON_STOP" => Self::XeryonStop(id),
+            "XERYON_MOVE" => {
+                let up = match words.next() {
+                    Some("U") => true,
+                    Some("D") => false,
+                    _ => return Err(()),
+                };
+                let nm = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
+                if !(78..=crate::xeryon_motion::MAX_TRAVEL_NM).contains(&nm) {
+                    return Err(());
+                }
+                Self::XeryonMove(id, up, nm)
+            }
             "PLUNGER_STOP" => Self::Stop(id),
             "PLUNGER_ZERO" => Self::Zero(id),
             "PLUNGER_MOVE" => {
@@ -297,6 +326,31 @@ mod tests {
         }
     }
     #[test]
+    fn xeryon_commands_are_bounded() {
+        assert_eq!(
+            Command::parse(b"XERYON_MOVE 1 U 10000"),
+            Ok(Command::XeryonMove(1, true, 10000))
+        );
+        assert_eq!(
+            Command::parse(b"XERYON_MOVE 2 D 78"),
+            Ok(Command::XeryonMove(2, false, 78))
+        );
+        assert_eq!(Command::parse(b"XERYON_STOP 3"), Ok(Command::XeryonStop(3)));
+        for bad in [
+            "XERYON_MOVE 1 U 0",
+            "XERYON_MOVE 1 U 77",
+            "XERYON_MOVE 1 U 2617245619",
+            "XERYON_MOVE 1 X 100",
+            "XERYON_MOVE 1 D -100",
+            "XERYON_MOVE 1 U 1.5",
+            "XERYON_MOVE 1 U 100 extra",
+            "XERYON_STOP 0",
+            "XERYON_STOP 1 extra",
+        ] {
+            assert!(Command::parse(bad.as_bytes()).is_err(), "{bad}");
+        }
+    }
+    #[test]
     fn snapshots_reset_and_fit_worst_case() {
         let mut t = Telemetry::new();
         for tag in TAGS {
@@ -319,7 +373,15 @@ mod tests {
         });
         t.plunger_io = Some(crate::plunger::Io::default());
         let mut f = Frame::new();
+        let mut motion = crate::xeryon_motion::Motion::new();
+        motion.start(crate::xeryon_motion::MIN_POSITION, u32::MAX);
+        t.xeryon_motion = Some(motion);
         t.snapshot(&mut f, u32::MAX, u32::MAX, u32::MAX).unwrap();
+        assert!(
+            core::str::from_utf8(f.pending())
+                .unwrap()
+                .contains("\"xeryon_motion\":{\"state\":1,\"target\":-33554432}")
+        );
         let original = f.pending().to_vec();
         f.consume(512);
         assert_eq!(f.pending(), &original[512..]);

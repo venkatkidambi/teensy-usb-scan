@@ -11,6 +11,7 @@ mod pressure_i2c;
 mod protocol;
 mod usb_host;
 mod xeryon;
+mod xeryon_motion;
 
 #[bsp::rt::entry]
 fn main() -> ! {

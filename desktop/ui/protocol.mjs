@@ -4,6 +4,14 @@ export const statusFlags = word => FLAGS.flatMap((name,bit) => word & (1<<bit) ?
 export const elapsed = (now,before) => (now-before)>>>0;
 const u32 = n => Number.isInteger(n) && n>=0 && n<=0xffffffff;
 const object = v => v!==null && typeof v==='object' && !Array.isArray(v);
+const xeryonPosition = n => Number.isInteger(n) && n>=-33554432 && n<=33554431;
+export function xeryonTravelNm(value) {
+  // Decimal µm input, transmitted as integer nm to avoid floating-point firmware.
+  if(!/^[0-9]+(?:\.[0-9]{1,3})?$/.test(String(value))) throw Error('Enter travel in µm with up to three decimal places');
+  const nm=Math.round(Number(value)*1000);
+  if(!Number.isSafeInteger(nm)||nm<78||nm>2617245618) throw Error('Travel must be between 0.078 and 2617245.618 µm');
+  return nm;
+}
 const tags = new Set(['EPOS','DPOS','STAT','SRNO','SOFT','FREQ','TIME','SYNC']);
 export function pressureState(p) {
   if(p?.sensor==='i2c') return ['Initializing I²C sensor','Waiting for first sample','Receiving','I²C transfer timed out','I²C bus error / no acknowledgement'][p.state]??(p.valid?'Receiving':'Initializing I²C sensor');
@@ -19,6 +27,10 @@ export function parseMessage(line) {
     for(const [tag,s] of Object.entries(m.values)) {
       if(!tags.has(tag)||!object(s)||!Number.isSafeInteger(s.value)||!u32(s.ms)) throw Error('Invalid sample');
       if(tag==='STAT'&&(s.value<0||s.value>0xffffff)) throw Error('Invalid STAT');
+    }
+    if(m.xeryon_motion!==undefined) {
+      const x=m.xeryon_motion;
+      if(!object(x)||!u32(x.state)||x.state>4||(x.target!==null&&!xeryonPosition(x.target))) throw Error('Invalid Xeryon motion telemetry');
     }
     if(m.pressure!==undefined) {
       const p=m.pressure;
@@ -40,8 +52,10 @@ export function parseMessage(line) {
     }
   } else if(m.type==='hello') {
     if(m.protocol!==1||m.board!=='Teensy 4.1'||typeof m.firmware!=='string'||typeof m.motion!=='boolean'||typeof m.pressure!=='boolean') throw Error('Incompatible firmware; upload this project’s telemetry build');
+    if(m.xeryon!==undefined&&typeof m.xeryon!=='boolean') throw Error('Invalid Xeryon capability');
   } else if(m.type==='pong') { if(!u32(m.ms)) throw Error('Invalid pong'); }
   else if(m.type==='ack') { if(typeof m.stream!=='boolean') throw Error('Invalid acknowledgement'); }
+  else if(m.type==='xeryon_ack') { if(!['move','stop'].includes(m.action)||(m.action==='move'&&!xeryonPosition(m.target))) throw Error('Invalid Xeryon acknowledgement'); }
   else if(m.type==='plunger_ack') { if(!['move','stop','zero'].includes(m.action)) throw Error('Invalid plunger acknowledgement'); }
   else if(m.type==='error') { if(typeof m.message!=='string') throw Error('Invalid error'); }
   else throw Error('Unknown message type');
@@ -88,14 +102,16 @@ export class NativeSession {
   }
   request(command) {
     if(this.closed||this.session===null) return Promise.reject(Error('Not connected'));
-    if(command==='PLUNGER_STOP') this.rejectPending(Error('Interrupted by Stop'));
+    if(command==='PLUNGER_STOP'||command==='XERYON_STOP') this.rejectPending(Error('Interrupted by Stop'));
     if(this.pending) return Promise.reject(Error('Wait for the current request'));
     const move=/^PLUNGER_MOVE [UD] ([0-9]+) ([0-9]+)$/.exec(command);
     const validMove=move&&+move[1]>0&&+move[1]<=255&&Number.isSafeInteger(+move[2])&&+move[2]>0&&Math.floor((+move[2]*16688+500)/1000)<=2147483647;
-    if(!validMove&&!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO'].includes(command)) return Promise.reject(Error('Unsupported command'));
+    const xeryonMove=/^XERYON_MOVE [UD] ([0-9]+)$/.exec(command);
+    const validXeryon=xeryonMove&&Number.isSafeInteger(+xeryonMove[1])&&+xeryonMove[1]>=78&&+xeryonMove[1]<=2617245618;
+    if(!validMove&&!validXeryon&&!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP'].includes(command)) return Promise.reject(Error('Unsupported command'));
     const [name,...args]=command.split(' ');const arg=args.length?args.join(' '):undefined;const id=this.id=this.id===0xffffffff?1:this.id+1;
     return new Promise((resolve,reject)=>{
-      this.pending={id,resolve,reject,expected:{HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack',PLUNGER_MOVE:'plunger_ack',PLUNGER_STOP:'plunger_ack',PLUNGER_ZERO:'plunger_ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),command==='PLUNGER_STOP'?500:this.timeout)};
+      this.pending={id,resolve,reject,expected:{XERYON_MOVE:'xeryon_ack',XERYON_STOP:'xeryon_ack',HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack',PLUNGER_MOVE:'plunger_ack',PLUNGER_STOP:'plunger_ack',PLUNGER_ZERO:'plunger_ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),(command==='PLUNGER_STOP'||command==='XERYON_STOP')?500:this.timeout)};
       this.invoke('serial_send',{session:this.session,command:`${name} ${id}${arg===undefined?'':` ${arg}`}`}).catch(e=>{if(this.pending?.id===id)this.rejectPending(Error(String(e)));});
     });
   }

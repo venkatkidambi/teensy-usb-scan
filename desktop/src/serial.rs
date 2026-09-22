@@ -61,10 +61,16 @@ pub fn validate_command(command: &str) -> bool {
     }
     match parts.as_slice() {
         [
-            "HELLO" | "PING" | "SNAPSHOT" | "PLUNGER_STOP" | "PLUNGER_ZERO",
+            "HELLO" | "PING" | "SNAPSHOT" | "PLUNGER_STOP" | "PLUNGER_ZERO" | "XERYON_STOP",
             _,
         ]
         | ["STREAM", _, "0" | "1"] => true,
+        ["XERYON_MOVE", _, "U" | "D", nm] => {
+            nm.bytes().all(|b| b.is_ascii_digit())
+                && nm
+                    .parse::<u32>()
+                    .is_ok_and(|n| (78..=2_617_245_618).contains(&n))
+        }
         ["PLUNGER_MOVE", _, "U" | "D", speed, um] => {
             speed.bytes().all(|b| b.is_ascii_digit())
                 && speed.parse::<u8>().is_ok_and(|s| s > 0)
@@ -287,6 +293,10 @@ mod tests {
     #[test]
     fn only_supported_requests_are_allowed() {
         for command in [
+            "XERYON_MOVE 1 U 10000",
+            "XERYON_MOVE 2 D 78",
+            "XERYON_MOVE 3 U 2617245618",
+            "XERYON_STOP 4",
             "PLUNGER_MOVE 1 U 64 10",
             "PLUNGER_MOVE 2 D 255 128684302",
             "PLUNGER_STOP 3",
@@ -300,6 +310,12 @@ mod tests {
             assert!(validate_command(command));
         }
         for command in [
+            "XERYON_MOVE 1 U 77",
+            "XERYON_MOVE 1 U 2617245619",
+            "XERYON_MOVE 1 X 100",
+            "XERYON_MOVE 1 D -100",
+            "XERYON_MOVE 1 U 1.5",
+            "XERYON_STOP 1 extra",
             "PLUNGER_MOVE 1 U 0 10",
             "PLUNGER_MOVE 1 D 256 10",
             "PLUNGER_MOVE 1 D 64 128684303",

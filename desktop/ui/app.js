@@ -1,4 +1,4 @@
-import {NativeSession,statusFlags,elapsed,pressureState} from './protocol.mjs';
+import {NativeSession,statusFlags,elapsed,pressureState,xeryonTravelNm} from './protocol.mjs';
 const $=id=>document.getElementById(id), text=(id,value)=>{$(id).textContent=value;};
 const invoke=window.__TAURI__?.core.invoke;
 const number=new Intl.NumberFormat(undefined,{maximumFractionDigits:0});
@@ -18,7 +18,21 @@ function controls(){
   for(const id of ['ping','snapshot','stream'])$(id).disabled=!connected||!!session?.pending;
   for(const id of ['plunger-up','plunger-down','plunger-zero'])$(id).disabled=!connected||!hello?.motion||!!session?.pending||!snapshot?.plunger||snapshot.plunger.running||performance.now()-received>=3000;
   $('plunger-stop').disabled=!connected||!hello?.motion;
+  for(const id of ['xeryon-up','xeryon-down'])$(id).disabled=!!xeryonBlocked()||!!session?.pending;
+  $('xeryon-stop').disabled=!connected||!hello?.xeryon||!snapshot?.mounted||snapshot.cdc!==2||snapshot.vid!==0x04d8||snapshot.pid!==0xef4a;
   text('stream',streaming?'Pause stream':'Resume stream');
+}
+function xeryonBlocked(){
+  if(!connected)return 'Connect Teensy to move the actuator.';
+  if(!hello?.xeryon)return 'Upload current firmware to enable Xeryon movement.';
+  if(!snapshot?.mounted||snapshot.cdc!==2||snapshot.vid!==0x04d8||snapshot.pid!==0xef4a)return 'Connect the Xeryon to the USB2 host port.';
+  const v=snapshot.values;
+  if(age(v.EPOS)>=3000||age(v.STAT)>=3000)return 'Waiting for fresh position and status.';
+  const stat=v.STAT.value;
+  if(stat&((1<<2)|(1<<3)|(1<<12)|(1<<16)|(1<<18)|(1<<21)))return 'Controller fault — check Controller status.';
+  if(snapshot.xeryon_motion?.state===1)return 'Moving — waiting for target feedback.';
+  if(stat&((1<<9)|(1<<13))||(stat&(1<<5))&&!(stat&(1<<10)))return 'Actuator is already moving.';
+  return '';
 }
 function reset(){pressureHistory=[];lastPressure=null;snapshot=null;hello=null;history=[];epoch=null;lastSample=null;lastPong=0;lastPing=0;streaming=true;text('rtt','—');text('session-label','NO SESSION');render();draw();}
 async function refresh(){
@@ -66,6 +80,7 @@ async function request(command,quiet=false){
     if(!quiet)activity(`${command} → ${reply.type} #${reply.id}`);
     if(command==='SNAPSHOT')activity(`Hardware ${JSON.stringify({plunger:reply.plunger,plunger_io:reply.plunger_io,pressure:reply.pressure})}`);
     if(connected&&!quiet)notice(streaming?'Connected locally. Receiving telemetry.':'Display stream paused. Hardware monitoring continues.');
+    if(reply.type==='xeryon_ack')notice(reply.action==='move'?`Move queued · target ${position(reply.target)} µm. Waiting for controller feedback.`:'Stop queued. Check actuator feedback.');
     return reply;
   }catch(e){notice(String(e.message??e),true);activity(String(e.message??e));throw e;}finally{controls();}
 }
@@ -94,6 +109,13 @@ for(const [id,direction] of [['plunger-up','U'],['plunger-down','D']])$(id).addE
   if(!speed.reportValidity()||!distance.reportValidity())return;
   void request(`PLUNGER_MOVE ${direction} ${speed.value} ${distance.value}`).catch(()=>{});
 });
+for(const [id,direction] of [['xeryon-up','U'],['xeryon-down','D']])$(id).addEventListener('click',()=>{
+  const distance=$('xeryon-distance');
+  if(!distance.reportValidity()||xeryonBlocked())return;
+  try{void request(`XERYON_MOVE ${direction} ${xeryonTravelNm(distance.value)}`).catch(()=>{});}
+  catch(e){notice(e.message,true);}
+});
+$('xeryon-stop').addEventListener('click',()=>void request('XERYON_STOP').catch(()=>disconnect('Xeryon Stop was not acknowledged; check the actuator.')));
 $('plunger-zero').addEventListener('click',()=>void request('PLUNGER_ZERO').catch(()=>{}));
 $('plunger-stop').addEventListener('click',()=>void request('PLUNGER_STOP').catch(()=>disconnect('Stop could not be acknowledged; serial connection closed.')));
 function age(s){return snapshot&&s?elapsed(snapshot.ms,s.ms)+performance.now()-received:Infinity;}
@@ -120,6 +142,9 @@ function render(){
   text('pressure-age',pressureValid?`${pressureFresh?'Updated':'Stale'} · ${(pressureAge/1000).toFixed(1)}s ago`:'NO DATA');
   text('pressure-sensor',pressure?.sensor==='i2c'||!pressure?'I²C · address 0x5C':'HX711 · legacy firmware');
   text('pressure-detail',!active?'Raw readings appear when the I²C sensor responds.':!pressure?'Waiting for pressure telemetry.':`${pressureState(pressure)} · transfer errors ${pressure.errors??0}${pressure.sensor==='i2c'?` · WHO_AM_I ${pressure.who===null?'unavailable':`0x${pressure.who.toString(16).padStart(2,'0')}`} · temperature (raw) ${pressureValid?pressure.temperature:'—'}`:''}${pressure.pins?` · DT ${pressure.pins.dout_high?'HIGH':'LOW'} · SCK ${pressure.pins.sck_high?'HIGH (should be LOW)':'LOW'}`:''}`);
+  const xm=snapshot?.xeryon_motion;
+  text('xeryon-motion-state',demo?'Demo — motion controls are disabled.':xeryonBlocked()||(xm?.state===2?'Target reached.':xm?.state===3?'Stop requested.':xm?.state===4?'Move interrupted — check feedback and the activity log.':'Ready. Enter travel, then choose Up or Down.'));
+  text('xeryon-target',xm?.target!=null?`Requested target ${position(xm.target)} µm`:'Travel rounds to the nearest 0.078 µm.');
   const plunger=snapshot?.plunger;
   text('plunger-position',plunger?positionNumber.format(plunger.counts*1000/plunger.counts_per_mm):'—');
   text('plunger-state',!connected?'Waiting for connection':!hello?.motion?'Firmware does not support plunger control':!plunger?'Waiting for feedback':performance.now()-received>=3000?'Stale feedback':plunger.running?`Drive ${plunger.up?'up':'down'} enabled · PWM ${plunger.speed}`:'Stopped');

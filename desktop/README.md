@@ -33,6 +33,20 @@ be blocked by PowerShell's policy.
 `npm test` runs the JavaScript protocol tests. Vite and the Tauri CLI are dev-only
 dependencies; there is no frontend framework or additional runtime.
 
+## Xeryon manual movement
+
+Flash firmware 0.1.5 with `.\dev.cmd`, connect Teensy, then use **Xeryon movement**:
+enter travel in µm and click **Up (+)** or **Down (−)**. Travel is relative to the
+latest encoder position and rounded to 0.078 µm/count. Up increases the encoder
+value; Down decreases it. The XD-C uses its current speed and tuning to reach
+and hold the target. **Stop** requests an interruption.
+
+The panel shows the requested target and waits for controller feedback before
+reporting completion. Controls require fresh position/status and firmware's
+`xeryon: true` capability. Older firmware remains viewable but cannot move Xeryon.
+The plunger controls operate the separate wired motor. See the root README for
+motion timeout behavior and hardware-validation limits.
+
 ## Cargo-only launch
 
 Run `desktop\start.cmd` on Windows or `./desktop/start.sh` on macOS/Linux.

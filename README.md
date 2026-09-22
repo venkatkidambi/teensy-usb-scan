@@ -52,7 +52,7 @@ run on or link into the Teensy firmware.
 The dashboard includes positions, decoded status flags, a 60-second
 plot, sample ages, a bounded activity log, and Ping / Read snapshot / Pause stream.
 Pause only stops USB1 snapshots; actuator reception continues. The I²C pressure input shows raw ADC counts, a 16-sample average,
-and a 60-second plot. The wired plunger has Up/Down, Stop, and Zero controls; Xeryon USB remains read-only. **Preview demo**
+and a 60-second plot. The wired plunger has Up/Down, Stop, and Zero controls; Xeryon USB has distance-based Up/Down and Stop controls. **Preview demo**
 renders simulated readings without opening a serial port.
 
 The desktop serial worker has a 20 ms read timeout, bounded command/response/log
@@ -99,7 +99,8 @@ atomic measurement of every actuator property: each has its own reception time.
 USB2 supports one standard CDC ACM interface, opened at 115200 8-N-1 with DTR.
 Other USB protocols (including CANopen/SLCAN) are not implemented. A three-second
 CDC setup timeout or failed setup requires unplugging/reconnecting to retry.
-No motion, configuration, or query commands are sent to the XD-C. The PC command
+Explicit Xeryon moves send `DPOS` targets; Stop sends `STOP`. No configuration
+or homing commands are sent automatically. The PC command
 protocol is documented in [desktop/PROTOCOL.md](desktop/PROTOCOL.md).
 
 ## Tools and build
@@ -242,6 +243,32 @@ Plunger and I²C pressure support are implemented; their hardware timing, motion
 readings still need board validation. Pressure conversion to physical units
 requires transducer calibration.
 
+## Xeryon manual movement (firmware 0.1.5)
+
+On Windows run `.\dev.cmd` to flash the firmware and open the frontend. Connect
+Teensy, enter **Travel (µm)** in **Xeryon movement**, then click **Up (+)** or
+**Down (−)**. Up increases the encoder position; Down decreases it. Confirm how
+those directions correspond to your physical mounting. **Stop** interrupts a move.
+
+Firmware takes the latest EPOS, adds/subtracts the travel rounded to the nearest
+encoder count (0.078 µm), and sends a `DPOS` command. The XD-C moves to and holds
+that target using its existing speed and tuning. No speed entry or plunger changes
+are required. See the [XD-C manual, sections 4.1–4.3](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.1%20-%20JPL.pdf).
+
+Moves require fresh encoder/status feedback and reject overlapping motion,
+controller faults, and targets outside the signed 26-bit range. This numeric
+range is not the physical travel range of your stage; controller soft limits and
+calibration must match the hardware. The panel reports the requested target and
+waits for a matching DPOS followed by the controller's position-reached flag.
+A command acknowledgement means queued for USB transmission, not completed.
+
+During a move the Teensy requests Stop on USB1 disconnect, stale feedback,
+controller faults, five seconds without PC commands, or a 60-second deadline.
+The desktop sends heartbeats automatically. Stop is best-effort over USB: an
+unplugged or stalled USB2 connection cannot guarantee delivery. No queued move
+is replayed after reconnect. Software tests and builds cover this path; actual
+Xeryon motion and physical Up/Down direction still need hardware validation.
+
 ## Wired plunger
 
 The bare-metal driver ports the supplied NanoManipulator Motor.cpp: pin 2 PWM,
@@ -293,7 +320,7 @@ bus is reported as an error and may still require hardware intervention. Motor
 interrupts, USB servicing, and disconnect handling continue during acquisition.
 
 Update both firmware and desktop app. Flash with `./upload.sh` on macOS or
-`upload.cmd` on Windows, then reconnect and verify **Firmware 0.1.4**. The pressure
+`upload.cmd` on Windows, then reconnect and verify **Firmware 0.1.5**. The pressure
 panel should identify **I²C · address 0x5C** and report WHO_AM_I, raw temperature,
 and increasing pressure samples. Use **Read snapshot** to capture the `Hardware`
 log if it fails. Older firmware still reports HX711 diagnostics in the new app.

@@ -135,6 +135,7 @@ impl Console {
         let open = configured && self.class.dtr();
         if self.open && !open {
             crate::motor::stop();
+            crate::usb_host::disconnect_xeryon();
         }
         if !open || !self.open {
             self.commands = Commands::new();
@@ -159,6 +160,7 @@ impl Console {
                     self.tx.clear();
                     self.open = false;
                     crate::motor::stop();
+                    crate::usb_host::disconnect_xeryon();
                     return;
                 }
             }
@@ -183,16 +185,39 @@ impl Console {
             if let Some(command) = self.commands.push(byte) {
                 if command.is_ok() {
                     crate::motor::heartbeat(now);
+                    crate::usb_host::heartbeat(now);
                 }
                 let result = match command {
                     Ok(Command::Hello(id)) => writeln!(
                         self.tx,
-                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"pressure\":true}}",
+                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"xeryon\":true,\"pressure\":true}}",
                         env!("CARGO_PKG_VERSION")
                     ),
                     Ok(Command::Ping(id)) => {
                         writeln!(self.tx, "{{\"type\":\"pong\",\"id\":{id},\"ms\":{now}}}")
                     }
+                    Ok(Command::XeryonMove(id, up, nm)) => {
+                        match crate::usb_host::move_xeryon(up, nm, now) {
+                            Ok(target) => writeln!(
+                                self.tx,
+                                "{{\"type\":\"xeryon_ack\",\"id\":{id},\"action\":\"move\",\"target\":{target}}}"
+                            ),
+                            Err(message) => writeln!(
+                                self.tx,
+                                "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
+                            ),
+                        }
+                    }
+                    Ok(Command::XeryonStop(id)) => match crate::usb_host::stop_xeryon() {
+                        Ok(()) => writeln!(
+                            self.tx,
+                            "{{\"type\":\"xeryon_ack\",\"id\":{id},\"action\":\"stop\"}}"
+                        ),
+                        Err(message) => writeln!(
+                            self.tx,
+                            "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
+                        ),
+                    },
                     Ok(Command::Snapshot(id)) => self.snapshot(id, now, pot, pressure),
                     Ok(Command::Move(id, up, speed, um)) => {
                         let result = crate::motor::command(up, speed, um, now);

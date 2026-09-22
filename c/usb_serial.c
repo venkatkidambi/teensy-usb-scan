@@ -13,6 +13,20 @@ static bool busy;
 static uint32_t started;
 static uintptr_t generation;
 
+// Enqueue a complete short command, never a partial command or a blocking write.
+// Stop discards queued bytes; an already submitted USB packet cannot be recalled.
+bool usb_serial_send(const uint8_t *data, uint32_t len, bool stop) {
+  if (state != READY || !data || !len || len > 32) return false;
+  if (stop) tuh_cdc_write_clear(cdc_index);
+  if (tuh_cdc_write_available(cdc_index) < len) return false;
+  if (tuh_cdc_write(cdc_index, data, len) != len) {
+    tuh_cdc_write_clear(cdc_index);
+    return false;
+  }
+  tuh_cdc_write_flush(cdc_index);
+  return true;
+}
+
 void tuh_cdc_mount_cb(uint8_t idx) {
   tuh_itf_info_t info;
   if (!tuh_cdc_itf_get_info(idx, &info)) return;
@@ -78,6 +92,7 @@ void usb_serial_task(void) {
     if (!tuh_cdc_set_control_line_state(cdc_index, CDC_CONTROL_LINE_STATE_DTR,
                                        control_complete, generation)) busy = false;
   } else if (state == READY) {
+    tuh_cdc_write_flush(cdc_index);
     // Bound work per loop so USB1 logging and the LED keep getting serviced.
     uint8_t data[64];
     const uint32_t count = tuh_cdc_read(cdc_index, data, sizeof(data));
