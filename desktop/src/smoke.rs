@@ -14,6 +14,9 @@ pub const SCRIPT: &str = r#"
     if(document.querySelector('h1')?.textContent!=='Teensy Panel')throw Error('Panel heading missing');
     const ports=await invoke('serial_ports');
     if(!Array.isArray(ports))throw Error('Native port listing failed');
+    let saveRejected=false;
+    try{await invoke('experiment_save_csv');}catch(e){saveRejected=String(e).includes('No verified experiment dataset');}
+    if(!saveRejected)throw Error('Native Save As command did not reject an absent dataset');
     let rejected=false;
     try{await invoke('serial_connect',{port:'missing-test-port'});}catch{rejected=true;}
     if(!rejected)throw Error('Missing serial port was accepted');

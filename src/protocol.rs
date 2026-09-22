@@ -206,21 +206,8 @@ impl Command {
                 let repeats = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
                 Self::Start(
                     id,
-                    match kind {
-                        "Q" => ExperimentConfig::QuasiStatic {
-                            start_nm: start,
-                            step_nm: increment,
-                            hold_ms: timing,
-                            steps: repeats,
-                        },
-                        "S" => ExperimentConfig::Sinusoidal {
-                            center_nm: start,
-                            amplitude_nm: u32::try_from(increment).map_err(|_| ())?,
-                            frequency_mhz: timing,
-                            cycles: repeats,
-                        },
-                        _ => return Err(()),
-                    },
+                    ExperimentConfig::from_wire(kind, start, increment, timing, repeats)
+                        .map_err(|_| ())?,
                 )
             }
             "ABORT" => Self::Abort(id),
@@ -322,6 +309,12 @@ impl Frame {
             len: 0,
             sent: 0,
         }
+    }
+    pub fn error(&mut self, id: u32, message: &str) -> fmt::Result {
+        writeln!(
+            self,
+            "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
+        )
     }
     pub fn clear(&mut self) {
         self.len = 0;

@@ -20,8 +20,7 @@ pub fn write_move(
     }
 }
 
-pub const MIN_POSITION: i32 = -(1 << 25);
-pub const MAX_POSITION: i32 = (1 << 25) - 1;
+pub use crate::experiment_data::{MAX_POSITION, MIN_POSITION};
 pub const MAX_TRAVEL_NM: u32 = 2_617_245_618;
 pub const FAULTS: i64 = (1 << 2) | (1 << 3) | (1 << 12) | (1 << 16) | (1 << 18) | (1 << 21);
 

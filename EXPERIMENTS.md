@@ -193,6 +193,10 @@ After ACK, bytes remain intact until another START successfully passes validatio
 invalid START does not clear them. The desktop keeps the verified result across
 serial disconnect and page reload within the same process. Neither RAM copy is
 persistent across power loss/process exit; select Save CSV for durable storage.
+Save CSV opens a native Save As dialog for the destination folder and filename.
+Desktop Rust writes the verified CSV after selection; cancelling or a file error
+keeps the result available. The dialog releases the serial lock while open and
+the write rechecks autonomous ownership before touching the file.
 
 ## Safety and PC disconnect policy
 
@@ -237,6 +241,14 @@ feedback, pressure, plunger, USB identities and Dashboard controls remain intact
 The repository exposes index status but no PC INDX command; no existing command
 was removed and no automatic index/homing operation was introduced.
 
+The subsequent repository cleanup shares configuration construction, encoder
+range constants, record decoding and chunk limits across firmware and desktop;
+consolidates firmware error replies and desktop download completion/ownership
+updates; and keeps one Tauri command registration list for normal and smoke builds.
+Dashboard controls, legacy firmware compatibility, acquisition schedules, buffer
+capacity, wire format and dataset acknowledgement semantics are preserved.
+Save As adds a desktop-only dialog dependency; embedded dependencies are unchanged.
+
 ## Validation and physical acceptance
 
 Native engine tests cover both trajectories, signed increments, feedback-driven
@@ -245,30 +257,34 @@ samples, transport faults, pressure/USB2 faults, ABORT, manual heartbeat policy,
 partial datasets, transfer restart and invalid/premature ACKs. Interoperability
 tests send actual firmware metadata/records through the native binary decoder,
 including corruption, arbitrary fragmentation, zero records and maximum payload.
-Native/JavaScript tests cover command ownership and passive reconnect.
+Native/JavaScript tests cover command ownership, passive reconnect, Save As
+selection/cancellation/failure, duplicate save clicks and ownership changes
+while a save dialog is open.
 
 Final validation on 2026-09-22 (Apple Silicon host):
 
 | Check | Result |
 | --- | --- |
-| `bash tests/run.sh` | 27 firmware Rust tests and both C bridge suites passed |
-| Desktop `cargo test --target aarch64-apple-darwin --locked` | 30 tests across native and firmware/receiver interoperability suites passed |
-| `npm test` | 15 JavaScript protocol/session tests passed |
+| `bash tests/run.sh` | 29 firmware Rust tests and both C bridge suites passed |
+| Desktop `cargo test --target aarch64-apple-darwin --locked` | 34 tests across native and firmware/receiver interoperability suites passed |
+| `npm test` | 16 JavaScript protocol/session/UI tests passed |
 | Firmware and desktop `cargo fmt --check` / `cargo check --locked` | Passed (desktop uses explicit native target) |
 | Firmware `cargo build --release --locked` | Passed |
 | `npm run build` | Vite assets and native macOS Tauri release executable built |
-| Native Tauri `smoke-test` feature | Passed: Dashboard demo, native IPC, tabs, both result canvases, outcome rendering, disconnect |
+| Native Tauri `smoke-test` feature | Passed: Dashboard demo, native IPC, Save As command routing, tabs, both result canvases, outcome rendering, disconnect |
 | `cargo objcopy --release --locked -- -O ihex target/firmware/firmware.hex` | HEX generated using the existing conversion pipeline |
 | Full diff / whitespace review | Reviewed; `git diff --check` passed |
 
 The existing vendored TinyUSB unused-function warning remains; there are no Rust
-build errors. No Windows binary or physical hardware test was run.
+build errors. No Windows binary or physical hardware test was run. Save-path tests
+inject a chooser; the native smoke test verifies the command rejects absent data.
+Interactive OS dialog selection still needs a manual check on the target desktop.
 
 Linked firmware measurements: sample array at `0x20005000`, length `0x28000`
 (163,840 bytes); total `.bss` 186,368 bytes, `.data` 768 bytes, vector table
 696 bytes, stack reservation 16,384 bytes. Including alignment gaps, DTCM ends
 at `0x20032800`: **206,848 / 327,680 bytes**, leaving **120,832 bytes** unassigned.
-`.text` is 74,444 bytes in ITCM; `.rodata` is 6,380 bytes in OCRAM. These are linker
+`.text` is 74,716 bytes in ITCM; `.rodata` is 6,260 bytes in OCRAM. These are linker
 sizes, not measured worst-case stack high-water marks.
 
 Artifacts:
@@ -276,7 +292,7 @@ Artifacts:
 - HEX: `target/firmware/firmware.hex`
 - Firmware ELF: `target/thumbv7em-none-eabihf/release/teensy-usb-scan`
 - Desktop: `desktop/target/aarch64-apple-darwin/release/teensy-panel`
-- HEX SHA-256: `d364e134f11bebf45bfb64a80d3a3b49a54ce8ed32f2d926230011f53f2c0252`
+- HEX SHA-256: `76f40163b3be5909ed3d349e597b20d370e79135d6eda7ae3330479bdcff1165`
 
 No firmware was flashed by these checks. Use the existing loader workflow only
 after reviewing and deliberately approving a hardware trial.

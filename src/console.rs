@@ -124,10 +124,7 @@ impl Console {
                 self.tx,
                 "{{\"type\":\"plunger_ack\",\"id\":{id},\"action\":\"{action}\"}}"
             ),
-            Err(message) => writeln!(
-                self.tx,
-                "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
-            ),
+            Err(message) => self.tx.error(id, message),
         }
     }
 
@@ -221,10 +218,7 @@ impl Console {
                     experiment.run
                 );
             } else {
-                let _ = writeln!(
-                    self.tx,
-                    "{{\"type\":\"error\",\"id\":{id},\"message\":\"Experiment busy; only ABORT is allowed\"}}"
-                );
+                let _ = self.tx.error(id, "Experiment busy; only ABORT is allowed");
             }
             return;
         }
@@ -265,10 +259,9 @@ impl Console {
                     )
                 {
                     let id = command.as_ref().map(|c| c.id()).unwrap_or(0);
-                    let _ = writeln!(
-                        self.tx,
-                        "{{\"type\":\"error\",\"id\":{id},\"message\":\"Experiment busy; retained data must be acknowledged\"}}"
-                    );
+                    let _ = self
+                        .tx
+                        .error(id, "Experiment busy; retained data must be acknowledged");
                     return;
                 }
                 if command.is_ok() && !experiment.owns_hardware() {
@@ -297,10 +290,7 @@ impl Console {
                                     experiment.run
                                 )
                             }
-                            Err(message) => writeln!(
-                                self.tx,
-                                "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
-                            ),
+                            Err(message) => self.tx.error(id, message),
                         }
                     }
                     Ok(Command::Abort(id)) => {
@@ -314,10 +304,7 @@ impl Console {
                     }
                     Ok(Command::GetData(id, run)) => match experiment.transfer(run) {
                         Ok(()) => experiment.metadata(&mut self.tx, id),
-                        Err(message) => writeln!(
-                            self.tx,
-                            "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
-                        ),
+                        Err(message) => self.tx.error(id, message),
                     },
                     Ok(Command::GetChunk(id, run, offset)) => {
                         match experiment.chunk(run, offset as usize) {
@@ -335,10 +322,7 @@ impl Console {
                                 }
                                 header
                             }
-                            Err(message) => writeln!(
-                                self.tx,
-                                "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
-                            ),
+                            Err(message) => self.tx.error(id, message),
                         }
                     }
                     Ok(Command::AckData(id, run, count, crc)) => {
@@ -352,10 +336,7 @@ impl Console {
                                     "{{\"type\":\"experiment_ack\",\"id\":{id},\"run\":{run},\"action\":\"data_received\"}}"
                                 )
                             }
-                            Err(message) => writeln!(
-                                self.tx,
-                                "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
-                            ),
+                            Err(message) => self.tx.error(id, message),
                         }
                     }
                     Ok(Command::Hello(id)) => writeln!(
@@ -372,10 +353,7 @@ impl Console {
                                 self.tx,
                                 "{{\"type\":\"xeryon_ack\",\"id\":{id},\"action\":\"move\",\"target\":{target}}}"
                             ),
-                            Err(message) => writeln!(
-                                self.tx,
-                                "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
-                            ),
+                            Err(message) => self.tx.error(id, message),
                         }
                     }
                     Ok(Command::XeryonStop(id)) => match crate::usb_host::stop_xeryon() {
@@ -383,10 +361,7 @@ impl Console {
                             self.tx,
                             "{{\"type\":\"xeryon_ack\",\"id\":{id},\"action\":\"stop\"}}"
                         ),
-                        Err(message) => writeln!(
-                            self.tx,
-                            "{{\"type\":\"error\",\"id\":{id},\"message\":\"{message}\"}}"
-                        ),
+                        Err(message) => self.tx.error(id, message),
                     },
                     Ok(Command::Snapshot(id)) => self.snapshot(id, now, pot, pressure),
                     Ok(Command::Move(id, up, speed, um)) => {
@@ -405,9 +380,7 @@ impl Console {
                         self.streaming = on;
                         writeln!(self.tx, "{{\"type\":\"ack\",\"id\":{id},\"stream\":{on}}}")
                     }
-                    Err(()) => self.tx.write_str(
-                        "{\"type\":\"error\",\"id\":0,\"message\":\"invalid command\"}\n",
-                    ),
+                    Err(()) => self.tx.error(0, "invalid command"),
                 };
                 if result.is_err() {
                     self.tx.clear();

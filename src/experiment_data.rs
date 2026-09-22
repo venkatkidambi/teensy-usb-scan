@@ -1,6 +1,8 @@
 //! Shared, allocation-free experiment units, validation and wire record format.
 pub const CAPACITY: usize = 4096;
-pub const RECORD_BYTES: usize = 40;
+pub const RECORD_FIELDS: usize = 10;
+pub const RECORD_BYTES: usize = RECORD_FIELDS * 4;
+pub const CHUNK_RECORDS: usize = 16;
 pub const SAMPLE_MS: u32 = 50;
 pub const TRAJECTORY_MS: u32 = 20;
 pub const MOVE_TIMEOUT_MS: u32 = 10_000;
@@ -36,6 +38,30 @@ pub fn counts(nm: i64) -> Result<i32, &'static str> {
 }
 
 impl ExperimentConfig {
+    /// Shared wire units for firmware parsing and native desktop validation.
+    pub fn from_wire(
+        kind: &str,
+        start: i64,
+        increment: i64,
+        timing: u32,
+        repeats: u32,
+    ) -> Result<Self, &'static str> {
+        match kind {
+            "Q" => Ok(Self::QuasiStatic {
+                start_nm: start,
+                step_nm: increment,
+                hold_ms: timing,
+                steps: repeats,
+            }),
+            "S" => Ok(Self::Sinusoidal {
+                center_nm: start,
+                amplitude_nm: u32::try_from(increment).map_err(|_| "Amplitude out of range")?,
+                frequency_mhz: timing,
+                cycles: repeats,
+            }),
+            _ => Err("Unknown experiment mode"),
+        }
+    }
     pub fn start(self) -> Result<i32, &'static str> {
         counts(match self {
             Self::QuasiStatic { start_nm, .. } => start_nm,
@@ -161,6 +187,20 @@ impl Record {
         }
         bytes
     }
+}
+/// Desktop representation of the same wire layout, retaining signed fields.
+#[allow(dead_code)] // Reception is desktop-only; firmware sends the same layout.
+pub fn decode_fields(bytes: &[u8; RECORD_BYTES]) -> [i64; RECORD_FIELDS] {
+    let mut fields = [0; RECORD_FIELDS];
+    for (i, word) in bytes.chunks_exact(4).enumerate() {
+        let word: [u8; 4] = word.try_into().unwrap();
+        fields[i] = if matches!(i, 1 | 2 | 7) {
+            i64::from(i32::from_le_bytes(word))
+        } else {
+            i64::from(u32::from_le_bytes(word))
+        };
+    }
+    fields
 }
 const _: () = assert!(core::mem::size_of::<Record>() == RECORD_BYTES);
 

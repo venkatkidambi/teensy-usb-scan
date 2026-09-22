@@ -57,3 +57,49 @@ fn pressure_snapshot_preserves_i2c_values_and_identity() {
 mod experiment;
 #[path = "../src/experiment_data.rs"]
 mod experiment_data;
+
+#[test]
+fn error_reply_keeps_request_id_and_partial_write_suffix() {
+    let mut frame = protocol::Frame::new();
+    frame.error(42, "Invalid command").unwrap();
+    let expected = b"{\"type\":\"error\",\"id\":42,\"message\":\"Invalid command\"}\n";
+    assert_eq!(frame.pending(), expected);
+    frame.consume(7);
+    assert_eq!(frame.pending(), &expected[7..]);
+}
+
+#[test]
+fn record_layout_preserves_signed_fields_and_unsigned_sentinels() {
+    let record = experiment_data::Record {
+        elapsed_ms: 50,
+        epos: -1,
+        pressure_raw: -2,
+        stat: 0x80000000,
+        epos_age_ms: 1,
+        pressure_age_ms: 2,
+        stat_age_ms: 3,
+        target: i32::MIN,
+        controller_ticks: u32::MAX,
+        controller_age_ms: u32::MAX,
+    };
+    let bytes = [
+        50, 0, 0, 0, 255, 255, 255, 255, 254, 255, 255, 255, 0, 0, 0, 128, 1, 0, 0, 0, 2, 0, 0, 0,
+        3, 0, 0, 0, 0, 0, 0, 128, 255, 255, 255, 255, 255, 255, 255, 255,
+    ];
+    assert_eq!(record.encode(), bytes);
+    assert_eq!(
+        experiment_data::decode_fields(&bytes),
+        [
+            50,
+            -1,
+            -2,
+            2147483648,
+            1,
+            2,
+            3,
+            -2147483648,
+            4294967295,
+            4294967295
+        ]
+    );
+}

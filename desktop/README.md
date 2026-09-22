@@ -5,7 +5,9 @@ Experiment configuration is validated in Rust before START; the Teensy performs
 all motion scheduling and acquisition. Use current copies fresh encoder position.
 Normal PC traffic pauses until the retained dataset is downloaded and verified.
 ABORT stays available. Results show both plots and the completed/aborted/faulted
-outcome; Save CSV exports the verified native result on demand. Reconnecting
+outcome; **Save CSV** opens the operating system's **Save As** dialog to choose
+a folder and filename (suggested: `experiment-<run>.csv`). Cancelling or a write
+failure leaves the dataset available for another attempt. Reconnecting
 recovers an active run or downloads its retained data without sending a heartbeat.
 See [the experiment design and limits](../EXPERIMENTS.md).
 
@@ -39,7 +41,7 @@ forwarded only to the development command. For frontend-only development, use
 be blocked by PowerShell's policy.
 
 `npm run build` embeds the optimized Vite assets in the release executable.
-`npm test` runs the JavaScript protocol tests. Vite and the Tauri CLI are dev-only
+`npm test` runs the JavaScript protocol and UI tests. Vite and the Tauri CLI are dev-only
 dependencies; there is no frontend framework or additional runtime.
 
 ## Xeryon manual movement
@@ -94,7 +96,8 @@ The separate desktop Cargo.lock pins its dependencies and does not alter firmwar
 
 ## Architecture
 
-- `src/main.rs`: local serial/experiment Tauri commands, retained result state, and port cleanup on exit.
+- `src/main.rs`: local serial/experiment Tauri commands, retained result state,
+  native Save As dialog/file writing, and port cleanup on exit.
 - `src/serial.rs`: native port discovery, exclusive connection ownership, bounded
   command validation, and a worker with a 20 ms read timeout. Eight queued commands,
   32 replies, 32 logs, one latest unsolicited snapshot; lines capped at 4096 bytes.
@@ -102,13 +105,18 @@ The separate desktop Cargo.lock pins its dependencies and does not alter firmwar
 - `ui/protocol.mjs`: schema validation, session/request IDs, expected reply types,
   2.5-second request timeout, and one in-flight request. IPC polling is serial and
   scheduled every 50 ms after the previous call finishes, preventing overlapping polls.
-- `src/experiment.rs`: configuration units/validation, bounded binary framing, dataset CRC and CSV generation.
+- `src/experiment.rs`: configuration unit conversion, bounded binary framing,
+  dataset CRC and CSV generation. Validation, record layout and transfer limits
+  share `../src/experiment_data.rs` with firmware.
 - `ui/experiment.js`: configuration tabs, experiment status, result plots and Save CSV.
 - `ui/app.js`: local port picker, telemetry and flags, bounded Canvas history,
   heartbeat, stale indicators, an explicitly simulated demo, and wired-plunger controls.
 
 The normal app only grants access to its own commands; no filesystem, shell,
-network, or third-party Tauri plugins are exposed to the UI. CSP permits embedded
+network, or general-purpose Tauri plugin commands are exposed to the UI. Rust
+uses Tauri's dialog plugin for the native Save As window and writes only the
+selected CSV path. The dialog does not hold the serial lock; ownership is checked
+before opening it and again before writing. CSP permits embedded
 assets and Tauri IPC. The smoke-test command is compiled only with its test feature.
 
 The desktop process uses normal OS threads and allocations. These are entirely
@@ -119,7 +127,7 @@ TinyUSB OPT_OS_NONE. This app never flashes or modifies the Teensy automatically
 
 ```text
 cargo test --manifest-path desktop/Cargo.toml --target HOST --locked
-node --test desktop/tests/protocol.test.mjs
+npm test
 cargo run --manifest-path desktop/Cargo.toml --target HOST --features smoke-test --locked
 ```
 
@@ -128,12 +136,10 @@ opens the real desktop window, exercises native IPC/port listing and demo render
 then exits with a success/failure status. It never opens a physical serial device.
 Normal launchers do not enable it.
 
-Plunger controls require firmware advertising `motion: true`. They use the
-separate 16,688 counts/mm calibration, integer travel in µm, and PWM drive 1–255.
-Stop can interrupt a pending request and closes the serial session if its reply
-fails. Zero and new moves are disabled while moving or when telemetry is stale.
-The HX711 panel shows raw ADC counts, a 16-sample average, sample age, saturation,
-and a 60-second signal plot. It uses A1/p15 DOUT and A0/p14 SCK, channel B/gain 32,
-with inverted polarity matching the supplied measurement sketch. Physical pressure
-units need calibration; no scale is assumed. Demo readings are explicitly simulated.
-Pressure collection continues independently of Xeryon enumeration or stream pause.
+The pressure panel shows raw I²C counts, a 16-sample average, sample age, sensor
+diagnostics, and a 60-second signal plot. Physical pressure units need calibration;
+no scale is assumed. Acquisition continues independently of Xeryon enumeration or
+stream pause. Older HX711 firmware remains supported by the desktop parser and UI.
+See the root README for [plunger wiring and behavior](../README.md#wired-plunger)
+and [pressure wiring and acquisition](../README.md#i²c-pressure-input), and
+[PROTOCOL.md](PROTOCOL.md) for capabilities, units and legacy compatibility.

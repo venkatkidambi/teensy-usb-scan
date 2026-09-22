@@ -1,5 +1,7 @@
 //! Native experiment configuration, binary reception, integrity checking and CSV.
-use crate::experiment_data::{self as data, ExperimentConfig, RECORD_BYTES};
+use crate::experiment_data::{
+    self as data, CHUNK_RECORDS, ExperimentConfig, RECORD_BYTES, RECORD_FIELDS,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Write;
@@ -31,27 +33,12 @@ impl Input {
         let increment = scaled(self.increment_um, 1000.0)?;
         let timing =
             u32::try_from(scaled(self.timing, 1000.0)?).map_err(|_| "Timing out of range")?;
-        let (kind, config) = match self.kind.as_str() {
-            "quasi_static" => (
-                "Q",
-                ExperimentConfig::QuasiStatic {
-                    start_nm: start,
-                    step_nm: increment,
-                    hold_ms: timing,
-                    steps: self.repeats,
-                },
-            ),
-            "sinusoidal" => (
-                "S",
-                ExperimentConfig::Sinusoidal {
-                    center_nm: start,
-                    amplitude_nm: u32::try_from(increment).map_err(|_| "Amplitude out of range")?,
-                    frequency_mhz: timing,
-                    cycles: self.repeats,
-                },
-            ),
+        let kind = match self.kind.as_str() {
+            "quasi_static" => "Q",
+            "sinusoidal" => "S",
             _ => return Err("Unknown experiment mode".into()),
         };
+        let config = ExperimentConfig::from_wire(kind, start, increment, timing, self.repeats)?;
         config.validate()?;
         Ok(format!(
             "START {id} {kind} {start} {increment} {timing} {}",
@@ -72,27 +59,9 @@ pub fn valid_start(parts: &[&str]) -> bool {
     ) else {
         return false;
     };
-    let config = match *kind {
-        "Q" => ExperimentConfig::QuasiStatic {
-            start_nm: start,
-            step_nm: increment,
-            hold_ms: timing,
-            steps: repeats,
-        },
-        "S" => {
-            let Ok(amplitude_nm) = u32::try_from(increment) else {
-                return false;
-            };
-            ExperimentConfig::Sinusoidal {
-                center_nm: start,
-                amplitude_nm,
-                frequency_mhz: timing,
-                cycles: repeats,
-            }
-        }
-        _ => return false,
-    };
-    config.validate().is_ok()
+    ExperimentConfig::from_wire(kind, start, increment, timing, repeats)
+        .and_then(|config| config.validate())
+        .is_ok()
 }
 
 pub enum Event {
@@ -153,7 +122,7 @@ impl Decoder {
         let value = serde_json::from_str::<Value>(&line).ok();
         if let Some(header) = value.filter(|v| v["type"] == "data_chunk") {
             let bytes = uint(&header, "bytes")? as usize;
-            if bytes == 0 || bytes > 16 * RECORD_BYTES || bytes % RECORD_BYTES != 0 {
+            if bytes == 0 || bytes > CHUNK_RECORDS * RECORD_BYTES || bytes % RECORD_BYTES != 0 {
                 return Err("Invalid binary chunk length".into());
             }
             self.remaining = bytes;
@@ -176,7 +145,7 @@ pub fn uint(value: &Value, key: &str) -> Result<u32, String> {
 pub struct Dataset {
     pub metadata: Value,
     /// Wire field order; i64 accommodates all signed and unsigned 32-bit words.
-    pub samples: Vec<[i64; 10]>,
+    pub samples: Vec<[i64; RECORD_FIELDS]>,
 }
 impl Dataset {
     pub fn csv(&self) -> String {
@@ -281,19 +250,11 @@ impl Download {
         }
         let mut samples = Vec::with_capacity(self.bytes.len() / RECORD_BYTES);
         for bytes in self.bytes.chunks_exact(RECORD_BYTES) {
-            let mut fields = [0i64; 10];
-            for (i, word) in bytes.chunks_exact(4).enumerate() {
-                let word: [u8; 4] = word.try_into().unwrap();
-                fields[i] = if matches!(i, 1 | 2 | 7) {
-                    i64::from(i32::from_le_bytes(word))
-                } else {
-                    i64::from(u32::from_le_bytes(word))
-                };
-            }
+            let fields = data::decode_fields(bytes.try_into().unwrap());
             if fields[0] > i64::from(data::MAX_DURATION_MS)
                 || samples
                     .last()
-                    .is_some_and(|previous: &[i64; 10]| fields[0] <= previous[0])
+                    .is_some_and(|previous: &[i64; RECORD_FIELDS]| fields[0] <= previous[0])
             {
                 return Err("Dataset timestamps invalid".into());
             }

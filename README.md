@@ -203,8 +203,11 @@ still need a Windows run.
 
 ## Validation and limits
 
-The user confirmed the LED heartbeat, USB host enumeration, and XD-C EPOS/STAT
-reception on hardware. Desktop Rust/JavaScript tests cover framing, bounded queues,
+The user reports the existing Dashboard, manual Xeryon movement and feedback,
+pressure acquisition, plunger, both USB links and safety handling working on
+hardware. The autonomous experiment engine and this cleanup have been checked
+in software; they have not been flashed or physically retested here.
+Desktop Rust/JavaScript tests cover framing, bounded queues,
 command allowlisting, reply matching, timeouts, and disconnect cleanup. A native
 macOS Tauri smoke test verifies embedded UI rendering, native port discovery,
 invalid-port rejection, demo telemetry, status flags, and clearing on disconnect.
@@ -223,7 +226,7 @@ Desktop tests (replace HOST with the host from `rustc -vV`, such as
 
 ```sh
 cargo test --manifest-path desktop/Cargo.toml --target HOST --locked
-node --test desktop/tests/protocol.test.mjs
+npm test
 ```
 
 Node is used for the npm/Vite development workflow and JavaScript tests.
@@ -245,9 +248,9 @@ logging-only firmware cannot answer these requests.
 Only one directly attached device and one CDC ACM interface are supported, with
 a configuration descriptor up to 1024 bytes. Host control-transfer timeout support
 is incomplete; an unresponsive device may require unplugging or resetting the board.
-Plunger and I²C pressure support are implemented; their hardware timing, motion, and
-readings still need board validation. Pressure conversion to physical units
-requires transducer calibration.
+Pressure conversion to physical units requires transducer calibration. See
+[EXPERIMENTS.md](EXPERIMENTS.md#validation-and-physical-acceptance) for experiment
+validation results and the remaining physical acceptance checks.
 
 ## Xeryon manual movement
 
@@ -273,8 +276,7 @@ During a move the Teensy requests Stop on USB1 disconnect, stale feedback,
 controller faults, five seconds without PC commands, or a 60-second deadline.
 The desktop sends heartbeats automatically. Stop is best-effort over USB: an
 unplugged or stalled USB2 connection cannot guarantee delivery. No queued move
-is replayed after reconnect. Software tests and builds cover this path; actual
-Xeryon motion and physical Up/Down direction still need hardware validation.
+is replayed after reconnect.
 
 ## Wired plunger
 
@@ -295,14 +297,13 @@ of continuous movement. Desktop heartbeats keep the connection alive. These are
 software limits; no physical end-stop inputs or absolute travel calibration were
 provided. The potentiometer is displayed, not used for travel limiting.
 
-Build and test before flashing; the new GPIO/PWM/encoder/ADC paths have not yet
-been validated on physical hardware. The app and firmware must both be updated
-to enable plunger controls. An older telemetry firmware remains viewable.
+The app and firmware must both support plunger controls. An older telemetry
+firmware remains viewable.
 
-## I²C pressure input (firmware 0.1.4)
+## I²C pressure input
 
-The working sensor is the one in NanoManipulator `Pressure.cpp`, not the separate
-HX711 sketch. Firmware 0.1.4 replaces the HX711 transport with LPI2C1 on the
+The working sensor uses the interface in NanoManipulator `Pressure.cpp`.
+Since firmware 0.1.4, pressure uses LPI2C1 on the
 standard Teensy `Wire` pins: **SDA pin 18 / A4, SCL pin 19 / A5**, address **0x5C**,
 at **400 kHz**. Keep the wiring that works with NanoManipulator. Pins A0/A1 are
 no longer used for pressure. Motor wiring and control are unchanged.
@@ -331,7 +332,3 @@ Update both firmware and desktop app. Flash with `./upload.sh` on macOS or
 panel should identify **I²C · address 0x5C** and report WHO_AM_I, raw temperature,
 and increasing pressure samples. Use **Read snapshot** to capture the `Hardware`
 log if it fails. Older firmware still reports HX711 diagnostics in the new app.
-
-Host tests and an embedded release build validate software behavior; the new I²C
-path still needs a physical-board retest. The original problem was a sensor
-interface mismatch, so the prior HX711 GPIO changes did not address this sensor.

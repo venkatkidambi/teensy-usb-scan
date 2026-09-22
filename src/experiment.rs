@@ -393,7 +393,7 @@ impl<'a> Engine<'a> {
         {
             return Err("Invalid dataset offset; restart GET_DATA");
         }
-        let end = (offset + 16).min(self.len);
+        let end = (offset + CHUNK_RECORDS).min(self.len);
         self.transfer_next = end;
         Ok(&self.samples[offset..end])
     }

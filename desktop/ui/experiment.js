@@ -1,29 +1,32 @@
 // UI only: native Rust validates configuration, receives binary data and builds CSV.
 const $=id=>document.getElementById(id);
-let mode='dashboard',dataset=null,context=null;
+let mode='dashboard',dataset=null,context=null,saving=false;
+const modes=['dashboard','quasi_static','sinusoidal'];
+const fields=['start','increment','timing','repeats'];
 const configurations={quasi_static:['0','1','1','3'],sinusoidal:['0','1','1','3']};
 export function experimentControls() {
   if(!context)return;
   const {session,connected,hello,snapshot,experimentUnresolved}=context.state();
   const owned=!!session?.experimentOwned||experimentUnresolved;
-  for(const name of ['dashboard','quasi_static','sinusoidal']) $(`tab-${name}`).disabled=owned;
+  for(const name of modes) $(`tab-${name}`).disabled=owned;
   $('dashboard-panel').inert=owned;
   for(const control of $('experiment-form').elements)control.disabled=owned;
-  $('experiment-start-button').disabled=owned||!connected||!hello?.experiments||!!session?.pending;
+  $('experiment-start-button').disabled=saving||owned||!connected||!hello?.experiments||!!session?.pending;
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
-  $('experiment-save').disabled=owned||!dataset;
+  $('experiment-save').disabled=saving||owned||!dataset;
+  $('experiment-save').textContent=saving?'Saving…':'Save CSV';
 }
 function tab(next) {
-  if(mode!=='dashboard')configurations[mode]=['start','increment','timing','repeats'].map(k=>$(`experiment-${k}`).value);
+  if(mode!=='dashboard')configurations[mode]=fields.map(k=>$(`experiment-${k}`).value);
   mode=next;
-  for(const name of ['dashboard','quasi_static','sinusoidal'])$(`tab-${name}`).setAttribute('aria-selected',String(mode===name));
+  for(const name of modes)$(`tab-${name}`).setAttribute('aria-selected',String(mode===name));
   $('dashboard-panel').hidden=mode!=='dashboard';$('experiment-panel').hidden=mode==='dashboard';
   if(mode!=='dashboard'){
     const sine=mode==='sinusoidal';
     $('experiment-title').textContent=sine?'Sinusoidal experiment':'Quasi-static experiment';
     for(const [key,label] of Object.entries({start:sine?'Center position (µm)':'Start position (µm)',increment:sine?'Amplitude (µm)':'Signed step (µm)',timing:sine?'Frequency (Hz)':'Hold time (s)',repeats:sine?'Number of cycles':'Number of steps'}))$(`experiment-${key}-label`).textContent=label;
-    ['start','increment','timing','repeats'].forEach((k,i)=>{$(`experiment-${k}`).value=configurations[mode][i];});
+    fields.forEach((k,i)=>{$(`experiment-${k}`).value=configurations[mode][i];});
     $('experiment-timing').min=sine?'0.1':'0.001';$('experiment-timing').max=sine?'2':'204.75';
   }
   experimentControls();draw();
@@ -65,10 +68,10 @@ function drawPlot(id,field,scale) {
 function draw(){drawPlot('experiment-position-plot',1,.078);drawPlot('experiment-pressure-plot',2,1);}
 export function setupExperiments(api) {
   context=api;
-  for(const name of ['dashboard','quasi_static','sinusoidal'])$(`tab-${name}`).onclick=()=>tab(name);
+  for(const name of modes)$(`tab-${name}`).onclick=()=>tab(name);
   $('experiment-current').onclick=()=>{$('experiment-start').value=(api.state().snapshot.values.EPOS.value*.078).toFixed(3);};
   $('experiment-form').onsubmit=async event=>{
-    event.preventDefault();const {session}=api.state();if(!session||session.experimentOwned)return;
+    event.preventDefault();const {session,experimentUnresolved}=api.state();if(saving||!session||session.experimentOwned||experimentUnresolved)return;
     const config={kind:mode,start_um:Number($('experiment-start').value),increment_um:Number($('experiment-increment').value),timing:Number($('experiment-timing').value),repeats:Number($('experiment-repeats').value)};
     try{const pending=session.startExperiment(config);experimentControls();await pending;}
     catch(e){$('experiment-state').textContent=String(e.message??e);}
@@ -80,12 +83,13 @@ export function setupExperiments(api) {
     finally{api.controls();}
   };
   $('experiment-save').onclick=async()=>{
-    if(api.state().session?.experimentOwned||api.state().experimentUnresolved||!dataset)return;
+    if(saving||api.state().session?.experimentOwned||api.state().experimentUnresolved||!dataset)return;
+    saving=true;experimentControls();
     try{
-      const csv=await api.invoke('experiment_csv');
-      const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
-      const link=document.createElement('a');link.href=url;link.download=`experiment-${dataset.metadata.run}.csv`;link.click();setTimeout(()=>URL.revokeObjectURL(url),10000);
+      const path=await api.invoke('experiment_save_csv');
+      $('experiment-state').textContent=path?`CSV saved to ${path}`:'Save cancelled. The dataset is still available.';
     }catch(e){$('experiment-state').textContent=`CSV export failed: ${e}`;}
+    finally{saving=false;experimentControls();}
   };
   new ResizeObserver(draw).observe($('experiment-results'));
   if(api.invoke)void api.invoke('experiment_result').then(result=>{if(result)experimentMessage({type:'experiment_dataset',dataset:result});}).catch(()=>{});

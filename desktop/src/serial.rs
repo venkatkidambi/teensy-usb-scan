@@ -107,6 +107,11 @@ pub struct Inbox {
 }
 
 impl Inbox {
+    fn set_owned(&mut self, owned: bool, shared: &AtomicBool) {
+        self.owned = owned;
+        shared.store(owned, Ordering::Release);
+    }
+
     fn push(&mut self, line: String) {
         self.sequence += 1;
         let sequence = self.sequence;
@@ -234,6 +239,7 @@ impl Connection {
                                         continue;
                                     };
                                     let mut next = None;
+                                    let mut advance_download = false;
                                     match event {
                                         crate::experiment::Event::Line(line) => {
                                             let value =
@@ -242,9 +248,10 @@ impl Connection {
                                             let mut q = queue.lock().unwrap();
                                             match value["type"].as_str() {
                                                 Some("experiment_state") => {
-                                                    q.owned = value["state"] != "dashboard";
-                                                    worker_ownership
-                                                        .store(q.owned, Ordering::Release);
+                                                    q.set_owned(
+                                                        value["state"] != "dashboard",
+                                                        &worker_ownership,
+                                                    );
                                                     if value["state"] == "data_ready" {
                                                         let run =
                                                             crate::experiment::uint(&value, "run")
@@ -255,18 +262,14 @@ impl Connection {
                                                 }
                                                 Some("experiment_ack") => {
                                                     if value["action"] == "start" {
-                                                        q.owned = true;
-                                                        worker_ownership
-                                                            .store(true, Ordering::Release);
+                                                        q.set_owned(true, &worker_ownership);
                                                         q.start_id = None;
                                                     }
                                                     if value["action"] == "data_received"
                                                         && value["id"]
                                                             == crate::experiment::DOWNLOAD_ID
                                                     {
-                                                        q.owned = false;
-                                                        worker_ownership
-                                                            .store(false, Ordering::Release);
+                                                        q.set_owned(false, &worker_ownership);
                                                         deadline = None;
                                                     }
                                                     q.push(line);
@@ -275,15 +278,7 @@ impl Connection {
                                                     download
                                                         .metadata(value)
                                                         .map_err(io::Error::other)?;
-                                                    let (command, dataset) = download
-                                                        .next()
-                                                        .map_err(io::Error::other)?;
-                                                    if let Some(dataset) = dataset {
-                                                        *archive.lock().unwrap() =
-                                                            Some(dataset.clone());
-                                                        q.dataset = Some(dataset);
-                                                    }
-                                                    next = Some(command);
+                                                    advance_download = true;
                                                 }
                                                 Some("error") => {
                                                     if value["id"] == crate::experiment::DOWNLOAD_ID
@@ -297,9 +292,7 @@ impl Connection {
                                                     if q.start_id
                                                         .is_some_and(|id| value["id"] == id)
                                                     {
-                                                        q.owned = false;
-                                                        worker_ownership
-                                                            .store(false, Ordering::Release);
+                                                        q.set_owned(false, &worker_ownership);
                                                         q.start_id = None;
                                                     }
                                                     q.push(line);
@@ -311,15 +304,18 @@ impl Connection {
                                             download
                                                 .chunk(header, &bytes)
                                                 .map_err(io::Error::other)?;
-                                            let (command, dataset) =
-                                                download.next().map_err(io::Error::other)?;
-                                            if let Some(dataset) = dataset {
-                                                // Retain the complete verified copy before releasing Teensy RAM.
-                                                *archive.lock().unwrap() = Some(dataset.clone());
-                                                queue.lock().unwrap().dataset = Some(dataset);
-                                            }
-                                            next = Some(command);
+                                            advance_download = true;
                                         }
+                                    }
+                                    if advance_download {
+                                        let (command, dataset) =
+                                            download.next().map_err(io::Error::other)?;
+                                        if let Some(dataset) = dataset {
+                                            // Both empty and nonempty runs are retained before ACK.
+                                            *archive.lock().unwrap() = Some(dataset.clone());
+                                            queue.lock().unwrap().dataset = Some(dataset);
+                                        }
+                                        next = Some(command);
                                     }
                                     if let Some(command) = next {
                                         port.write_all(command.as_bytes())?;
@@ -377,8 +373,7 @@ impl Connection {
             .try_send(command)
             .map_err(|_| "Serial command queue busy or disconnected")?;
         if let Some(id) = start_id {
-            q.owned = true;
-            self.ownership.store(true, Ordering::Release);
+            q.set_owned(true, &self.ownership);
             q.start_id = Some(id);
         }
         Ok(())
