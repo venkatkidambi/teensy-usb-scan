@@ -66,8 +66,9 @@ static void complete(tusb_xfer_result_t result) {
 }
 
 int main(void) {
-  const uint8_t move[] = "SSPD=16777215\nDPOS=-33554432\n";
-  assert(!usb_serial_send(move, sizeof(move)-1, false));
+  const uint8_t speed[] = "SSPD=16777215\n";
+  const uint8_t target[] = "DPOS=-33554432\n";
+  assert(!usb_serial_send(speed, sizeof(speed)-1, false));
   usb_serial_task();
   assert(!controls && !reads);
   tuh_cdc_mount_cb(0);
@@ -85,18 +86,20 @@ int main(void) {
   usb_serial_task();
   complete(XFER_RESULT_SUCCESS);
   assert(events[1] == 1);
-  assert(usb_serial_send(move, sizeof(move)-1, false));
-  assert(writes == 1 && flushes == 1 && strcmp(transmitted, "SSPD=16777215\nDPOS=-33554432\n") == 0);
-  available = sizeof(move)-2; // Enough for either line, but not both.
-  assert(!usb_serial_send(move, sizeof(move)-1, false));
-  assert(writes == 1); // No partial command on backpressure.
+  assert(usb_serial_send(speed, sizeof(speed)-1, false));
+  assert(writes == 1 && flushes == 1 && strcmp(transmitted, "SSPD=16777215\n") == 0);
+  assert(usb_serial_send(target, sizeof(target)-1, false));
+  assert(writes == 2 && flushes == 2 && strcmp(transmitted, "DPOS=-33554432\n") == 0);
+  available = sizeof(target)-2;
+  assert(!usb_serial_send(target, sizeof(target)-1, false));
+  assert(writes == 2); // No partial line on backpressure.
   assert(usb_serial_send((const uint8_t *)"STOP\n", 5, true));
-  assert(clears == 1 && writes == 2 && strcmp(transmitted, "STOP\n") == 0);
-  assert(!usb_serial_send(move, 33, false));
+  assert(clears == 1 && writes == 3 && strcmp(transmitted, "STOP\n") == 0);
+  assert(!usb_serial_send(speed, 33, false));
   usb_serial_task();
   assert(reads == 1);
   tuh_cdc_umount_cb(0);
-  assert(!usb_serial_send(move, sizeof(move)-1, false));
+  assert(!usb_serial_send(speed, sizeof(speed)-1, false));
   usb_serial_task();
   assert(reads == 1 && events[2] == 1);
 

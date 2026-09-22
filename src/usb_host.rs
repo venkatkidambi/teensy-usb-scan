@@ -39,15 +39,25 @@ pub fn move_xeryon(up: bool, nm: u32, speed: Option<u32>, now: u32) -> Result<i3
     let target = crate::xeryon_motion::target(&t, up, nm, now)?;
     let mut frame = crate::protocol::Frame::new();
     crate::xeryon_motion::write_move(&mut frame, target, speed)?;
-    // SAFETY: called only in main context; C copies the complete command.
-    if !unsafe {
-        usb_serial_send(
-            frame.pending().as_ptr(),
-            frame.pending().len() as u32,
-            false,
-        )
-    } {
-        return Err("Xeryon USB transmit unavailable");
+    let bytes = frame.pending();
+    if speed.is_some() {
+        // Flush SSPD and DPOS as separate USB transfers. The XD-C processes
+        // each line on newline, and the working DPOS-only path uses one packet.
+        let split = bytes
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .ok_or("Invalid Xeryon frame")?
+            + 1;
+        // SAFETY: main context; C copies each bounded line before returning.
+        if !unsafe { usb_serial_send(bytes.as_ptr(), split as u32, false) } {
+            return Err("Xeryon speed USB transmit unavailable");
+        }
+        if !unsafe { usb_serial_send(bytes[split..].as_ptr(), (bytes.len() - split) as u32, false) }
+        {
+            return Err("Xeryon target USB transmit unavailable");
+        }
+    } else if !unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, false) } {
+        return Err("Xeryon target USB transmit unavailable");
     }
     cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().start(target, now));
     Ok(target)
@@ -169,10 +179,12 @@ pub fn poll() {
     let t = telemetry();
     let stop = cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().poll(&t, millis()));
     if stop {
+        let reason = cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow().interruption_reason);
         let result = stop_xeryon();
         cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow_mut().state = 4);
         log::warn!(
-            "Xeryon motion interrupted (feedback, connection, fault or timeout); Stop queued={}",
+            "Xeryon motion interrupted: {}; Stop queued={}",
+            reason.unwrap_or("unknown reason"),
             result.is_ok()
         );
     }

@@ -65,8 +65,8 @@ The UI converts µm to nm, allowing three decimal places. Firmware rounds travel
 to counts as `(nm + 39) / 78`, then adds/subtracts from the latest EPOS. It checks
 signed 26-bit EPOS/target bounds [-33554432, 33554431], known USB identity,
 ready CDC, fresh EPOS/STAT (<3 seconds), motion state and controller faults.
-With an entered speed, it queues `SSPD=<speed>\nDPOS=<target>\n` together in
-one bounded USB write, so speed precedes movement. Without one, it queues only
+With an entered speed (firmware 0.1.8+), it flushes `SSPD=<speed>\n` and then queues
+`DPOS=<target>\n` as separate USB transfers. Without one, it queues only
 `DPOS=<target>\n`. Limits, homing and tuning are unchanged. Settings
 are not saved to controller flash. The existing 60-second move deadline also
 applies to slow moves.

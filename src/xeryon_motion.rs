@@ -3,7 +3,7 @@ use crate::protocol::Telemetry;
 
 pub const MAX_SPEED: u32 = 0x00ff_ffff;
 
-// Queue speed and target together when speed is explicitly requested.
+// Compose bounded newline-delimited commands; USB transport flushes each line.
 pub fn write_move(
     out: &mut impl core::fmt::Write,
     target: i32,
@@ -44,13 +44,13 @@ mod tests {
         t
     }
     #[test]
-    fn speed_precedes_position_and_fits_one_transport_write() {
+    fn speed_precedes_position_and_each_line_fits_transport_limit() {
         for speed in [1, 10000, MAX_SPEED] {
             let mut frame = crate::protocol::Frame::new();
             write_move(&mut frame, MIN_POSITION, Some(speed)).unwrap();
             let text = core::str::from_utf8(frame.pending()).unwrap();
             assert_eq!(text, format!("SSPD={speed}\nDPOS=-33554432\n"));
-            assert!(frame.pending().len() <= 32);
+            assert!(text.lines().all(|line| line.len() + 1 <= 32));
         }
         for speed in [0, MAX_SPEED + 1, u32::MAX] {
             let mut frame = crate::protocol::Frame::new();
@@ -129,6 +129,18 @@ mod tests {
             };
             assert!(m.poll(&t, now));
             assert_eq!(m.state, 4);
+            assert_eq!(
+                m.interruption_reason,
+                Some(
+                    [
+                        "USB2 disconnected",
+                        "encoder feedback stale",
+                        "controller fault",
+                        "desktop heartbeat missing",
+                        "move deadline",
+                    ][condition]
+                )
+            );
             assert!(!m.poll(&t, now));
         }
         m.start(228, u32::MAX - 100);
@@ -180,6 +192,7 @@ pub struct Motion {
     started: u32,
     heartbeat: u32,
     echoed: Option<u32>,
+    pub interruption_reason: Option<&'static str>,
 }
 impl Motion {
     pub const fn new() -> Self {
@@ -189,6 +202,7 @@ impl Motion {
             started: 0,
             heartbeat: 0,
             echoed: None,
+            interruption_reason: None,
         }
     }
     pub fn start(&mut self, target: i32, now: u32) {
@@ -197,6 +211,7 @@ impl Motion {
         self.started = now;
         self.heartbeat = now;
         self.echoed = None;
+        self.interruption_reason = None;
     }
     pub fn heartbeat(&mut self, now: u32) {
         self.heartbeat = now;
@@ -206,14 +221,24 @@ impl Motion {
         if self.state != 1 {
             return false;
         }
-        if !ready(t)
-            || !fresh(t, 0, now)
-            || !fresh(t, 2, now)
-            || t.samples[2].value & FAULTS != 0
-            || now.wrapping_sub(self.started) >= 60_000
-            || now.wrapping_sub(self.heartbeat) >= 5000
-        {
+        let reason = if !ready(t) {
+            Some("USB2 disconnected")
+        } else if !fresh(t, 0, now) {
+            Some("encoder feedback stale")
+        } else if !fresh(t, 2, now) {
+            Some("controller status stale")
+        } else if t.samples[2].value & FAULTS != 0 {
+            Some("controller fault")
+        } else if now.wrapping_sub(self.started) >= 60_000 {
+            Some("move deadline")
+        } else if now.wrapping_sub(self.heartbeat) >= 5000 {
+            Some("desktop heartbeat missing")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
             self.state = 4;
+            self.interruption_reason = Some(reason);
             return true;
         }
         let after = |ms: u32| {
