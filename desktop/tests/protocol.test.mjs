@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {NativeSession,parseMessage,statusFlags,elapsed,pressureState,xeryonTravelNm} from '../ui/protocol.mjs';
+import {NativeSession,parseMessage,statusFlags,elapsed,pressureState,xeryonTravelNm,xeryonMoveCommand} from '../ui/protocol.mjs';
 
 test('telemetry schema and status mapping',()=>{
   const m={type:'snapshot',id:0,ms:100,epoch:1,vid:1240,pid:61258,mounted:true,cdc:2,records:3,malformed:0,skipped:0,values:{STAT:{value:1344,ms:99}}};
@@ -111,6 +111,8 @@ test('Xeryon travel units, schema, framing and Stop preemption',async()=>{
   assert.equal(xeryonTravelNm('10'),10000);
   assert.equal(xeryonTravelNm('0.078'),78);
   assert.equal(xeryonTravelNm('1.234'),1234);
+  assert.equal(xeryonMoveCommand('U','10','10000',true),'XERYON_MOVE U 10000 10000');
+  assert.equal(xeryonMoveCommand('U','10','10000',false),'XERYON_MOVE U 10000');
   for(const value of ['0','-1','0.077','1.2345','Infinity','1e3','2617245.619'])assert.throws(()=>xeryonTravelNm(value));
   const ack={type:'xeryon_ack',id:1,action:'move',target:-28};
   assert.deepEqual(parseMessage(JSON.stringify(ack)),ack);
@@ -119,7 +121,7 @@ test('Xeryon travel units, schema, framing and Stop preemption',async()=>{
   const b=backend(false),s=new NativeSession(b.invoke,()=>{},assert.fail,assert.fail,500);
   await s.open('COM6');
   try{
-    for(const cmd of ['XERYON_MOVE U 10000','XERYON_MOVE U 10000 0','XERYON_MOVE U 10000 16777216','XERYON_MOVE U 10000 -1','XERYON_MOVE U 10000 1.5','XERYON_MOVE U 0 10000','XERYON_MOVE U 77 10000','XERYON_MOVE D -100 10000','XERYON_MOVE X 100 10000','XERYON_MOVE U 2617245619 10000','XERYON_MOVE U 1.5 10000','DPOS=100'])await assert.rejects(s.request(cmd),/Unsupported/);
+    for(const cmd of ['XERYON_MOVE U 10000 0','XERYON_MOVE U 10000 16777216','XERYON_MOVE U 10000 -1','XERYON_MOVE U 10000 1.5','XERYON_MOVE U 0 10000','XERYON_MOVE U 77 10000','XERYON_MOVE D -100 10000','XERYON_MOVE X 100 10000','XERYON_MOVE U 2617245619 10000','XERYON_MOVE U 1.5 10000','DPOS=100'])await assert.rejects(s.request(cmd),/Unsupported/);
     const moving=s.request('XERYON_MOVE D 10000 10000');
     assert.equal(s.pending.expected,'xeryon_ack');
     const interrupted=assert.rejects(moving,/Interrupted by Stop/);
@@ -128,6 +130,17 @@ test('Xeryon travel units, schema, framing and Stop preemption',async()=>{
     assert.deepEqual(b.sent,['XERYON_MOVE 1 D 10000 10000','XERYON_STOP 2']);
     await s.close();await interrupted;await closed;
   }finally{await s.close();}
+});
+
+test('legacy Xeryon firmware can receive a move without a speed argument',async()=>{
+  const b=backend(false),s=new NativeSession(b.invoke,()=>{},assert.fail,assert.fail,500);
+  await s.open('COM6');
+  try {
+    const moving=s.request(xeryonMoveCommand('D','10','10000',false));
+    assert.deepEqual(b.sent,['XERYON_MOVE 1 D 10000']);
+    await s.close();
+    await assert.rejects(moving,/Connection closed/);
+  } finally { await s.close(); }
 });
 
 

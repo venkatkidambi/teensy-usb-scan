@@ -12,6 +12,10 @@ export function xeryonTravelNm(value) {
   if(!Number.isSafeInteger(nm)||nm<78||nm>2617245618) throw Error('Travel must be between 0.078 and 2617245.618 µm');
   return nm;
 }
+export function xeryonMoveCommand(direction, travel, speed, speedSupported) {
+  const move=`XERYON_MOVE ${direction} ${xeryonTravelNm(travel)}`;
+  return speedSupported?`${move} ${Number(speed)}`:move;
+}
 const tags = new Set(['EPOS','DPOS','STAT','SRNO','SOFT','FREQ','TIME','SYNC']);
 export function pressureState(p) {
   if(p?.sensor==='i2c') return ['Initializing I²C sensor','Waiting for first sample','Receiving','I²C transfer timed out','I²C bus error / no acknowledgement'][p.state]??(p.valid?'Receiving':'Initializing I²C sensor');
@@ -107,8 +111,8 @@ export class NativeSession {
     if(this.pending) return Promise.reject(Error('Wait for the current request'));
     const move=/^PLUNGER_MOVE [UD] ([0-9]+) ([0-9]+)$/.exec(command);
     const validMove=move&&+move[1]>0&&+move[1]<=255&&Number.isSafeInteger(+move[2])&&+move[2]>0&&Math.floor((+move[2]*16688+500)/1000)<=2147483647;
-    const xeryonMove=/^XERYON_MOVE [UD] ([0-9]+) ([0-9]+)$/.exec(command);
-    const validXeryon=xeryonMove&&Number.isSafeInteger(+xeryonMove[1])&&+xeryonMove[1]>=78&&+xeryonMove[1]<=2617245618&&Number.isInteger(+xeryonMove[2])&&+xeryonMove[2]>=1&&+xeryonMove[2]<=16777215;
+    const xeryonMove=/^XERYON_MOVE [UD] ([0-9]+)(?: ([0-9]+))?$/.exec(command);
+    const validXeryon=xeryonMove&&Number.isSafeInteger(+xeryonMove[1])&&+xeryonMove[1]>=78&&+xeryonMove[1]<=2617245618&&(xeryonMove[2]===undefined||Number.isInteger(+xeryonMove[2])&&+xeryonMove[2]>=1&&+xeryonMove[2]<=16777215);
     if(!validMove&&!validXeryon&&!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP'].includes(command)) return Promise.reject(Error('Unsupported command'));
     const [name,...args]=command.split(' ');const arg=args.length?args.join(' '):undefined;const id=this.id=this.id===0xffffffff?1:this.id+1;
     return new Promise((resolve,reject)=>{

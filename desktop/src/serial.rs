@@ -65,11 +65,13 @@ pub fn validate_command(command: &str) -> bool {
             _,
         ]
         | ["STREAM", _, "0" | "1"] => true,
-        ["XERYON_MOVE", _, "U" | "D", nm, speed] => {
-            speed.bytes().all(|b| b.is_ascii_digit())
-                && speed
-                    .parse::<u32>()
-                    .is_ok_and(|s| (1..=16777215).contains(&s))
+        ["XERYON_MOVE", _, "U" | "D", nm, speed @ ..] if speed.len() <= 1 => {
+            let speed_valid = speed.is_empty()
+                || speed[0].bytes().all(|b| b.is_ascii_digit())
+                    && speed[0]
+                        .parse::<u32>()
+                        .is_ok_and(|s| (1..=16777215).contains(&s));
+            speed_valid
                 && nm.bytes().all(|b| b.is_ascii_digit())
                 && nm
                     .parse::<u32>()
@@ -297,6 +299,8 @@ mod tests {
     #[test]
     fn only_supported_requests_are_allowed() {
         for command in [
+            "XERYON_MOVE 1 U 10000",
+            "XERYON_MOVE 2 D 78",
             "XERYON_MOVE 1 U 10000 1",
             "XERYON_MOVE 1 U 10000 16777215",
             "XERYON_MOVE 2 D 78 10000",
@@ -315,7 +319,9 @@ mod tests {
             assert!(validate_command(command));
         }
         for command in [
-            "XERYON_MOVE 1 U 10000",
+            "XERYON_MOVE 1 U 77",
+            "XERYON_MOVE 1 U 2617245619",
+            "XERYON_MOVE 1 U 10000 10000 extra",
             "XERYON_MOVE 1 U 10000 0",
             "XERYON_MOVE 1 U 10000 16777216",
             "XERYON_MOVE 1 U 10000 -1",

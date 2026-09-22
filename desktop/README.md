@@ -43,8 +43,9 @@ and is sent before each target. The XD-C uses that speed and its existing tuning
 to reach and hold the target. **Stop** requests an interruption.
 
 The panel shows the requested target and waits for controller feedback before
-reporting completion. Controls require fresh position/status and firmware's
-`xeryon_speed: true` capability. Older firmware remains viewable but cannot move Xeryon.
+reporting completion. Controls require fresh position/status and Xeryon-capable
+firmware. With older firmware that lacks `xeryon_speed: true`, the speed input is
+disabled and moves use the controller's existing speed setting.
 The plunger controls operate the separate wired motor. See the root README for
 motion timeout behavior and hardware-validation limits.
 

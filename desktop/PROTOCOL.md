@@ -51,12 +51,12 @@ The firmware sends `{"type":"error","id":0,"message":"invalid command"}` for
 malformed commands after LF. Only the listed commands are accepted; arbitrary Xeryon commands are rejected. Pausing display updates never pauses actuator reception.
 
 Xeryon-enabled firmware adds `xeryon: true` to HELLO; firmware 0.1.6+ also
-adds `xeryon_speed: true` for speed-controlled moves. The UI accepts
-older HELLO messages without this capability but disables Xeryon controls.
-`XERYON_MOVE` requires direction U/D, integer distance 78–2617245618 **nm**,
-and integer speed 1–16777215 **µm/s**, in that order. Missing speed is rejected;
-the UI requires `xeryon_speed: true` so firmware 0.1.5 remains viewable but cannot
-receive moves from the updated UI.
+adds `xeryon_speed: true` for speed-controlled moves. For older Xeryon firmware,
+the UI sends the original `XERYON_MOVE <id> <U|D> <nm>` command and disables the
+speed input. The controller keeps its existing speed setting in this mode.
+With `xeryon_speed: true`, the UI includes integer speed 1–16777215 **µm/s**
+after integer distance 78–2617245618 **nm**. The desktop accepts both command
+shapes so it can connect to either firmware version.
 The UI converts µm to nm, allowing three decimal places. Firmware rounds travel
 to counts as `(nm + 39) / 78`, then adds/subtracts from the latest EPOS. It checks
 signed 26-bit EPOS/target bounds [-33554432, 33554431], known USB identity,
