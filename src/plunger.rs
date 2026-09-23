@@ -1,6 +1,36 @@
 //! Hardware-independent plunger control. Calibration comes from Motor.h.
 pub const COUNTS_PER_MM: u32 = 16_688;
 
+#[derive(Clone, Copy)]
+pub struct Limits {
+    pub min: u8,
+    pub max: u8,
+}
+impl Default for Limits {
+    fn default() -> Self {
+        Self { min: 30, max: 75 }
+    }
+}
+impl Limits {
+    pub fn new(min: u8, max: u8) -> Result<Self, &'static str> {
+        if min >= max || max > 100 {
+            return Err("Limits must satisfy 0 <= min < max <= 100");
+        }
+        Ok(Self { min, max })
+    }
+    pub fn allows(self, up: bool, pot: Option<u16>) -> bool {
+        let Some(value) = pot.filter(|v| *v <= 4095) else {
+            return false;
+        };
+        // Round inward so ADC quantization cannot extend the requested window.
+        if up {
+            value < (u32::from(self.max) * 4095 / 100) as u16
+        } else {
+            value > (u32::from(self.min) * 4095).div_ceil(100) as u16
+        }
+    }
+}
+
 pub fn distance_counts(um: u32) -> Option<u32> {
     if um == 0 {
         return None;
@@ -33,6 +63,7 @@ pub struct Io {
 
 #[derive(Clone, Copy, Default)]
 pub struct Motion {
+    pub limits: Limits,
     pub position: i32,
     pub running: bool,
     pub speed: u8,
@@ -80,6 +111,30 @@ impl Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn potentiometer_limits_and_recovery() {
+        let limits = Limits::default();
+        assert_eq!((limits.min, limits.max), (30, 75));
+        assert!(limits.allows(true, Some(3070)));
+        assert!(!limits.allows(true, Some(3071)));
+        assert!(!limits.allows(false, Some(1229)));
+        assert!(limits.allows(false, Some(1230)));
+        assert!(limits.allows(true, Some(0)));
+        assert!(!limits.allows(false, Some(0)));
+        assert!(limits.allows(false, Some(4095)));
+        assert!(!limits.allows(true, Some(4095)));
+        for up in [true, false] {
+            assert!(!limits.allows(up, None));
+            assert!(!limits.allows(up, Some(4096)));
+        }
+        assert!(Limits::new(0, 100).is_ok());
+        for (min, max) in [(30, 30), (75, 30), (0, 101)] {
+            assert!(Limits::new(min, max).is_err());
+        }
+        let custom = Limits::new(40, 60).unwrap();
+        assert!(!custom.allows(true, Some(2457)));
+        assert!(!custom.allows(false, Some(1638)));
+    }
     #[test]
     fn calibration_and_limits() {
         assert_eq!(distance_counts(1), Some(17));

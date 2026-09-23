@@ -7,6 +7,7 @@ const micronsPerCount=0.078;
 const positionNumber=new Intl.NumberFormat(undefined,{minimumFractionDigits:3,maximumFractionDigits:3});
 const position=counts=>positionNumber.format(counts*micronsPerCount);
 let session=null,connected=false,busy=false,demo=false,streaming=true,snapshot=null,received=0,hello=null;
+let limitsInitialized=false;
 let pressureHistory=[],lastPressure=null,experimentUnresolved=false;
 let history=[],logs=[],epoch=null,lastSample=null,lastPong=0,lastPing=0,demoTimer=null;
 function activity(message){logs.push(`${new Date().toLocaleTimeString()}  ${message}`);if(logs.length>100)logs.shift();text('log',logs.join('\n'));}
@@ -19,6 +20,12 @@ function controls(){
   $('demo').disabled=busy||connected||demo||!!session;
   for(const id of ['ping','snapshot','stream'])$(id).disabled=!connected||!!session?.pending;
   for(const id of ['plunger-up','plunger-down','plunger-zero'])$(id).disabled=!connected||!hello?.motion||!!session?.pending||!snapshot?.plunger||snapshot.plunger.running||performance.now()-received>=3000;
+  for(const id of ['plunger-min','plunger-max','plunger-apply-limits'])$(id).disabled=!connected||!hello?.plunger_limits||!!session?.pending||!!session?.experimentOwned||!snapshot?.plunger||snapshot.plunger.running||performance.now()-received>=3000;
+  if(hello?.plunger_limits){
+    const p=snapshot?.plunger,limits=p?.limits;
+    $('plunger-up').disabled ||= !limits||p.pot==null||p.pot>=Math.floor(limits.max*4095/100);
+    $('plunger-down').disabled ||= !limits||p.pot==null||p.pot<=Math.ceil(limits.min*4095/100);
+  }
   $('plunger-stop').disabled=!connected||!hello?.motion;
   for(const id of ['xeryon-up','xeryon-down'])$(id).disabled=!!xeryonBlocked()||!!session?.pending;
   $('xeryon-stop').disabled=!connected||!hello?.xeryon||!snapshot?.mounted||snapshot.cdc!==2||snapshot.vid!==0x04d8||snapshot.pid!==0xef4a;
@@ -39,7 +46,7 @@ function xeryonBlocked(){
   if(stat&((1<<9)|(1<<13))||(stat&(1<<5))&&!(stat&(1<<10)))return 'Actuator is already moving.';
   return '';
 }
-function reset(){pressureHistory=[];lastPressure=null;snapshot=null;hello=null;history=[];epoch=null;lastSample=null;lastPong=0;lastPing=0;streaming=true;text('rtt','—');text('session-label','NO SESSION');render();draw();}
+function reset(){limitsInitialized=false;pressureHistory=[];lastPressure=null;snapshot=null;hello=null;history=[];epoch=null;lastSample=null;lastPong=0;lastPing=0;streaming=true;text('rtt','—');text('session-label','NO SESSION');render();draw();}
 async function refresh(){
   if(!invoke){notice('Launch Teensy Panel using desktop/start.cmd or desktop/start.sh.',true);return;}
   const previous=$('port').value;$('refresh').disabled=true;
@@ -71,6 +78,10 @@ function accept(m){
     const restarted=snapshot&&elapsed(m.ms,snapshot.ms)>0x7fffffff;
     if(restarted){pressureHistory=[];lastPressure=null;}
     if(epoch!==m.epoch||restarted){history=[];lastSample=null;epoch=m.epoch;}
+    if(restarted)limitsInitialized=false;
+    if(m.plunger?.limits&&!limitsInitialized){
+      $('plunger-min').value=m.plunger.limits.min;$('plunger-max').value=m.plunger.limits.max;limitsInitialized=true;
+    }
     snapshot=m;received=now;const e=m.values.EPOS,d=m.values.DPOS;
     if(e&&m.mounted&&m.cdc===2&&e.ms!==lastSample&&elapsed(m.ms,e.ms)<3000){
       history.push({time:now,e:e.value,d:d&&elapsed(m.ms,d.ms)<3000?d.value:null});lastSample=e.ms;
@@ -124,6 +135,16 @@ $('refresh').addEventListener('click',refresh);$('port').addEventListener('chang
 $('xeryon-speed').addEventListener('input',render);
 for(const[id,command]of[['ping','PING'],['snapshot','SNAPSHOT']])$(id).addEventListener('click',()=>void request(command).catch(()=>{}));
 $('stream').addEventListener('click',()=>void request(streaming?'STREAM 0':'STREAM 1').catch(()=>{}));
+$('plunger-limits-form').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const min=$('plunger-min'),max=$('plunger-max');
+  if(!min.reportValidity()||!max.reportValidity())return;
+  if(+min.value>=+max.value){notice('Minimum position must be below maximum position.',true);return;}
+  try{
+    await request(`PLUNGER_LIMITS ${min.value} ${max.value}`);
+    await request('SNAPSHOT',true);
+  }catch{}
+});
 for(const [id,direction] of [['plunger-up','U'],['plunger-down','D']])$(id).addEventListener('click',()=>{
   const speed=$('plunger-speed'),distance=$('plunger-distance');
   if(!speed.reportValidity()||!distance.reportValidity())return;
@@ -171,6 +192,8 @@ function render(){
   const plunger=snapshot?.plunger;
   text('plunger-position',plunger?positionNumber.format(plunger.counts*1000/plunger.counts_per_mm):'—');
   text('plunger-state',!connected?'Waiting for connection':!hello?.motion?'Firmware does not support plunger control':!plunger?'Waiting for feedback':performance.now()-received>=3000?'Stale feedback':plunger.running?`Drive ${plunger.up?'up':'down'} enabled · PWM ${plunger.speed}`:'Stopped');
+  const limits=plunger?.limits;
+  text('plunger-limits-state',!connected?'Connect to read active position limits.':!hello?.plunger_limits?'Upload current firmware to enable position limits.':limits?`Active limits: ${limits.min}%–${limits.max}% · changes apply while stopped.`:'Waiting for active position limits.');
   text('plunger-pot',plunger?.pot!=null?`Potentiometer ${plunger.pot} / 4095 (${(100*plunger.pot/4095).toFixed(1)}%)`:'Potentiometer —');
   controls();
   text('board-state',demo?'Demo':connected?stalled?'Stalled':'Online':'Offline');

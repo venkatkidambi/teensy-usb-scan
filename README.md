@@ -289,13 +289,20 @@ number of µm; each move is relative to the encoder position at its start.
 
 Hardware PWM runs independently of the loop. Encoder interrupts decode both
 edges and disable the motor at the target distance. Potentiometer conversions
-use 12-bit resolution and 16 hardware averages, polled without waiting at 20 Hz.
+use 12-bit resolution and 16 hardware averages, polled without waiting every 5 ms.
 Zero is allowed only while stopped; overlapping moves are rejected. Standby is
 low at startup and on Stop/target completion. USB disconnect stops the motor.
 SysTick also stops it after five seconds without a valid PC command or 60 seconds
 of continuous movement. Desktop heartbeats keep the connection alive. These are
 software limits; no physical end-stop inputs or absolute travel calibration were
-provided. The potentiometer is displayed, not used for travel limiting.
+provided. Potentiometer position limits default to **30%–75%** at every boot and
+can be changed while stopped using the panel’s minimum/maximum inputs and Apply
+limits. Up increases the reading. Firmware blocks outward movement at a bound,
+allows movement back into range, and disables drive when a sample reaches the
+bound or a conversion fails. A SysTick watchdog also stops motion if samples are
+100 ms old. These limits disable drive, so sampling delay and mechanical coast
+can produce overshoot; leave margin from physical travel endpoints. Limits are
+retained across desktop reconnects, but are not saved across Teensy restarts.
 
 The app and firmware must both support plunger controls. An older telemetry
 firmware remains viewable.

@@ -71,6 +71,13 @@
       <label>PWM drive (1–255)<input id="plunger-speed" type="number" min="1" max="255" step="1" value="64"></label>
       <button id="plunger-up" disabled>Up</button><button id="plunger-down" disabled>Down</button><button id="plunger-stop" class="stop-button" disabled>Stop</button><button id="plunger-zero" disabled>Zero position</button>
     </div>
+    <form id="plunger-limits-form" class="plunger-controls">
+      <label>Minimum position (%)<input id="plunger-min" type="number" min="0" max="99" step="1" value="30" required></label>
+      <label>Maximum position (%)<input id="plunger-max" type="number" min="1" max="100" step="1" value="75" required></label>
+      <button id="plunger-apply-limits" disabled>Apply limits</button>
+    </form>
+    <p id="plunger-limits-state" class="pressure-detail">Connect to read active position limits.</p>
+    <p class="pressure-detail">Up increases the potentiometer reading. Limits stop motor drive; allow margin for mechanical coast. Limits reset to 30%–75% when the Teensy restarts.</p>
     <div class="panel-foot"><span id="plunger-pot">Potentiometer —</span><span>16,688 counts/mm</span></div>
   </section>
   <section class="panel diagnostics"><div class="panel-heading"><div><h2>Connection diagnostics</h2><p>Connection and telemetry</p></div><div class="tools"><button id="ping" disabled>Ping</button><button id="snapshot" disabled>Read snapshot</button><button id="stream" disabled>Pause stream</button></div></div><div class="counters"><span>Round trip <b id="rtt">—</b></span><span>Records <b id="records">0</b></span><span>Malformed <b id="malformed">0</b></span><span>Skipped snapshots <b id="skipped">0</b></span><span>Desktop coalesced <b id="coalesced">0</b></span></div><details><summary>Activity log <span>Last 100 events</span></summary><pre id="log">Waiting for connection.</pre></details></section>

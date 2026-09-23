@@ -113,7 +113,11 @@ impl Telemetry {
                 Some(value) => write!(out, "{value}")?,
                 None => out.write_str("null")?,
             }
-            out.write_str("}")?;
+            write!(
+                out,
+                ",\"limits\":{{\"min\":{},\"max\":{}}}}}",
+                motor.limits.min, motor.limits.max
+            )?;
         }
         if let Some(io) = self.plunger_io {
             write!(
@@ -163,6 +167,7 @@ pub enum Command {
     Snapshot(u32),
     Stream(u32, bool),
     Move(u32, bool, u8, u32),
+    Limits(u32, u8, u8),
     Stop(u32),
     Zero(u32),
     XeryonMove(u32, bool, u32, Option<u32>),
@@ -182,6 +187,7 @@ impl Command {
             | Self::Snapshot(id)
             | Self::Stream(id, _)
             | Self::Move(id, _, _, _)
+            | Self::Limits(id, _, _)
             | Self::Stop(id)
             | Self::Zero(id)
             | Self::XeryonMove(id, _, _, _)
@@ -245,6 +251,12 @@ impl Command {
                     return Err(());
                 }
                 Self::XeryonMove(id, up, nm, speed)
+            }
+            "PLUNGER_LIMITS" => {
+                let min = words.next().ok_or(())?.parse::<u8>().map_err(|_| ())?;
+                let max = words.next().ok_or(())?.parse::<u8>().map_err(|_| ())?;
+                crate::plunger::Limits::new(min, max).map_err(|_| ())?;
+                Self::Limits(id, min, max)
             }
             "PLUNGER_STOP" => Self::Stop(id),
             "PLUNGER_ZERO" => Self::Zero(id),
@@ -401,6 +413,10 @@ mod tests {
             Command::parse(b"PLUNGER_MOVE 1 U 64 10"),
             Ok(Command::Move(1, true, 64, 10))
         );
+        assert_eq!(
+            Command::parse(b"PLUNGER_LIMITS 4 30 75"),
+            Ok(Command::Limits(4, 30, 75))
+        );
         assert_eq!(Command::parse(b"PLUNGER_STOP 2"), Ok(Command::Stop(2)));
         assert_eq!(Command::parse(b"PLUNGER_ZERO 3"), Ok(Command::Zero(3)));
         for line in [
@@ -410,6 +426,11 @@ mod tests {
             "PLUNGER_MOVE 1 U 64 0",
             "PLUNGER_MOVE 1 U 64 4294967295",
             "PLUNGER_STOP 1 extra",
+            "PLUNGER_LIMITS 1 75 30",
+            "PLUNGER_LIMITS 1 30 30",
+            "PLUNGER_LIMITS 1 0 101",
+            "PLUNGER_LIMITS 1 -1 75",
+            "PLUNGER_LIMITS 1 30 75 extra",
         ] {
             assert!(Command::parse(line.as_bytes()).is_err(), "{line}");
         }

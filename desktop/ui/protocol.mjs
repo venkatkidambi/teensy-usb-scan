@@ -52,18 +52,20 @@ export function parseMessage(line) {
     }
     if(m.plunger!==undefined) {
       const p=m.plunger;
+      if(p?.limits!==undefined&&(!object(p.limits)||!u32(p.limits.min)||!u32(p.limits.max)||p.limits.min>=p.limits.max||p.limits.max>100)) throw Error('Invalid plunger limits');
       if(!object(p)||!Number.isInteger(p.counts)||p.counts< -2147483648||p.counts>2147483647||p.counts_per_mm!==16688||typeof p.running!=='boolean'||typeof p.up!=='boolean'||!u32(p.speed)||p.speed>255||(p.pot!==null&&(!u32(p.pot)||p.pot>4095))) throw Error('Invalid plunger telemetry');
     }
   } else if(m.type==='hello') {
     if(m.protocol!==1||m.board!=='Teensy 4.1'||typeof m.firmware!=='string'||typeof m.motion!=='boolean'||typeof m.pressure!=='boolean') throw Error('Incompatible firmware; upload this project’s telemetry build');
     if(m.experiments!==undefined&&typeof m.experiments!=='boolean')throw Error('Invalid experiment capability');
+    if(m.plunger_limits!==undefined&&typeof m.plunger_limits!=='boolean') throw Error('Invalid plunger limits capability');
     if(m.xeryon_speed!==undefined&&typeof m.xeryon_speed!=='boolean') throw Error('Invalid Xeryon speed capability');
     if(m.xeryon_optional_speed!==undefined&&typeof m.xeryon_optional_speed!=='boolean') throw Error('Invalid Xeryon optional speed capability');
     if(m.xeryon!==undefined&&typeof m.xeryon!=='boolean') throw Error('Invalid Xeryon capability');
   } else if(m.type==='pong') { if(!u32(m.ms)) throw Error('Invalid pong'); }
   else if(m.type==='ack') { if(typeof m.stream!=='boolean') throw Error('Invalid acknowledgement'); }
   else if(m.type==='xeryon_ack') { if(!['move','stop'].includes(m.action)||(m.action==='move'&&!xeryonPosition(m.target))) throw Error('Invalid Xeryon acknowledgement'); }
-  else if(m.type==='plunger_ack') { if(!['move','stop','zero'].includes(m.action)) throw Error('Invalid plunger acknowledgement'); }
+  else if(m.type==='plunger_ack') { if(!['move','stop','zero','limits'].includes(m.action)) throw Error('Invalid plunger acknowledgement'); }
   else if(m.type==='experiment_state') { if(!['dashboard','running','data_ready'].includes(m.state)||!u32(m.run)) throw Error('Invalid experiment state'); }
   else if(m.type==='experiment_ack') { if(!['start','abort','data_received'].includes(m.action)||!u32(m.run)) throw Error('Invalid experiment acknowledgement'); }
   else if(m.type==='error') { if(typeof m.message!=='string') throw Error('Invalid error'); }
@@ -124,10 +126,12 @@ export class NativeSession {
     const validMove=move&&+move[1]>0&&+move[1]<=255&&Number.isSafeInteger(+move[2])&&+move[2]>0&&Math.floor((+move[2]*16688+500)/1000)<=2147483647;
     const xeryonMove=/^XERYON_MOVE [UD] ([0-9]+)(?: ([0-9]+))?$/.exec(command);
     const validXeryon=xeryonMove&&Number.isSafeInteger(+xeryonMove[1])&&+xeryonMove[1]>=78&&+xeryonMove[1]<=2617245618&&(xeryonMove[2]===undefined||Number.isInteger(+xeryonMove[2])&&+xeryonMove[2]>=1&&+xeryonMove[2]<=16777215);
-    if(!validMove&&!validXeryon&&!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP','ABORT'].includes(command)) return Promise.reject(Error('Unsupported command'));
+    const limits=/^PLUNGER_LIMITS ([0-9]+) ([0-9]+)$/.exec(command);
+    const validLimits=limits&&+limits[1]<+limits[2]&&+limits[2]<=100;
+    if(!validLimits&&!validMove&&!validXeryon&&!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP','ABORT'].includes(command)) return Promise.reject(Error('Unsupported command'));
     const [name,...args]=command.split(' ');const arg=args.length?args.join(' '):undefined;const id=this.id=this.id===0xefffffff?1:this.id+1;
     return new Promise((resolve,reject)=>{
-      this.pending={id,resolve,reject,expected:{ABORT:'experiment_ack',XERYON_MOVE:'xeryon_ack',XERYON_STOP:'xeryon_ack',HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack',PLUNGER_MOVE:'plunger_ack',PLUNGER_STOP:'plunger_ack',PLUNGER_ZERO:'plunger_ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),(command==='ABORT'||command==='PLUNGER_STOP'||command==='XERYON_STOP')?500:this.timeout)};
+      this.pending={id,resolve,reject,expected:{ABORT:'experiment_ack',XERYON_MOVE:'xeryon_ack',XERYON_STOP:'xeryon_ack',HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack',PLUNGER_LIMITS:'plunger_ack',PLUNGER_MOVE:'plunger_ack',PLUNGER_STOP:'plunger_ack',PLUNGER_ZERO:'plunger_ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),(command==='ABORT'||command==='PLUNGER_STOP'||command==='XERYON_STOP')?500:this.timeout)};
       const send=()=>this.invoke('serial_send',{session:this.session,command:`${name} ${id}${arg===undefined?'':` ${arg}`}`});
       // Preserve native queue order if ABORT preempts an in-flight START IPC.
       const sending=command==='ABORT'&&this.startSubmission?this.startSubmission.then(send,send):send();

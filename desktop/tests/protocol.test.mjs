@@ -224,3 +224,18 @@ test('ABORT cannot overtake a START still being submitted through native IPC',as
   assert.deepEqual(sent,[]);acceptStart();await new Promise(resolve=>setTimeout(resolve,1));
   assert.deepEqual(sent,['START','ABORT 2']);await s.close();await interrupted;await aborted;
 });
+
+
+test('plunger limit configuration validates and frames requests',async()=>{
+  const b=backend(false),s=new NativeSession(b.invoke,()=>{},assert.fail,assert.fail,500);
+  await s.open('COM6');
+  try {
+    for(const cmd of ['PLUNGER_LIMITS 75 30','PLUNGER_LIMITS 30 30','PLUNGER_LIMITS 0 101','PLUNGER_LIMITS -1 75','PLUNGER_LIMITS 30.5 75'])await assert.rejects(s.request(cmd),/Unsupported/);
+    const pending=s.request('PLUNGER_LIMITS 30 75');
+    const rejection=assert.rejects(pending,/Connection closed/);
+    assert.deepEqual(b.sent,['PLUNGER_LIMITS 1 30 75']);
+    assert.equal(s.pending.expected,'plunger_ack');
+    assert.doesNotThrow(()=>parseMessage(JSON.stringify({type:'plunger_ack',id:1,action:'limits'})));
+    await s.close();await rejection;
+  }finally{await s.close();}
+});

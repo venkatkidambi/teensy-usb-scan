@@ -81,6 +81,13 @@ pub fn validate_command(command: &str) -> bool {
                     .parse::<u32>()
                     .is_ok_and(|n| (78..=2_617_245_618).contains(&n))
         }
+        ["PLUNGER_LIMITS", _, min, max] => {
+            min.bytes().all(|b| b.is_ascii_digit())
+                && max.bytes().all(|b| b.is_ascii_digit())
+                && min
+                    .parse::<u8>()
+                    .is_ok_and(|lo| max.parse::<u8>().is_ok_and(|hi| lo < hi && hi <= 100))
+        }
         ["PLUNGER_MOVE", _, "U" | "D", speed, um] => {
             speed.bytes().all(|b| b.is_ascii_digit())
                 && speed.parse::<u8>().is_ok_and(|s| s > 0)
@@ -437,6 +444,8 @@ mod tests {
             "XERYON_MOVE 2 D 78 10000",
             "XERYON_MOVE 3 U 2617245618 10000",
             "XERYON_STOP 4",
+            "PLUNGER_LIMITS 1 30 75",
+            "PLUNGER_LIMITS 2 0 100",
             "PLUNGER_MOVE 1 U 64 10",
             "PLUNGER_MOVE 2 D 255 128684302",
             "PLUNGER_STOP 3",
@@ -463,6 +472,10 @@ mod tests {
             "XERYON_MOVE 1 D -100 10000",
             "XERYON_MOVE 1 U 1.5 10000",
             "XERYON_STOP 1 extra",
+            "PLUNGER_LIMITS 1 75 30",
+            "PLUNGER_LIMITS 1 30 30",
+            "PLUNGER_LIMITS 1 0 101",
+            "PLUNGER_LIMITS 1 -1 75",
             "PLUNGER_MOVE 1 U 0 10",
             "PLUNGER_MOVE 1 D 256 10",
             "PLUNGER_MOVE 1 D 64 128684303",

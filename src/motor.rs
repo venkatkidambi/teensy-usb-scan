@@ -29,6 +29,8 @@ struct Motor {
     motion: Motion,
     last_command: u32,
     started: u32,
+    pot: Option<u16>,
+    pot_ms: u32,
 }
 impl Motor {
     fn state(&self) -> u8 {
@@ -120,6 +122,8 @@ pub fn init(
         motion: Motion::default(),
         last_command: 0,
         started: 0,
+        pot: None,
+        pot_ms: 0,
     };
     motor.previous = motor.state();
     interrupt::free(|cs| *MOTOR.borrow(cs).borrow_mut() = Some(motor));
@@ -133,6 +137,9 @@ pub fn command(up: bool, speed: u8, um: u32, now: u32) -> Result<(), &'static st
     interrupt::free(|cs| {
         let mut slot = MOTOR.borrow(cs).borrow_mut();
         let m = slot.as_mut().ok_or("Plunger unavailable")?;
+        if now.wrapping_sub(m.pot_ms) >= 100 || !m.motion.limits.allows(up, m.pot) {
+            return Err("Potentiometer limit reached or feedback unavailable");
+        }
         m.motion.start(up, speed, um)?;
         m.last_command = now;
         m.started = now;
@@ -159,6 +166,29 @@ pub fn stop() {
     interrupt::free(|cs| {
         if let Some(m) = MOTOR.borrow(cs).borrow_mut().as_mut() {
             m.stop();
+        }
+    });
+}
+pub fn set_limits(min: u8, max: u8) -> Result<(), &'static str> {
+    let limits = plunger::Limits::new(min, max)?;
+    interrupt::free(|cs| {
+        let mut slot = MOTOR.borrow(cs).borrow_mut();
+        let m = slot.as_mut().ok_or("Plunger unavailable")?;
+        if m.motion.running {
+            return Err("Stop the plunger before changing limits");
+        }
+        m.motion.limits = limits;
+        Ok(())
+    })
+}
+fn pot_sample(value: Option<u16>, now: u32) {
+    interrupt::free(|cs| {
+        if let Some(m) = MOTOR.borrow(cs).borrow_mut().as_mut() {
+            m.pot = value;
+            m.pot_ms = now;
+            if m.motion.running && !m.motion.limits.allows(m.motion.up, value) {
+                m.stop();
+            }
         }
     });
 }
@@ -212,6 +242,7 @@ pub fn tick(now: u32) {
         if let Some(m) = MOTOR.borrow(cs).borrow_mut().as_mut() {
             if m.motion.running
                 && (now.wrapping_sub(m.last_command) >= 5000
+                    || now.wrapping_sub(m.pot_ms) >= 100
                     || now.wrapping_sub(m.started) >= 60000)
             {
                 m.stop();
@@ -264,12 +295,14 @@ impl Pot {
         if self.pending {
             if ral::read_reg!(ral::adc, adc, HS, COCO0) != 0 {
                 self.value = Some(ral::read_reg!(ral::adc, adc, R0) as u16);
+                pot_sample(self.value, now);
                 self.pending = false;
             } else if now.wrapping_sub(self.last) >= 10 {
                 self.value = None;
+                pot_sample(None, now);
                 self.pending = false;
             }
-        } else if now.wrapping_sub(self.last) >= 50 {
+        } else if now.wrapping_sub(self.last) >= 5 {
             self.last = now;
             ral::write_reg!(ral::adc, adc, HC0, self.input.channel());
             self.pending = true;

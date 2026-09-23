@@ -22,6 +22,7 @@ works. Each request uses a nonzero u32 ID; only one request is in flight at a ti
 | `PLUNGER_MOVE 6 U 64 10` | `plunger_ack`, action `move` | Relative up travel of 10 µm, PWM 64 |
 | `PLUNGER_MOVE 7 D 64 10` | `plunger_ack`, action `move` | Relative down travel |
 | `PLUNGER_STOP 8` | `plunger_ack`, action `stop` | Disable plunger motor |
+| `PLUNGER_LIMITS 10 30 75` | `plunger_ack`, action `limits` | Set minimum/maximum potentiometer percentage while stopped; integers 0 ≤ min < max ≤ 100 |
 | `PLUNGER_ZERO 9` | `plunger_ack`, action `zero` | Zero encoder while stopped |
 | `XERYON_MOVE 10 U 10000 10000` | `xeryon_ack`, action `move`, target counts | Move Xeryon up 10 µm at 10000 µm/s (wire distance in nm) |
 | `XERYON_MOVE 11 D 10000 10000` | `xeryon_ack`, action `move`, target counts | Move Xeryon down 10 µm at 10000 µm/s |
@@ -132,3 +133,5 @@ its sign-inverted counts [-8388607, 8388608], legacy states (0 waiting for DOUT,
 `plunger_io` remains unchanged: physical pad readbacks `standby`, `ain1`, `ain2`,
 2-bit `encoder`, signed 16-bit `pwm_count`/`pwm_compare`, and boolean
 `pwm_running`/`pwm_enabled`. Read snapshot records hardware diagnostics in the UI log.
+
+Firmware with `plunger_limits: true` in HELLO enforces potentiometer bounds and reports `plunger.limits: {"min":30,"max":75}` in snapshots. Bounds reset to 30–75% at boot, survive serial reconnects, and reject outward moves while allowing inward recovery. Up increases the reading. Missing/stale potentiometer feedback prevents motion. Drive is disabled at a bound; sampling latency and mechanical coast can cause overshoot.

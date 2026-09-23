@@ -341,7 +341,7 @@ impl Console {
                     }
                     Ok(Command::Hello(id)) => writeln!(
                         self.tx,
-                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true}}",
+                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true}}",
                         env!("CARGO_PKG_VERSION")
                     ),
                     Ok(Command::Ping(id)) => {
@@ -367,6 +367,9 @@ impl Console {
                     Ok(Command::Move(id, up, speed, um)) => {
                         let result = crate::motor::command(up, speed, um, now);
                         self.motor_reply(id, "move", result)
+                    }
+                    Ok(Command::Limits(id, min, max)) => {
+                        self.motor_reply(id, "limits", crate::motor::set_limits(min, max))
                     }
                     Ok(Command::Stop(id)) => {
                         crate::motor::stop();
