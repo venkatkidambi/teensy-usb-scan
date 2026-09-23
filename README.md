@@ -13,6 +13,32 @@ It verifies temporary controller travel limits and restores settings on exit.
 This experimental mode still needs hardware validation; the earlier reported
 Teensy freeze is not diagnosed by the software tests.
 
+If **Start** makes USB disappear, flash the current firmware and watch the orange
+pin-13 LED. Fatal diagnostics repeat **one long pulse**, a group of short pulses
+for the fault, a pause, then a group for the experiment phase:
+
+| Fault pulses | Meaning |
+| --- | --- |
+| 2 | Rust panic |
+| 3 | Processor HardFault (including possible stack overflow) |
+| 4 | Unexpected interrupt or other processor exception |
+| 5 | Foreground loop stalled for one second while SysTick still runs |
+
+Phase pulses are **1** dashboard, **2** Start validation / initial positioning,
+**3** sinusoidal settings setup, **4** waveform / final positioning, **5** cleanup.
+Report both counts. An LED that remains dark does not prove a memory leak or a
+power fault: loss of power, disabled interrupts, or a fault that prevents the
+handler from running still need hardware diagnosis. These diagnostics use an
+independent 1 KiB emergency stack, disable the wired plunger through GPIO, and
+halt without restarting the experiment. USB STOP delivery to the independently
+powered Xeryon is unavailable in a fatal handler. Normal experiment faults still
+use the existing STOP and settings-restoration path.
+
+With a debugger, `FATAL_REPORT` contains the fault kind, phase, original stack
+pointer, exception number, CFSR/HFSR/MMFAR/BFAR registers and panic source line.
+It is not retained across power cycles. This bare-metal firmware does not include
+Teensyduino's Arduino `CrashReport` API.
+
 Bare-metal Rust (`no_std`, `no_main`) plus the TinyUSB 0.21.0 C host stack.
 Cargo builds everything; no Arduino, PlatformIO, or operating system is used.
 The Rust `teensy4-bsp` supplies startup, clocks, pins, and the linker script.

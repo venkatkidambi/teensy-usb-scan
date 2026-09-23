@@ -205,6 +205,8 @@ impl<'a> Engine<'a> {
         }
     }
     fn finish(&mut self, state: State, reason: &'static str, io: &mut impl Actuator) {
+        #[cfg(not(test))]
+        crate::fault::mark(5);
         self.state = state;
         self.outcome = match state {
             State::Complete => "completed",
@@ -305,6 +307,8 @@ impl<'a> Engine<'a> {
             self.next_sample = 0;
             self.next_target = 0;
             self.state = State::Running;
+            #[cfg(not(test))]
+            crate::fault::mark(4);
         }
         let elapsed = now.wrapping_sub(self.started_ms);
         self.elapsed_ms = elapsed;

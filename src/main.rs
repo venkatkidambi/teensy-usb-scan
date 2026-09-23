@@ -5,6 +5,7 @@ use teensy4_bsp::{self as bsp, board, hal::pit::Channel};
 mod console;
 mod experiment;
 mod experiment_data;
+mod fault;
 mod line;
 mod motor;
 mod plunger;
@@ -42,8 +43,10 @@ fn main() -> ! {
         | (1 << <common::P12 as Pin<2>>::OFFSET);
     const MOTOR_GPIO4_PINS: u32 =
         (1 << <common::P4 as Pin<4>>::OFFSET) | (1 << <common::P5 as Pin<4>>::OFFSET);
-    ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR27, |v| v & !MOTOR_GPIO2_PINS);
-    ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR29, |v| v & !MOTOR_GPIO4_PINS);
+    ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR27, |v| v
+        & !MOTOR_GPIO2_PINS);
+    ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR29, |v| v
+        & !MOTOR_GPIO4_PINS);
     cortex_m::asm::dsb();
 
     motor::init(
@@ -82,7 +85,15 @@ fn main() -> ! {
     let channel = Channel::Chan0;
     pit.set_load_timer_value(channel, board::PERCLK_FREQUENCY / 2);
     pit.enable(channel);
+    fault::heartbeat(usb_host::millis());
     loop {
+        fault::mark(match experiment.state {
+            experiment::State::MoveToStart => 2,
+            experiment::State::Armed => 3,
+            experiment::State::Running => 4,
+            experiment::State::Restoring => 5,
+            _ => 1,
+        });
         let now = usb_host::millis();
         pressure.poll(now, &mut pressure_bus);
         pot.poll(now);
@@ -111,14 +122,12 @@ fn main() -> ! {
         }
         // SysTick wakes us every millisecond; host events can wake us sooner.
         // USB1 is polled, so an unopened serial terminal never blocks scanning.
+        fault::heartbeat(usb_host::millis());
         cortex_m::asm::wfi();
     }
 }
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    // A stopped heartbeat indicates a fault; no debugger or USB host is required.
-    loop {
-        core::hint::spin_loop();
-    }
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    fault::panic(info)
 }

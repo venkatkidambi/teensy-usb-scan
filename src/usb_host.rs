@@ -118,6 +118,7 @@ pub fn start_tick(syst: &mut SYST) {
 extern "C" fn SysTick() {
     let now = MILLIS.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
     crate::motor::tick(now);
+    crate::fault::tick(now);
 }
 
 #[unsafe(no_mangle)]

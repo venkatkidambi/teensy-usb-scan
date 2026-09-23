@@ -270,6 +270,7 @@ impl Console {
                 }
                 let result = match command {
                     Ok(Command::Start(id, config)) => {
+                        crate::fault::mark(2);
                         let result = experiment.accept(
                             config,
                             &crate::usb_host::telemetry(),
