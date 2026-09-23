@@ -23,6 +23,13 @@ pub trait Actuator {
     /// True once accepted; false means busy, without queuing behind an old packet.
     fn command(&mut self, command: crate::sine_control::Command) -> Result<bool, &'static str>;
 }
+#[derive(Clone, Copy)]
+struct ScanFault {
+    elapsed_ms: u32,
+    epos_counts: i64,
+    epos_age_ms: u32,
+    stat: i64,
+}
 pub struct Engine<'a> {
     pub state: State,
     pub config: Option<ExperimentConfig>,
@@ -54,6 +61,7 @@ pub struct Engine<'a> {
     pub settings_restore_sent: bool,
     pub control_updates: u32,
     pub max_control_lateness_ms: u32,
+    scan_fault: Option<ScanFault>,
 }
 impl<'a> Engine<'a> {
     pub fn new(samples: &'a mut [Record]) -> Self {
@@ -88,6 +96,7 @@ impl<'a> Engine<'a> {
             settings_restore_sent: true,
             control_updates: 0,
             max_control_lateness_ms: 0,
+            scan_fault: None,
         }
     }
     pub fn active(&self) -> bool {
@@ -194,6 +203,7 @@ impl<'a> Engine<'a> {
         self.settings_restore_sent = true;
         self.control_updates = 0;
         self.max_control_lateness_ms = 0;
+        self.scan_fault = None;
         self.hold_started = None;
         self.state = State::MoveToStart;
         // First target is sent by begin(), only after all validation succeeds.
@@ -446,7 +456,22 @@ impl<'a> Engine<'a> {
         };
         match result {
             Ok(true) => self.finish(State::Complete, "none", io),
-            Err(e) => self.finish(State::Fault, e, io),
+            Err(e) => {
+                if matches!(
+                    e,
+                    crate::sine_control::TRACKING_LIMIT | crate::sine_control::TRAVEL_LIMIT
+                ) {
+                    // Freeze the exact control-tick sample, including faults between
+                    // 50 ms acquisition records. Cleanup must not replace it.
+                    self.scan_fault = Some(ScanFault {
+                        elapsed_ms: elapsed,
+                        epos_counts: t.samples[0].value,
+                        epos_age_ms: now.wrapping_sub(t.samples[0].ms),
+                        stat: t.samples[2].value,
+                    });
+                }
+                self.finish(State::Fault, e, io);
+            }
             _ => {}
         }
     }
@@ -467,6 +492,35 @@ impl<'a> Engine<'a> {
                 out,
                 ",\"control\":\"sspd_scan_p\",\"kp_per_s\":{SCAN_KP},\"correction_fraction\":{SCAN_CORRECTION},\"feedback_max_age_ms\":{SCAN_FEEDBACK_MS},\"target_semantics\":\"reference_position\",\"settings_restore_sent\":{}",
                 self.settings_restore_sent
+            )?;
+        }
+        if let (
+            Some(fault),
+            Some(ExperimentConfig::Sinusoidal {
+                center_nm,
+                amplitude_nm,
+                frequency_mhz,
+                ..
+            }),
+        ) = (self.scan_fault, self.config)
+        {
+            let reference = crate::sine_control::reference(
+                center_nm,
+                amplitude_nm,
+                frequency_mhz,
+                fault.elapsed_ms.saturating_sub(fault.epos_age_ms),
+            );
+            let position = fault.epos_counts as f64 * 0.078;
+            let (low, high) = scan_bounds(center_nm, amplitude_nm).map_err(|_| core::fmt::Error)?;
+            write!(
+                out,
+                ",\"scan_fault\":{{\"elapsed_ms\":{},\"epos_counts\":{},\"epos_um\":{position:.6},\"epos_age_ms\":{},\"stat\":{},\"reference_um\":{reference:.6},\"error_um\":{:.6},\"guard_um\":{:.6},\"low_counts\":{low},\"high_counts\":{high}}}",
+                fault.elapsed_ms,
+                fault.epos_counts,
+                fault.epos_age_ms,
+                fault.stat,
+                reference - position,
+                scan_guard_nm(amplitude_nm) as f64 / 1000.0
             )?;
         }
         writeln!(
@@ -864,6 +918,54 @@ mod tests {
                 .any(|c| c.tag == "SCAN" && c.value != Some(0))
         );
         assert_eq!(e.len, 201); // acquisition remains 20 Hz
+    }
+    #[test]
+    fn scan_fault_retains_control_tick_evidence_through_cleanup() {
+        for (position, fault_ms, reason) in [
+            (0, 60, crate::sine_control::TRACKING_LIMIT),
+            (100, 10, crate::sine_control::TRAVEL_LIMIT),
+        ] {
+            let mut records = [Record::EMPTY; 512];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            start(
+                &mut e,
+                ExperimentConfig::Sinusoidal {
+                    center_nm: 0,
+                    amplitude_nm: 5_000,
+                    frequency_mhz: 1000,
+                    cycles: 5,
+                },
+                0,
+                &mut io,
+            );
+            for elapsed in 1..=fault_ms {
+                let now = e.started_ms + elapsed;
+                let (t, p) = feedback(now, position, true);
+                e.poll(now, &t, p, &mut io);
+            }
+            assert_eq!(e.reason, reason);
+            assert_eq!(e.state, State::Restoring);
+            assert_eq!(io.stops, 1);
+            assert_eq!(e.scan_fault.unwrap().elapsed_ms, fault_ms);
+            // Later position publications during STOP/restoration are not the fault sample.
+            for elapsed in fault_ms + 1..fault_ms + 300 {
+                let now = e.started_ms + elapsed;
+                let (t, p) = feedback(now, 1, true);
+                e.poll(now, &t, p, &mut io);
+            }
+            assert!(e.data_ready() && e.settings_restore_sent);
+            assert_eq!(e.scan_fault.unwrap().epos_counts, i64::from(position));
+            assert_eq!(e.scan_fault.unwrap().elapsed_ms, fault_ms);
+            let mut frame = crate::protocol::Frame::new();
+            e.metadata(&mut frame, u32::MAX).unwrap();
+            let json = core::str::from_utf8(frame.pending()).unwrap();
+            assert!(json.contains("\"guard_um\":1.560000"));
+            assert!(json.contains("\"low_counts\":-84,\"high_counts\":84"));
+            assert!(json.contains(&format!(
+                "\"scan_fault\":{{\"elapsed_ms\":{fault_ms},\"epos_counts\":{position}"
+            )));
+        }
     }
     #[test]
     fn abort_cancels_pending_scan_direction_and_restores_before_releasing_data() {

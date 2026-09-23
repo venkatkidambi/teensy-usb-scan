@@ -139,6 +139,15 @@ transport failure or missed deadlines. Scanning status is permitted only while
 the engine owns sine scanning. Stopped SCAN/STOP transitions may temporarily
 clear the closed-loop bit; an active scan still must report closed-loop control.
 
+Tracking and travel faults have distinct reasons: `Scan tracking error exceeded
+guard` and `Scan position reached travel bound`. Their result metadata includes
+`scan_fault`, captured at the failing 10 ms control tick, even between acquisition
+samples. It preserves elapsed time, EPOS counts/µm and reception age, STAT, the
+reference at the encoder reception time, signed reference-minus-position error,
+guard, and travel bounds in counts. Cleanup does not overwrite it. The desktop
+shows these values in the result summary and retains them in CSV metadata.
+This diagnostic change does not increase the allowed error or travel envelope.
+
 The earlier 250 Hz DPOS build caused a reported freeze after actuator movement,
 with the foreground LED stopping. Its root cause remains unresolved. The new
 controller-side limits remain installed if Teensy execution stops, but they are

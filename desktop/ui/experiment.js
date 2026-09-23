@@ -46,6 +46,10 @@ export function experimentMessage(message) {
     if(mode!==m.config.kind)tab(m.config.kind);
     $('experiment-results').hidden=false;
     $('experiment-result-summary').textContent=`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.reason} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s · CRC verified · missed samples ${m.missed_samples} · max logging lateness ${m.max_lateness_ms} ms${m.control==='sspd_scan_p'?` · 100 Hz speed control · ${m.control_updates} updates · max control lateness ${m.max_control_lateness_ms} ms`:''}${m.settings_restore_sent===false?' · Controller settings restoration incomplete; check limits and speed before further motion':''}${m.stop_queued?'':' · STOP could not be queued'}`;
+    if(m.scan_fault){
+      const f=m.scan_fault;
+      $('experiment-result-summary').textContent+=` · Fault at ${f.elapsed_ms} ms: position ${f.epos_um.toFixed(3)} µm, reference ${f.reference_um.toFixed(3)} µm, error ${f.error_um.toFixed(3)} µm (allowed ±${f.guard_um.toFixed(3)} µm), travel ${(f.low_counts*.078).toFixed(3)} to ${(f.high_counts*.078).toFixed(3)} µm, encoder age ${f.epos_age_ms} ms`;
+    }
     draw();
   }
   experimentControls();

@@ -97,5 +97,15 @@ test('velocity sine requires firmware capability and reports incomplete restorat
     }});
     assert.match(node('experiment-result-summary').textContent,/100 Hz speed control/);
     assert.match(node('experiment-result-summary').textContent,/restoration incomplete/);
+    experimentMessage({type:'experiment_dataset',dataset:{
+      metadata:{run:2,config:{kind:'sinusoidal'},outcome:'faulted',reason:'Scan tracking error exceeded guard',count:2,
+        elapsed_ms:60,control:'sspd_scan_p',control_updates:6,max_control_lateness_ms:0,
+        missed_samples:0,max_lateness_ms:0,stop_queued:true,settings_restore_sent:true,
+        scan_fault:{elapsed_ms:60,epos_um:0,reference_um:1.841,error_um:1.841,guard_um:1.56,
+          low_counts:-84,high_counts:84,epos_age_ms:0}},samples:[],
+    }});
+    assert.match(node('experiment-result-summary').textContent,/Fault at 60 ms: position 0.000 µm, reference 1.841 µm/);
+    assert.match(node('experiment-result-summary').textContent,/allowed ±1.560 µm/);
+    assert.match(node('experiment-result-summary').textContent,/travel -6.552 to 6.552 µm/);
   } finally {globalThis.document=previousDocument;globalThis.ResizeObserver=previousObserver;}
 });

@@ -21,6 +21,8 @@ const SETTING_SETTLE_MS: u32 = 20;
 const INFO_SETTLE_MS: u32 = 100;
 const QUERY_RETRY_MS: u32 = 250;
 const QUERY_ATTEMPTS: u8 = 3;
+pub const TRACKING_LIMIT: &str = "Scan tracking error exceeded guard";
+pub const TRAVEL_LIMIT: &str = "Scan position reached travel bound";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Command {
@@ -490,8 +492,11 @@ pub fn velocity(
     ) - encoder.value as f64 * 0.078;
     let guard = scan_guard_nm(amplitude_nm) as f64 / 1000.0;
     let (low, high) = scan_bounds(center_nm, amplitude_nm)?;
-    if encoder.value <= i64::from(low) || encoder.value >= i64::from(high) || error.abs() > guard {
-        return Err("Scan tracking or travel limit");
+    if encoder.value <= i64::from(low) || encoder.value >= i64::from(high) {
+        return Err(TRAVEL_LIMIT);
+    }
+    if error.abs() > guard {
+        return Err(TRACKING_LIMIT);
     }
     let peak = peak_speed(amplitude_nm, frequency_mhz);
     let correction = if error.abs() <= 0.078 {
@@ -949,13 +954,10 @@ mod tests {
         let mut t = feedback(50, 0.0);
         t.samples[2].ms = 0;
         assert_eq!(velocity(c, 50, 50, &t), Err("Scan feedback stale"));
-        assert_eq!(
-            velocity(c, 0, 0, &feedback(0, -3.0)),
-            Err("Scan tracking or travel limit")
-        );
+        assert_eq!(velocity(c, 0, 0, &feedback(0, -3.0)), Err(TRACKING_LIMIT));
         assert_eq!(
             velocity(c, 250, 250, &feedback(250, 13.0)),
-            Err("Scan tracking or travel limit")
+            Err(TRAVEL_LIMIT)
         );
         assert_eq!(velocity(c, 250, 250, &feedback(250, 10.0)), Ok(0));
     }
