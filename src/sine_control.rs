@@ -14,6 +14,13 @@ const HLIM: usize = 4;
 const SETUP_TIMEOUT_MS: u32 = 5_000;
 const REPLY_TIMEOUT_MS: u32 = 1_500;
 const RESTORE_TIMEOUT_MS: u32 = 2_000;
+// USB completion acknowledges transport, not controller command execution.
+// These conservative setup/restore gaps are host policy, not specified XD-C
+// timing guarantees. Keep them out of the 100 Hz waveform command path.
+const SETTING_SETTLE_MS: u32 = 20;
+const INFO_SETTLE_MS: u32 = 100;
+const QUERY_RETRY_MS: u32 = 250;
+const QUERY_ATTEMPTS: u8 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Command {
@@ -73,6 +80,9 @@ pub struct Session {
     setup_step: usize,
     setup_started: Option<u32>,
     sent: Option<u32>,
+    tx_completed: Option<u32>,
+    query_last_sent: u32,
+    query_attempts: u8,
     revision: u32,
     feedback_after: u32,
     feedback_first: Option<u32>,
@@ -99,6 +109,9 @@ impl Session {
             setup_step: 0,
             setup_started: None,
             sent: None,
+            tx_completed: None,
+            query_last_sent: 0,
+            query_attempts: 0,
             revision: 0,
             feedback_after: 0,
             feedback_first: None,
@@ -203,9 +216,32 @@ impl Session {
             if !io.tx_idle() {
                 return Ok(false);
             }
+            let completed = *self.tx_completed.get_or_insert(now);
+            let settle = if matches!(step, Setup::Write(INFO, 0)) {
+                INFO_SETTLE_MS
+            } else {
+                SETTING_SETTLE_MS
+            };
+            if now.wrapping_sub(completed) < settle {
+                return Ok(false);
+            }
             match step {
                 Setup::Read(i) | Setup::Verify(i, _) => {
                     if t.setting_revisions[i] == self.revision {
+                        // Retry only this read. Preserve the original revision
+                        // baseline and deadline; never retry motion or advance
+                        // to another setting without a fresh matching reply.
+                        if self.query_attempts < QUERY_ATTEMPTS
+                            && now.wrapping_sub(self.query_last_sent) >= QUERY_RETRY_MS
+                            && io.command(Command {
+                                tag: SETTING_TAGS[i],
+                                value: None,
+                            })?
+                        {
+                            self.query_attempts += 1;
+                            self.query_last_sent = now;
+                            self.tx_completed = None;
+                        }
                         return Ok(false);
                     }
                     let value = i32::try_from(t.settings[i].value)
@@ -251,6 +287,9 @@ impl Session {
             }
             self.revision = t.setting_revisions[i];
             self.sent = Some(now);
+            self.tx_completed = None;
+            self.query_last_sent = now;
+            self.query_attempts = u8::from(value.is_none());
         }
         Ok(false)
     }
@@ -343,6 +382,7 @@ impl Session {
     pub fn begin_restore(&mut self, now: u32) {
         self.cancel();
         self.sent = None;
+        self.tx_completed = None;
         self.restore_started = now;
         self.restore_step = 0;
     }
@@ -380,7 +420,12 @@ impl Session {
             self.stop_confirmed = true;
         }
         let order = [SSPD, POLI, LLIM, HLIM, INFO];
-        if self.sent.take().is_some() {
+        if self.sent.is_some() {
+            let completed = *self.tx_completed.get_or_insert(now);
+            if now.wrapping_sub(completed) < SETTING_SETTLE_MS {
+                return Ok(false);
+            }
+            self.sent = None;
             self.changed &= !(1 << order[self.restore_step]);
             self.restore_step += 1;
         }
@@ -397,6 +442,7 @@ impl Session {
             self.saved[i].ok_or("Missing original setting")?,
         ))? {
             self.sent = Some(now);
+            self.tx_completed = None;
         }
         Ok(false)
     }
@@ -469,6 +515,7 @@ pub mod test_support {
         pub busy: bool,
         pub settings: [i32; 5],
         pub revisions: [u32; 5],
+        pub drop_queries: usize,
     }
     impl Default for Io {
         fn default() -> Self {
@@ -480,6 +527,7 @@ pub mod test_support {
                 busy: false,
                 settings: [4, 97, 10000, MIN_POSITION, MAX_POSITION],
                 revisions: [0; 5],
+                drop_queries: 0,
             }
         }
     }
@@ -507,7 +555,11 @@ pub mod test_support {
                     self.settings[i] = value;
                 } else if matches!(self.settings[INFO], 0 | 2 | 5 | 6) {
                     // Mirror the controller's requested-parameter telemetry slot.
-                    self.revisions[i] = self.revisions[i].wrapping_add(1);
+                    if self.drop_queries > 0 {
+                        self.drop_queries -= 1;
+                    } else {
+                        self.revisions[i] = self.revisions[i].wrapping_add(1);
+                    }
                 }
             }
             self.commands.push(command);
@@ -555,7 +607,7 @@ mod tests {
         t
     }
     fn prepare(session: &mut Session, io: &mut Io) -> Result<u32, &'static str> {
-        for now in 0..100 {
+        for now in 0..1_000 {
             let mut t = feedback(now, 0.0);
             io.feedback(&mut t, now);
             if session.prepare(config(10_000, 1000), &t, now, io)? {
@@ -631,6 +683,86 @@ mod tests {
         assert!(!io.commands.iter().any(|c| c.tag == "SCAN"));
     }
     #[test]
+    fn setup_waits_after_usb_completion_and_recovers_a_lost_query_across_clock_wrap() {
+        let mut session = Session::new();
+        let mut io = Io::default();
+        io.drop_queries = 1;
+        let start = u32::MAX - 200;
+        let mut sent = Vec::new();
+        let mut ready = false;
+        for offset in 0..1_000 {
+            let now = start.wrapping_add(offset);
+            // Delay the initial INFO transfer itself, then require its full
+            // settling interval. Time spent in flight must not count as settling.
+            io.busy = (1..75).contains(&offset);
+            let mut t = feedback(now, 0.0);
+            io.feedback(&mut t, now);
+            let before = io.commands.len();
+            ready = session
+                .prepare(config(10_000, 1000), &t, now, &mut io)
+                .unwrap();
+            assert!(io.commands.len() <= before + 1);
+            if io.commands.len() > before {
+                sent.push((offset, io.commands[before]));
+            }
+            if ready {
+                break;
+            }
+        }
+        assert!(ready);
+        assert_eq!(sent[0], (0, Command::set("INFO", 0)));
+        assert!(sent[1].0 >= 75 + INFO_SETTLE_MS);
+        assert_eq!(
+            sent[1].1,
+            Command {
+                tag: "SSPD",
+                value: None
+            }
+        );
+        assert_eq!(sent[2].1, sent[1].1); // retry only the unanswered query
+        assert_eq!(sent[2].0 - sent[1].0, QUERY_RETRY_MS);
+        for pair in sent.windows(2) {
+            assert!(pair[1].0 - pair[0].0 >= SETTING_SETTLE_MS);
+        }
+        assert_eq!(session.saved[SSPD], Some(10_000));
+        assert!(!io.commands.iter().any(|c| c.tag == "SCAN"));
+    }
+    #[test]
+    fn unanswered_query_retries_are_bounded_and_do_not_extend_the_deadline() {
+        let mut session = Session::new();
+        let mut io = Io::default();
+        io.drop_queries = usize::MAX;
+        let mut first_query = None;
+        let mut fault = None;
+        for now in 0..2_000 {
+            let mut t = feedback(now, 0.0);
+            io.feedback(&mut t, now);
+            let result = session.prepare(config(10_000, 1000), &t, now, &mut io);
+            if io.commands.len() == 2 && first_query.is_none() {
+                first_query = Some(now);
+            }
+            if let Err(e) = result {
+                fault = Some((now, e));
+                break;
+            }
+        }
+        assert_eq!(
+            fault,
+            Some((
+                first_query.unwrap() + REPLY_TIMEOUT_MS,
+                "Scan SSPD reply timeout"
+            ))
+        );
+        assert_eq!(io.commands.len(), 1 + usize::from(QUERY_ATTEMPTS));
+        assert!(io.commands[1..].iter().all(|c| *c
+            == Command {
+                tag: "SSPD",
+                value: None
+            }));
+        assert_eq!(session.changed, 1 << INFO);
+        assert_eq!(session.saved[SSPD], None);
+    }
+    #[test]
     fn setup_enters_query_mode_from_every_stream_mode_and_restores_telemetry() {
         for mode in 0..=7 {
             let mut session = Session::new();
@@ -644,7 +776,7 @@ mod tests {
                 value: None,
             }));
             session.begin_restore(100);
-            for now in 100..120 {
+            for now in 100..300 {
                 if session.restore(&feedback(now, 0.0), now, &mut io).unwrap() {
                     break;
                 }
@@ -680,6 +812,10 @@ mod tests {
         );
         assert_eq!(
             session.restore(&feedback(1502, 0.0), 1502, &mut io),
+            Ok(false)
+        );
+        assert_eq!(
+            session.restore(&feedback(1522, 0.0), 1522, &mut io),
             Ok(true)
         );
         assert_eq!(io.settings[INFO], 4);
@@ -707,7 +843,7 @@ mod tests {
         t.record(b"STAT", 352 | (1 << 13), 111);
         assert_eq!(session.restore(&t, 111, &mut io), Ok(false));
         assert_eq!(io.commands.len(), writes); // no wider limits while still scanning
-        for now in 112..130 {
+        for now in 112..300 {
             if session.restore(&feedback(now, 0.0), now, &mut io).unwrap() {
                 break;
             }
@@ -732,7 +868,7 @@ mod tests {
         let mut session = Session::new();
         let mut io = Io::default();
         let mut error = None;
-        for now in 0..100 {
+        for now in 0..1_000 {
             let mut t = feedback(now, 0.0);
             io.feedback(&mut t, now);
             if session.setup_step == 6 {
@@ -759,10 +895,13 @@ mod tests {
             .prepare(config(10_000, 1000), &t, 1, &mut io)
             .unwrap();
         session
-            .prepare(config(10_000, 1000), &t, 2, &mut io)
+            .prepare(config(10_000, 1000), &t, 101, &mut io)
+            .unwrap();
+        session
+            .prepare(config(10_000, 1000), &t, 102, &mut io)
             .unwrap();
         assert_eq!(
-            session.prepare(config(10_000, 1000), &t, REPLY_TIMEOUT_MS + 2, &mut io),
+            session.prepare(config(10_000, 1000), &t, REPLY_TIMEOUT_MS + 102, &mut io),
             Err("Scan SSPD reply timeout")
         );
         assert_eq!(session.changed, 1 << INFO);

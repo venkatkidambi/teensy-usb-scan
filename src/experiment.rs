@@ -596,7 +596,7 @@ mod tests {
         let (t, p) = feedback(now.wrapping_add(1), e.target, true);
         e.poll(now.wrapping_add(1), &t, p, io);
         assert_eq!(e.state, State::Armed);
-        for offset in 2..100 {
+        for offset in 2..1_000 {
             let tick = now.wrapping_add(offset);
             let (mut t, p) = feedback(tick, e.target, true);
             io.feedback(&mut t, tick);
@@ -711,7 +711,7 @@ mod tests {
         let mut io = Io::default();
         let original = io.settings;
         start(&mut e, sinusoidal(), u32::MAX - 500, &mut io);
-        for elapsed in 1..=1020 {
+        for elapsed in 1..=1200 {
             let now = e.started_ms.wrapping_add(elapsed);
             let (t, p) = feedback(now, e.target, true);
             e.poll(now, &t, p, &mut io);
@@ -755,7 +755,7 @@ mod tests {
             0,
             &mut io,
         );
-        for elapsed in 1..=520 {
+        for elapsed in 1..=700 {
             let now = e.started_ms + elapsed;
             let ideal = -0.5 + 10_000.0 * (elapsed as f64 * core::f64::consts::TAU / 500.0).sin();
             let (t, p) = feedback(
@@ -877,7 +877,7 @@ mod tests {
         assert_eq!(e.state, State::Restoring);
         assert!(e.transfer(e.run).is_err());
         e.abort(&mut io); // repeat ABORT resends STOP without restarting restoration
-        for elapsed in 1..20 {
+        for elapsed in 1..200 {
             let now = e.started_ms + elapsed;
             let (t, p) = feedback(now, 0, true);
             e.poll(now, &t, p, &mut io);
@@ -1007,7 +1007,7 @@ mod tests {
         let mut io = Io::default();
         start(&mut e, sinusoidal(), 0, &mut io);
         e.abort(&mut io);
-        for ms in 1..=20 {
+        for ms in 1..=200 {
             let now = e.started_ms + ms;
             let (t, p) = feedback(now, e.target, true);
             e.poll(now, &t, p, &mut io);

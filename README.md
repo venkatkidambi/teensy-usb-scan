@@ -39,6 +39,13 @@ pointer, exception number, CFSR/HFSR/MMFAR/BFAR registers and panic source line.
 It is not retained across power cycles. This bare-metal firmware does not include
 Teensyduino's Arduino `CrashReport` API.
 
+A normal heartbeat with `Scan SSPD reply timeout` is a handled setup failure:
+USB transmission completed but no fresh speed-setting reply was received.
+The firmware now pauses after each setup transfer (100 ms after INFO=0, 20 ms
+otherwise) and retries unanswered reads up to three transmissions within the
+existing deadline. This timing change needs hardware verification; it does not
+bypass speed or travel-limit readback checks.
+
 Bare-metal Rust (`no_std`, `no_main`) plus the TinyUSB 0.21.0 C host stack.
 Cargo builds everything; no Arduino, PlatformIO, or operating system is used.
 The Rust `teensy4-bsp` supplies startup, clocks, pins, and the linker script.

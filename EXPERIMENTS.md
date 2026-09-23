@@ -112,7 +112,14 @@ Replies must be new publications after each query;
 cached values cannot satisfy setup. Each operation has a 1.5 s deadline, and
 setup has a 5 s total deadline (ordinary feedback health checks also apply).
 Timeouts identify the setting and distinguish reads, verification readbacks,
-and an unfinished USB transmission.
+and an unfinished USB transmission. Each command is sent as a separate USB
+transfer. Setup waits 100 ms after observing completion of INFO=0, and 20 ms
+after each other command, before advancing. Restoration writes also wait 20 ms
+after transfer completion. These are conservative host delays, not measured
+controller execution times; USB completion alone does not establish execution.
+Unanswered setting reads/readbacks are retried at 250 ms intervals, at most
+three transmissions total, without extending the original 1.5 s deadline or
+accepting a cached value. Waveform commands retain their existing 100 Hz timing.
 
 The controller travel envelope is center ± (amplitude + guard), where guard is
 max(amplitude/4, 1.560 µm), rounded to encoder counts. It must fit the signed
