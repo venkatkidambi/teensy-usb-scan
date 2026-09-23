@@ -36,21 +36,21 @@ fn main() -> ! {
     // The motor HAL uses GPIO2/4, not the fast GPIO7/9 aliases.
     // Select the owned pads explicitly rather than relying on reset/loader state.
     use teensy4_bsp::{hal::iomuxc::gpio::Pin, pins::common, ral};
-    const ENCODER_PINS: u32 =
-        (1 << <common::P11 as Pin<2>>::OFFSET) | (1 << <common::P12 as Pin<2>>::OFFSET);
-    const MOTOR_PINS: u32 = (1 << <common::P3 as Pin<4>>::OFFSET)
-        | (1 << <common::P4 as Pin<4>>::OFFSET)
-        | (1 << <common::P5 as Pin<4>>::OFFSET);
-    ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR27, |v| v & !ENCODER_PINS);
-    ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR29, |v| v & !MOTOR_PINS);
+    const MOTOR_GPIO2_PINS: u32 = (1 << <common::P6 as Pin<2>>::OFFSET)
+        | (1 << <common::P11 as Pin<2>>::OFFSET)
+        | (1 << <common::P12 as Pin<2>>::OFFSET);
+    const MOTOR_GPIO4_PINS: u32 =
+        (1 << <common::P4 as Pin<4>>::OFFSET) | (1 << <common::P5 as Pin<4>>::OFFSET);
+    ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR27, |v| v & !MOTOR_GPIO2_PINS);
+    ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR29, |v| v & !MOTOR_GPIO4_PINS);
     cortex_m::asm::dsb();
 
     motor::init(
         motor::Pins {
             pwm: pins.p2,
-            ain1: pins.p3,
-            ain2: pins.p4,
-            standby: pins.p5,
+            ain1: pins.p4,
+            ain2: pins.p5,
+            standby: pins.p6,
             c1: pins.p11,
             c2: pins.p12,
         },

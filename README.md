@@ -281,7 +281,7 @@ is replayed after reconnect.
 ## Wired plunger
 
 The bare-metal driver ports the supplied NanoManipulator Motor.cpp: pin 2 PWM,
-pins 3/4 direction, pin 5 standby, pins 11/12 quadrature encoder, and pin 20 (A6)
+pins 4/5 direction (AIN1/AIN2), pin 6 standby, pins 11/12 quadrature encoder, and pin 20 (A6)
 potentiometer. Plunger calibration is **16,688 counts/mm**, independently of the
 Xeryon's 0.078 µm/count. Positions and commanded travel display in µm. Drive is
 an 8-bit PWM level (1–255), not a calibrated velocity. Travel is a positive whole

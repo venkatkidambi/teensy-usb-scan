@@ -48,9 +48,9 @@ impl Motor {
 }
 pub struct Pins {
     pub pwm: common::P2,
-    pub ain1: common::P3,
-    pub ain2: common::P4,
-    pub standby: common::P5,
+    pub ain1: common::P4,
+    pub ain2: common::P5,
+    pub standby: common::P6,
     pub c1: common::P11,
     pub c2: common::P12,
 }
@@ -72,7 +72,7 @@ pub fn init(
     hal::iomuxc::set_sion(&mut pins.standby);
     hal::iomuxc::set_sion(&mut pins.c1);
     hal::iomuxc::set_sion(&mut pins.c2);
-    let standby = gpio4.output(pins.standby).unwrap();
+    let standby = gpio2.output(pins.standby).unwrap();
     standby.clear();
     let ain1 = gpio4.output(pins.ain1).unwrap();
     ain1.clear();
