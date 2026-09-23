@@ -1,0 +1,770 @@
+//! Nonblocking XD-C scan setup, velocity sequencing and settings restoration.
+//! All USB calls stay in the foreground. No controller settings are saved to flash.
+use crate::{
+    experiment::Actuator,
+    experiment_data::*,
+    protocol::{SETTING_TAGS, Telemetry},
+};
+
+const INFO: usize = 0;
+const POLI: usize = 1;
+const SSPD: usize = 2;
+const LLIM: usize = 3;
+const HLIM: usize = 4;
+const SETUP_TIMEOUT_MS: u32 = 5_000;
+// The first INFO query can arrive in the default ~970 ms telemetry rotation.
+const REPLY_TIMEOUT_MS: u32 = 1_500;
+const RESTORE_TIMEOUT_MS: u32 = 2_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Command {
+    pub tag: &'static str,
+    pub value: Option<i32>, // None is a query
+}
+impl Command {
+    pub const fn set(tag: &'static str, value: i32) -> Self {
+        Self {
+            tag,
+            value: Some(value),
+        }
+    }
+    pub fn encode(self, bytes: &mut [u8; 20]) -> &[u8] {
+        bytes[..4].copy_from_slice(self.tag.as_bytes());
+        bytes[4] = b'=';
+        let mut end = 5;
+        if let Some(value) = self.value {
+            if value < 0 {
+                bytes[end] = b'-';
+                end += 1;
+            }
+            let mut digits = [0; 10];
+            let mut pos = digits.len();
+            let mut n = value.unsigned_abs();
+            loop {
+                pos -= 1;
+                digits[pos] = b'0' + (n % 10) as u8;
+                n /= 10;
+                if n == 0 {
+                    break;
+                }
+            }
+            let len = digits.len() - pos;
+            bytes[end..end + len].copy_from_slice(&digits[pos..]);
+            end += len;
+        } else {
+            bytes[end] = b'?';
+            end += 1;
+        }
+        bytes[end] = b'\n';
+        &bytes[..end + 1]
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Setup {
+    Read(usize),
+    Write(usize, i32),
+    Verify(usize, i32),
+    Feedback,
+}
+
+pub struct Session {
+    saved: [Option<i32>; 5],
+    changed: u8,
+    setup_step: usize,
+    setup_started: Option<u32>,
+    sent: Option<u32>,
+    revision: u32,
+    feedback_after: u32,
+    feedback_first: Option<u32>,
+    plan: [Command; 3],
+    plan_len: usize,
+    plan_pos: usize,
+    plan_started: u32,
+    speed: u32,
+    direction: i32,
+    pub scan_started: bool,
+    center_step: u8,
+    restore_started: u32,
+    restore_step: usize,
+    stop_confirmed: bool,
+}
+impl Session {
+    pub fn new() -> Self {
+        Self {
+            saved: [None; 5],
+            changed: 0,
+            setup_step: 0,
+            setup_started: None,
+            sent: None,
+            revision: 0,
+            feedback_after: 0,
+            feedback_first: None,
+            plan: [Command::set("SCAN", 0); 3],
+            plan_len: 0,
+            plan_pos: 0,
+            plan_started: 0,
+            speed: 0,
+            direction: 0,
+            scan_started: false,
+            center_step: 0,
+            restore_started: 0,
+            restore_step: 0,
+            stop_confirmed: false,
+        }
+    }
+    pub fn changed(&self) -> bool {
+        self.changed != 0
+    }
+
+    pub fn prepare(
+        &mut self,
+        config: ExperimentConfig,
+        t: &Telemetry,
+        now: u32,
+        io: &mut impl Actuator,
+    ) -> Result<bool, &'static str> {
+        let ExperimentConfig::Sinusoidal {
+            center_nm,
+            amplitude_nm,
+            frequency_mhz,
+            ..
+        } = config
+        else {
+            return Ok(true);
+        };
+        let start = *self.setup_started.get_or_insert(now);
+        if now.wrapping_sub(start) >= SETUP_TIMEOUT_MS {
+            return Err("Scan setup deadline");
+        }
+        let (low, high) = scan_bounds(center_nm, amplitude_nm)?;
+        if self.setup_step >= 6 {
+            // Never widen existing controller limits or exceed its existing speed setting.
+            if self.saved[LLIM].unwrap() > low || self.saved[HLIM].unwrap() < high {
+                return Err("Sine plus guard exceeds controller travel limits");
+            }
+            if peak_speed(amplitude_nm, frequency_mhz) * (1.0 + SCAN_CORRECTION)
+                > f64::from(self.saved[SSPD].unwrap())
+            {
+                return Err("Controller SSPD too low for sine plus correction");
+            }
+        }
+        let steps = [
+            Setup::Read(INFO),
+            Setup::Write(INFO, 0),
+            Setup::Read(SSPD),
+            Setup::Read(POLI),
+            Setup::Read(LLIM),
+            Setup::Read(HLIM),
+            Setup::Write(LLIM, low),
+            Setup::Verify(LLIM, low),
+            Setup::Write(HLIM, high),
+            Setup::Verify(HLIM, high),
+            Setup::Write(POLI, 2),
+            Setup::Verify(POLI, 2),
+            Setup::Write(INFO, 4),
+            Setup::Feedback,
+        ];
+        let step = steps[self.setup_step];
+        if matches!(step, Setup::Feedback) {
+            // Require two distinct fresh EPOS publications after enabling fast feedback.
+            // Receive timestamps do not establish sensor time or true 100 Hz feedback.
+            if [0, 1, 2].iter().all(|&i| {
+                let s = t.samples[i];
+                s.valid
+                    && now.wrapping_sub(s.ms) < SCAN_FEEDBACK_MS
+                    && s.ms.wrapping_sub(self.feedback_after) < 0x8000_0000
+            }) {
+                if self.feedback_first.is_some_and(|ms| ms != t.samples[0].ms) {
+                    return Ok(true);
+                }
+                self.feedback_first = Some(t.samples[0].ms);
+            }
+            return Ok(false);
+        }
+        if let Some(sent) = self.sent {
+            if now.wrapping_sub(sent) >= REPLY_TIMEOUT_MS {
+                return Err("Scan setting reply timeout");
+            }
+            if !io.tx_idle() {
+                return Ok(false);
+            }
+            match step {
+                Setup::Read(i) | Setup::Verify(i, _) => {
+                    if t.setting_revisions[i] == self.revision {
+                        return Ok(false);
+                    }
+                    let value = i32::try_from(t.settings[i].value)
+                        .map_err(|_| "Invalid controller setting")?;
+                    let valid = match i {
+                        INFO => (0..=7).contains(&value),
+                        POLI => (1..=65535).contains(&value),
+                        SSPD => (1..=16_777_215).contains(&value),
+                        _ => (MIN_POSITION..=MAX_POSITION).contains(&value),
+                    };
+                    if !valid {
+                        return Err("Invalid controller setting");
+                    }
+                    if let Setup::Verify(_, expected) = step {
+                        if value != expected {
+                            return Err("Controller scan setting mismatch");
+                        }
+                    } else {
+                        self.saved[i] = Some(value);
+                    }
+                    if i == SSPD {
+                        self.speed = value as u32;
+                    }
+                }
+                _ => {}
+            }
+            self.sent = None;
+            self.setup_step += 1;
+            self.feedback_after = now;
+            return Ok(false);
+        }
+        let (i, value) = match step {
+            Setup::Read(i) | Setup::Verify(i, _) => (i, None),
+            Setup::Write(i, value) => (i, Some(value)),
+            Setup::Feedback => unreachable!(),
+        };
+        if io.command(Command {
+            tag: SETTING_TAGS[i],
+            value,
+        })? {
+            if value.is_some() {
+                self.changed |= 1 << i;
+            }
+            self.revision = t.setting_revisions[i];
+            self.sent = Some(now);
+        }
+        Ok(false)
+    }
+
+    /// Drain at most one command per poll, with a USB completion between lines.
+    pub fn service(&mut self, now: u32, io: &mut impl Actuator) -> Result<(), &'static str> {
+        if self.plan_len == 0 {
+            return Ok(());
+        }
+        if self.plan_pos == self.plan_len && io.tx_idle() {
+            self.plan_len = 0;
+            return Ok(());
+        }
+        if now.wrapping_sub(self.plan_started) >= TRAJECTORY_MS {
+            return Err("Scan command deadline");
+        }
+        if self.plan_pos < self.plan_len && io.command(self.plan[self.plan_pos])? {
+            self.plan_pos += 1;
+        }
+        Ok(())
+    }
+    pub fn velocity(
+        &mut self,
+        velocity: i32,
+        now: u32,
+        io: &mut impl Actuator,
+    ) -> Result<(), &'static str> {
+        self.service(now, io)?;
+        if self.plan_len != 0 || !io.tx_idle() {
+            return Err("Scan previous update incomplete");
+        }
+        let speed = velocity.unsigned_abs();
+        if speed > 16_777_215 {
+            return Err("Scan speed out of range");
+        }
+        let direction = velocity.signum();
+        let mut len = 0;
+        // Reversal first stops scanning; never apply the new speed in the old direction.
+        if self.direction != 0 && direction != self.direction {
+            self.plan[len] = Command::set("SCAN", 0);
+            len += 1;
+        }
+        if direction != 0 {
+            if speed != self.speed {
+                self.plan[len] = Command::set("SSPD", speed as i32);
+                len += 1;
+                self.changed |= 1 << SSPD;
+            }
+            if direction != self.direction {
+                self.plan[len] = Command::set("SCAN", direction);
+                len += 1;
+            }
+            self.speed = speed;
+            self.scan_started = true;
+        }
+        self.direction = direction;
+        self.plan_len = len;
+        self.plan_pos = 0;
+        self.plan_started = now;
+        self.service(now, io)
+    }
+    pub fn cancel(&mut self) {
+        self.plan_len = 0;
+        self.direction = 0;
+    }
+
+    /// Called after STOP, before final DPOS, so a near-zero sine speed cannot
+    /// strand the return-to-center move. Initial SSPD is restored first.
+    pub fn center(
+        &mut self,
+        target: i32,
+        now: u32,
+        io: &mut impl Actuator,
+    ) -> Result<bool, &'static str> {
+        if !io.tx_idle() {
+            return Ok(false);
+        }
+        if self.center_step == 0 {
+            if io.command(Command::set(
+                "SSPD",
+                self.saved[SSPD].ok_or("Missing original speed")?,
+            ))? {
+                self.center_step = 1;
+            }
+            return Ok(false);
+        }
+        io.target(target, now, true)?;
+        Ok(true)
+    }
+    pub fn begin_restore(&mut self, now: u32) {
+        self.cancel();
+        self.sent = None;
+        self.restore_started = now;
+        self.restore_step = 0;
+    }
+    /// Restore only after STOP has completed and fresh status says scanning is off.
+    /// Failure leaves remaining narrow controller limits in place; no SAVE is sent.
+    pub fn restore(
+        &mut self,
+        t: &Telemetry,
+        now: u32,
+        io: &mut impl Actuator,
+    ) -> Result<bool, &'static str> {
+        if !self.changed() {
+            return Ok(true);
+        }
+        if now.wrapping_sub(self.restore_started) >= RESTORE_TIMEOUT_MS {
+            return Err("Controller settings restore timeout");
+        }
+        if !crate::xeryon_motion::ready(t) {
+            return Err("Controller disconnected during restore");
+        }
+        if !io.tx_idle() {
+            return Ok(false);
+        }
+        if self.scan_started && !self.stop_confirmed {
+            let s = t.samples[2];
+            if !s.valid
+                || now.wrapping_sub(s.ms) >= SCAN_FEEDBACK_MS
+                || s.ms.wrapping_sub(self.restore_started) >= 0x8000_0000
+                || s.ms == self.restore_started
+                || s.value & (1 << 13) != 0
+                || (s.value & (1 << 5) != 0 && s.value & (1 << 10) == 0)
+            {
+                return Ok(false);
+            }
+            self.stop_confirmed = true;
+        }
+        let order = [SSPD, POLI, LLIM, HLIM, INFO];
+        if self.sent.take().is_some() {
+            self.changed &= !(1 << order[self.restore_step]);
+            self.restore_step += 1;
+        }
+        while self.restore_step < order.len() && self.changed & (1 << order[self.restore_step]) == 0
+        {
+            self.restore_step += 1;
+        }
+        if self.restore_step == order.len() {
+            return Ok(true);
+        }
+        let i = order[self.restore_step];
+        if io.command(Command::set(
+            SETTING_TAGS[i],
+            self.saved[i].ok_or("Missing original setting")?,
+        ))? {
+            self.sent = Some(now);
+        }
+        Ok(false)
+    }
+}
+
+pub fn reference(center_nm: i64, amplitude_nm: u32, frequency_mhz: u32, elapsed: u32) -> f64 {
+    center_nm as f64 / 1000.0 + f64::from(amplitude_nm) / 1000.0 * wave(frequency_mhz, elapsed, 0)
+}
+fn wave(frequency_mhz: u32, elapsed: u32, offset: u64) -> f64 {
+    let phase = (u64::from(elapsed) * u64::from(frequency_mhz) + offset) % 1_000_000;
+    crate::experiment::sine(phase as f64 / 1_000_000.0).clamp(-1.0, 1.0)
+}
+pub fn velocity(
+    config: ExperimentConfig,
+    elapsed: u32,
+    now: u32,
+    t: &Telemetry,
+) -> Result<i32, &'static str> {
+    let ExperimentConfig::Sinusoidal {
+        center_nm,
+        amplitude_nm,
+        frequency_mhz,
+        ..
+    } = config
+    else {
+        return Err("Not a sine run");
+    };
+    let encoder = t.samples[0];
+    let status = t.samples[2];
+    let age = now.wrapping_sub(encoder.ms);
+    if !encoder.valid
+        || !status.valid
+        || age >= SCAN_FEEDBACK_MS
+        || now.wrapping_sub(status.ms) >= SCAN_FEEDBACK_MS
+    {
+        return Err("Scan feedback stale");
+    }
+    // Compare with the reference at reception time, not with the current phase.
+    // This avoids repeatedly treating a held sample as a new lag measurement.
+    let error = reference(
+        center_nm,
+        amplitude_nm,
+        frequency_mhz,
+        elapsed.saturating_sub(age),
+    ) - encoder.value as f64 * 0.078;
+    let guard = scan_guard_nm(amplitude_nm) as f64 / 1000.0;
+    let (low, high) = scan_bounds(center_nm, amplitude_nm)?;
+    if encoder.value <= i64::from(low) || encoder.value >= i64::from(high) || error.abs() > guard {
+        return Err("Scan tracking or travel limit");
+    }
+    let peak = peak_speed(amplitude_nm, frequency_mhz);
+    let correction = if error.abs() <= 0.078 {
+        0.0
+    } else {
+        (SCAN_KP * error).clamp(-peak * SCAN_CORRECTION, peak * SCAN_CORRECTION)
+    };
+    let speed = peak * wave(frequency_mhz, elapsed, 250_000) + correction;
+    // Explicit zero is SCAN=0; SSPD=0 is never used. No integral windup.
+    Ok((speed + if speed < 0.0 { -0.5 } else { 0.5 }) as i32)
+}
+
+#[cfg(test)]
+pub mod test_support {
+    use super::*;
+    pub struct Io {
+        pub targets: Vec<(i32, u32, bool)>,
+        pub commands: Vec<Command>,
+        pub stops: usize,
+        pub fail: bool,
+        pub busy: bool,
+        pub settings: [i32; 5],
+        pub revisions: [u32; 5],
+    }
+    impl Default for Io {
+        fn default() -> Self {
+            Self {
+                targets: vec![],
+                commands: vec![],
+                stops: 0,
+                fail: false,
+                busy: false,
+                settings: [4, 97, 10000, MIN_POSITION, MAX_POSITION],
+                revisions: [0; 5],
+            }
+        }
+    }
+    impl Io {
+        pub fn feedback(&self, t: &mut Telemetry, now: u32) {
+            for i in 0..5 {
+                t.record(SETTING_TAGS[i].as_bytes(), i64::from(self.settings[i]), now);
+                t.setting_revisions[i] = self.revisions[i];
+            }
+        }
+    }
+    impl Actuator for Io {
+        fn tx_idle(&self) -> bool {
+            !self.busy
+        }
+        fn command(&mut self, command: Command) -> Result<bool, &'static str> {
+            if self.fail {
+                return Err("transmit failure");
+            }
+            if self.busy {
+                return Ok(false);
+            }
+            if let Some(i) = SETTING_TAGS.iter().position(|&tag| tag == command.tag) {
+                if let Some(value) = command.value {
+                    self.settings[i] = value;
+                } else {
+                    self.revisions[i] = self.revisions[i].wrapping_add(1);
+                }
+            }
+            self.commands.push(command);
+            Ok(true)
+        }
+        fn target(&mut self, target: i32, now: u32, track: bool) -> Result<(), &'static str> {
+            if self.fail {
+                return Err("transmit failure");
+            }
+            self.targets.push((target, now, track));
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), &'static str> {
+            self.stops += 1;
+            if self.fail {
+                Err("stop failure")
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use test_support::Io;
+    fn config(amplitude_nm: u32, frequency_mhz: u32) -> ExperimentConfig {
+        ExperimentConfig::Sinusoidal {
+            center_nm: 0,
+            amplitude_nm,
+            frequency_mhz,
+            cycles: 1,
+        }
+    }
+    fn feedback(now: u32, position_um: f64) -> Telemetry {
+        let mut t = Telemetry::new();
+        t.mounted = true;
+        t.cdc = 2;
+        t.vid = 0x04d8;
+        t.pid = 0xef4a;
+        t.record(b"EPOS", (position_um / 0.078).round() as i64, now);
+        t.record(b"DPOS", 0, now);
+        t.record(b"STAT", 1344, now);
+        t
+    }
+    fn prepare(session: &mut Session, io: &mut Io) -> Result<u32, &'static str> {
+        for now in 0..100 {
+            let mut t = feedback(now, 0.0);
+            io.feedback(&mut t, now);
+            if session.prepare(config(10_000, 1000), &t, now, io)? {
+                return Ok(now);
+            }
+        }
+        panic!("setup did not finish");
+    }
+    #[test]
+    fn commands_fit_controller_lines_and_encode_queries_and_signed_values() {
+        for (cmd, expected) in [
+            (Command::set("SCAN", -1), "SCAN=-1\n"),
+            (Command::set("SSPD", 16_777_215), "SSPD=16777215\n"),
+            (Command::set("LLIM", MIN_POSITION), "LLIM=-33554432\n"),
+            (
+                Command {
+                    tag: "INFO",
+                    value: None,
+                },
+                "INFO=?\n",
+            ),
+        ] {
+            let mut buffer = [0; 20];
+            let bytes = cmd.encode(&mut buffer);
+            assert_eq!(bytes, expected.as_bytes());
+            assert!(bytes.len() <= 17);
+        }
+    }
+    #[test]
+    fn speed_updates_are_deduplicated_and_reversals_wait_for_each_transfer() {
+        let mut session = Session::new();
+        let mut io = Io::default();
+        session.velocity(100, 0, &mut io).unwrap();
+        assert_eq!(io.commands, [Command::set("SSPD", 100)]);
+        io.busy = true;
+        session.service(1, &mut io).unwrap();
+        assert_eq!(io.commands.len(), 1);
+        io.busy = false;
+        session.service(2, &mut io).unwrap();
+        session.service(3, &mut io).unwrap();
+        assert_eq!(io.commands[1], Command::set("SCAN", 1));
+        session.velocity(100, 10, &mut io).unwrap();
+        assert_eq!(io.commands.len(), 2);
+        session.velocity(-50, 20, &mut io).unwrap();
+        session.service(21, &mut io).unwrap();
+        session.service(22, &mut io).unwrap();
+        session.service(23, &mut io).unwrap();
+        assert_eq!(
+            &io.commands[2..],
+            [
+                Command::set("SCAN", 0),
+                Command::set("SSPD", 50),
+                Command::set("SCAN", -1)
+            ]
+        );
+        session.velocity(0, 30, &mut io).unwrap();
+        session.service(31, &mut io).unwrap();
+        assert_eq!(io.commands.last(), Some(&Command::set("SCAN", 0)));
+        assert!(!io.commands.contains(&Command::set("SSPD", 0)));
+    }
+    #[test]
+    fn stalled_or_failed_speed_transfer_cannot_start_scanning() {
+        let mut session = Session::new();
+        let mut io = Io::default();
+        session.velocity(100, u32::MAX - 5, &mut io).unwrap();
+        io.busy = true;
+        assert_eq!(session.service(4, &mut io), Err("Scan command deadline"));
+        assert!(!io.commands.iter().any(|c| c.tag == "SCAN"));
+        session.cancel();
+        io.busy = false;
+        io.fail = true;
+        assert_eq!(session.velocity(50, 10, &mut io), Err("transmit failure"));
+        assert!(!io.commands.iter().any(|c| c.tag == "SCAN"));
+    }
+    #[test]
+    fn setup_verifies_narrow_limits_and_restores_original_settings_after_stop() {
+        let mut session = Session::new();
+        let mut io = Io::default();
+        let original = io.settings;
+        prepare(&mut session, &mut io).unwrap();
+        assert_eq!(io.settings[LLIM], -160);
+        assert_eq!(io.settings[HLIM], 160);
+        assert_eq!(io.settings[POLI], 2);
+        assert_eq!(io.settings[INFO], 4);
+        for tag in ["LLIM", "HLIM", "POLI"] {
+            assert!(io.commands.contains(&Command { tag, value: None }));
+        }
+        session.velocity(100, 100, &mut io).unwrap();
+        session.service(101, &mut io).unwrap();
+        session.service(102, &mut io).unwrap();
+        io.stop().unwrap();
+        session.begin_restore(110);
+        let writes = io.commands.len();
+        let mut t = feedback(111, 0.0);
+        t.record(b"STAT", 352 | (1 << 13), 111);
+        assert_eq!(session.restore(&t, 111, &mut io), Ok(false));
+        assert_eq!(io.commands.len(), writes); // no wider limits while still scanning
+        for now in 112..130 {
+            if session.restore(&feedback(now, 0.0), now, &mut io).unwrap() {
+                break;
+            }
+        }
+        assert!(!session.changed());
+        assert_eq!(io.settings, original);
+    }
+    #[test]
+    fn setup_refuses_widening_limits_insufficient_speed_and_unverified_readback() {
+        for field in [LLIM, HLIM, SSPD] {
+            let mut session = Session::new();
+            let mut io = Io::default();
+            io.settings[field] = if field == LLIM { -100 } else { 100 };
+            if field == SSPD {
+                io.settings[field] = 1;
+            }
+            assert!(prepare(&mut session, &mut io).is_err());
+            assert!(!io.commands.iter().any(
+                |c| c.tag == "SCAN" || (matches!(c.tag, "LLIM" | "HLIM") && c.value.is_some())
+            ));
+        }
+        let mut session = Session::new();
+        let mut io = Io::default();
+        let mut error = None;
+        for now in 0..100 {
+            let mut t = feedback(now, 0.0);
+            io.feedback(&mut t, now);
+            if session.setup_step == 7 {
+                t.settings[LLIM].value = -999;
+            }
+            if let Err(e) = session.prepare(config(10_000, 1000), &t, now, &mut io) {
+                error = Some(e);
+                break;
+            }
+        }
+        assert_eq!(error, Some("Controller scan setting mismatch"));
+        assert!(!io.commands.iter().any(|c| c.tag == "SCAN"));
+    }
+    #[test]
+    fn cached_setting_cannot_satisfy_query_and_restore_timeout_keeps_limits() {
+        let mut session = Session::new();
+        let mut io = Io::default();
+        let mut t = feedback(0, 0.0);
+        io.feedback(&mut t, 0);
+        session
+            .prepare(config(10_000, 1000), &t, 0, &mut io)
+            .unwrap();
+        assert_eq!(
+            session.prepare(config(10_000, 1000), &t, REPLY_TIMEOUT_MS, &mut io),
+            Err("Scan setting reply timeout")
+        );
+        assert!(!session.changed());
+        let mut session = Session::new();
+        prepare(&mut session, &mut io).unwrap();
+        session.scan_started = true;
+        session.begin_restore(100);
+        let narrowed = io.settings;
+        assert_eq!(
+            session.restore(&feedback(0, 0.0), 2100, &mut io),
+            Err("Controller settings restore timeout")
+        );
+        assert_eq!(io.settings, narrowed);
+    }
+    #[test]
+    fn correction_has_correct_sign_cap_and_sample_time_alignment() {
+        let c = config(100_000, 100);
+        let nominal = velocity(c, 0, 0, &feedback(0, 0.0)).unwrap();
+        let behind = velocity(c, 0, 0, &feedback(0, -1.0)).unwrap();
+        let ahead = velocity(c, 0, 0, &feedback(0, 1.0)).unwrap();
+        assert!(behind > nominal && ahead < nominal);
+        let saturated = velocity(c, 0, 0, &feedback(0, -20.0)).unwrap();
+        let expected = (peak_speed(100_000, 100) * 1.25).round() as i32;
+        assert_eq!(saturated, expected);
+        let elapsed = 150;
+        let now: u32 = 15; // reception timestamp wraps, waveform time does not
+        let age = 20;
+        let reference_then = reference(0, 100_000, 100, elapsed - age);
+        let delayed = feedback(now.wrapping_sub(age), reference_then);
+        let ideal =
+            peak_speed(100_000, 100) * (elapsed as f64 * core::f64::consts::TAU / 10000.0).cos();
+        assert_eq!(
+            velocity(c, elapsed, now, &delayed),
+            Ok(ideal.round() as i32)
+        );
+    }
+    #[test]
+    fn stale_feedback_travel_escape_and_large_error_stop_the_controller() {
+        let c = config(10_000, 1000);
+        assert_eq!(
+            velocity(c, 50, 50, &feedback(0, 0.0)),
+            Err("Scan feedback stale")
+        );
+        let mut t = feedback(50, 0.0);
+        t.samples[2].ms = 0;
+        assert_eq!(velocity(c, 50, 50, &t), Err("Scan feedback stale"));
+        assert_eq!(
+            velocity(c, 0, 0, &feedback(0, -3.0)),
+            Err("Scan tracking or travel limit")
+        );
+        assert_eq!(
+            velocity(c, 250, 250, &feedback(250, 13.0)),
+            Err("Scan tracking or travel limit")
+        );
+        assert_eq!(velocity(c, 250, 250, &feedback(250, 10.0)), Ok(0));
+    }
+    #[test]
+    fn proportional_correction_reduces_error_in_a_biased_velocity_model() {
+        // Illustrative plant: actual velocity = 80% of command. This is not a
+        // validation of the real stage's dynamics, latency, or tuning.
+        let c = config(100_000, 100);
+        let (mut corrected, mut uncorrected) = (0.0, 0.0);
+        let (mut corrected_error, mut uncorrected_error) = (0.0, 0.0);
+        for now in (0..40_000).step_by(10) {
+            let command = velocity(c, now, now, &feedback(now, corrected)).unwrap();
+            let ideal = 100.0 * (f64::from(now) * core::f64::consts::TAU / 10000.0).sin();
+            if now >= 30_000 {
+                corrected_error += (corrected - ideal).powi(2);
+                uncorrected_error += (uncorrected - ideal).powi(2);
+            }
+            corrected += f64::from(command) * 0.8 * 0.01;
+            uncorrected += (peak_speed(100_000, 100)
+                * (f64::from(now) * core::f64::consts::TAU / 10000.0).cos())
+            .round()
+                * 0.8
+                * 0.01;
+        }
+        assert!(corrected_error < uncorrected_error * 0.25);
+    }
+}

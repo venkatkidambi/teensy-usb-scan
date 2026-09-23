@@ -71,3 +71,31 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
     globalThis.ResizeObserver = previousObserver;
   }
 });
+
+test('velocity sine requires firmware capability and reports incomplete restoration', () => {
+  const nodes = new Map();
+  const node = id => {
+    if (!nodes.has(id)) nodes.set(id, { value:'1', elements:[], setAttribute(){}, getBoundingClientRect:()=>({width:0}) });
+    return nodes.get(id);
+  };
+  const previousDocument=globalThis.document,previousObserver=globalThis.ResizeObserver;
+  globalThis.document={getElementById:node};
+  globalThis.ResizeObserver=class {observe(){}};
+  try {
+    const state={connected:true,hello:{experiments:true},session:{}};
+    setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls});
+    node('tab-sinusoidal').onclick();
+    assert.equal(node('experiment-start-button').disabled,true);
+    assert.match(node('experiment-motion-detail').textContent,/requires firmware/);
+    state.hello.sine_velocity=true;
+    experimentControls();
+    assert.equal(node('experiment-start-button').disabled,false);
+    experimentMessage({type:'experiment_dataset',dataset:{
+      metadata:{run:1,config:{kind:'sinusoidal'},outcome:'aborted',reason:'PC ABORT',count:0,
+        elapsed_ms:10,control:'sspd_scan_p',control_updates:2,max_control_lateness_ms:1,
+        missed_samples:0,max_lateness_ms:0,stop_queued:true,settings_restore_sent:false},samples:[],
+    }});
+    assert.match(node('experiment-result-summary').textContent,/100 Hz speed control/);
+    assert.match(node('experiment-result-summary').textContent,/restoration incomplete/);
+  } finally {globalThis.document=previousDocument;globalThis.ResizeObserver=previousObserver;}
+});

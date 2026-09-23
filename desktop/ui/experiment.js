@@ -11,7 +11,8 @@ export function experimentControls() {
   for(const name of modes) $(`tab-${name}`).disabled=owned;
   $('dashboard-panel').inert=owned;
   for(const control of $('experiment-form').elements)control.disabled=owned;
-  $('experiment-start-button').disabled=saving||owned||!connected||!hello?.experiments||!!session?.pending;
+  $('experiment-start-button').disabled=saving||owned||!connected||!hello?.experiments||(mode==='sinusoidal'&&!hello?.sine_velocity)||!!session?.pending;
+  $('experiment-motion-detail').textContent=mode==='sinusoidal'?(hello?.sine_velocity?'100 Hz speed control with encoder correction. Controller travel limits are temporarily narrowed and settings restoration attempted after stopping. Experimental: the previous Teensy freeze remains unresolved.':'Sinusoidal speed control requires firmware with the sine_velocity capability.'):'Steps use confirmed position arrival.';
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
   $('experiment-save').disabled=saving||owned||!dataset;
@@ -44,7 +45,7 @@ export function experimentMessage(message) {
     const m=dataset.metadata;
     if(mode!==m.config.kind)tab(m.config.kind);
     $('experiment-results').hidden=false;
-    $('experiment-result-summary').textContent=`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.reason} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s · CRC verified · missed samples ${m.missed_samples} · max logging lateness ${m.max_lateness_ms} ms${m.stop_queued?'':' · STOP could not be queued'}`;
+    $('experiment-result-summary').textContent=`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.reason} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s · CRC verified · missed samples ${m.missed_samples} · max logging lateness ${m.max_lateness_ms} ms${m.control==='sspd_scan_p'?` · 100 Hz speed control · ${m.control_updates} updates · max control lateness ${m.max_control_lateness_ms} ms`:''}${m.settings_restore_sent===false?' · Controller settings restoration incomplete; check limits and speed before further motion':''}${m.stop_queued?'':' · STOP could not be queued'}`;
     draw();
   }
   experimentControls();
@@ -71,7 +72,8 @@ export function setupExperiments(api) {
   for(const name of modes)$(`tab-${name}`).onclick=()=>tab(name);
   $('experiment-current').onclick=()=>{$('experiment-start').value=(api.state().snapshot.values.EPOS.value*.078).toFixed(3);};
   $('experiment-form').onsubmit=async event=>{
-    event.preventDefault();const {session,experimentUnresolved}=api.state();if(saving||!session||session.experimentOwned||experimentUnresolved)return;
+    event.preventDefault();const {session,experimentUnresolved,hello}=api.state();if(saving||!session||session.experimentOwned||experimentUnresolved)return;
+    if(mode==='sinusoidal'&&!hello?.sine_velocity){$('experiment-state').textContent='Update firmware to use 100 Hz sinusoidal speed control.';return;}
     const config={kind:mode,start_um:Number($('experiment-start').value),increment_um:Number($('experiment-increment').value),timing:Number($('experiment-timing').value),repeats:Number($('experiment-repeats').value)};
     try{const pending=session.startExperiment(config);experimentControls();await pending;}
     catch(e){$('experiment-state').textContent=String(e.message??e);}

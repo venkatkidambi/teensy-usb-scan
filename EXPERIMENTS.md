@@ -28,26 +28,28 @@ the Teensy. CSV is generated in desktop Rust only when Save CSV is selected.
 
 `ExperimentConfig` has `QuasiStatic` and `Sinusoidal` variants. One `Engine`
 owns validation, state, acquisition, the fixed buffer, CRC, faults and transfer;
-only target generation and completion conditions differ between modes.
+sine mode adds velocity command sequencing, controller setup and restoration.
 
 ```text
 Dashboard -> Validate -> MoveToStart -> Armed -> Running
                         |               |         |
                         +---------------+---------+-> Complete / Aborted / Fault
+                                                        -> Restoring (sine settings)
                                                         -> DataReady
                                                         -> Transferring
                                                         -> Dashboard (verified ACK)
 ```
 
-Validation and terminal states are synchronous transitions; Armed lasts until
-the next foreground service. Any active state can abort/fault. The engine's
+Validation and terminal outcomes are synchronous transitions; Armed performs
+scan setup for sine runs, and Restoring performs bounded cleanup. Any active state can abort/fault. The engine's
 terminal outcome and reason remain in metadata after entering DataReady.
 
 START checks the complete configuration, arithmetic overflow, rounded signed
 26-bit positions, worst-case duration, sample count, available storage, hardware
 identity, feedback freshness, healthy pressure, closed loop, valid encoder, and
 stopped manual motion **before the first DPOS**. It does not home, find index,
-change limits or change the encoder reference. Existing setup must be correct.
+or change the encoder reference. Sine setup later narrows controller limits as
+described below. Existing index/reference and mechanical setup must be correct.
 
 For quasi-static, start positioning completes first, then acquisition begins.
 Step 1 is `start + increment`; there are exactly `steps` increments, each followed
@@ -58,71 +60,103 @@ For sinusoidal, initial positioning is to center. Phase is calculated from actua
 elapsed Teensy milliseconds, not from loop counts. After the requested cycles,
 an exact center target is sent and confirmed through the same finite-move feedback
 mechanism. Acquisition continues through final settling, bounded by 10 s.
-All terminal paths request STOP; metadata says whether it could be queued.
+Terminal paths request STOP; scan settings restoration precedes DataReady.
+Metadata says whether STOP could be queued and restoration writes were sent.
 
-## Xeryon waveform strategy
+## Xeryon waveform strategy: 100 Hz speed control
 
-The existing USB2 path sends bounded `DPOS=<signed encoder counts>\n` commands.
-The manufacturer documents DPOS as an absolute closed-loop target, and STOP as
-the stage stop command: [XD-C manual, sections 4.1–4.3](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.1%20-%20JPL.pdf).
+Sinusoidal runs now use `SSPD` speed magnitude and `SCAN` direction with a
+bounded proportional encoder correction. Initial positioning and final return
+to center still use `DPOS`. The command meanings and units come from the
+[XD-C manual, sections 4.2–4.3](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.1%20-%20JPL.pdf).
 
-The Teensy evaluates a sinusoidal target every 20 ms (50 Hz), with phase
-`elapsed_ms * frequency_millihz / 1_000_000` modulo one cycle. A range-reduced
-polynomial computes sine without a dependency or heap use; native numerical tests
-bound its absolute sine error below 5e-14. Position is rounded directly to the
-nearest 78 nm encoder count, without intermediate truncation to nanometers.
-Unchanged encoder targets are suppressed, including the initial center at t=0;
-the final center is always sent and its arrival confirmed. This avoids redundant
-point-to-point commands near extrema and for small amplitudes. A failed send
-retains the last successfully commanded waveform target.
-The trajectory command encoder uses bounded integer conversion rather than
-general formatting in the waveform path.
+Every 10 ms, using actual elapsed Teensy time:
 
-The experimental 250 Hz build caused a reported freeze after actuator motion,
-with the Teensy's main-loop LED no longer blinking. The default is restored to
-50 Hz (25 target opportunities per cycle at 2 Hz). The baud-rate calculation alone
-did not establish reliable hardware operation; neither the exact stall location
-nor a physical fix has been confirmed. Higher rates require on-device diagnosis.
-The retained duplicate suppression and direct rounding reduce redundant commands
-and quantization error but do not deliver the abandoned fivefold rate increase.
+```text
+x_ref(t) = center + A sin(2πft)                   [µm]
+v_ff(t)  = 2πfA cos(2πft)                         [µm/s]
+e        = x_ref(EPOS reception time) - EPOS       [µm]
+v_cmd    = v_ff + clamp(2e, -0.25 v_peak, +0.25 v_peak)
+```
 
-`SSPD` is a speed magnitude in whole µm/s, not a signed instantaneous velocity
-command. Continuous velocity operation uses `SCAN` for direction. Streaming the
-cosine derivative that way would lose the absolute trajectory's position bound:
-velocity error integrates into position drift, and the existing asynchronous
-feedback is not a characterized high-rate outer position loop. At small amplitudes,
-whole-µm/s velocity quantization is also significant (1 µm amplitude at 0.1 Hz
-requires a peak speed of only 0.628 µm/s). Therefore the implemented strategy
-keeps absolute closed-loop position targets. Per-target SSPD changes additionally
-cost a second command and are not documented as synchronized velocity feedforward.
+The initial gain is **2/s**, with a one-encoder-count (0.078 µm) correction
+deadband and no integral term. The correction is capped at 25% of peak sine
+speed. These are conservative starting parameters, not hardware-tuned gains.
+The reference is evaluated at the cached encoder's reception time when computing
+error, avoiding artificial error from comparing an old sample with a later sine
+phase. Reception time is not the sensor's measurement time; remaining latency
+and mechanical dynamics must be measured. A reused sample does not accumulate
+integral correction. EPOS and STAT must both be less than 50 ms old at an update.
 
-No SCAN, open-loop MOVE, Windows waveform commands, SSPD updates, tuning, INFO,
-or stored controller settings are used by experiments. The current controller
-speed, acceleration and tuning determine actual tracking. This is sampled target
-tracking through the existing point-to-point interface, not a claim of exact
-continuous sinusoidal physical motion. Manual optional SSPD behavior is unchanged.
-For amplitude A in µm and frequency f in Hz, required peak speed is 2πfA µm/s
-and peak acceleration is (2πf)²A µm/s². Check these against the stage's capability
-and configured speed before a trial. Even with faster updates, tiny amplitudes
-remain visibly quantized; a 1 µm amplitude spans only about 26 encoder counts
-peak to peak. Starting and finishing at center also entails a velocity transition;
-the requested finite sine has no added ramp-in/ramp-out cycles.
+Speed is rounded to whole µm/s. An unchanged speed/direction sends nothing.
+Zero speed explicitly uses `SCAN=0`, never `SSPD=0`. A reversal sequences
+`SCAN=0`, changed `SSPD`, then the new `SCAN` direction, each in a separate USB
+transfer. No next line is submitted until the previous transfer completes.
+A pending sequence has a 10 ms deadline. A whole missed control interval faults;
+smaller delays use current phase, never catch-up bursts. This is a cooperative
+100 Hz schedule, not a guarantee of controller execution or physical bandwidth.
+For small slow waves, 1 µm/s quantization can dominate or round the entire command
+to zero; e.g. a 0.078 µm, 0.1 Hz wave is below the speed resolution.
+The finite wave still starts at center with nonzero desired velocity and stops
+after whole cycles; no extra ramp-in or ramp-out cycles are inserted.
 
-The C readiness query now requires both an empty TX software FIFO and completion
-of the prior USB transfer. A FIFO can empty as soon as its bytes enter the endpoint
-buffer, before delivery. A pending-transfer flag is cleared by TinyUSB's successful
-TX callback only when no more bytes are queued; the callback runs before TinyUSB
-flushes the next packet. At a new experiment target, incomplete TX faults with
-`Xeryon previous transmit incomplete` rather than adding another target. STOP
-still clears waiting bytes and can queue behind the in-flight packet. Manual
-SSPD/DPOS ordering remains supported. USB completion is not confirmation that the
-XD-C has executed a command, and an already submitted packet cannot be recalled.
+### Setup and controller-side bounds
 
-The host event budget is reduced from the vendored default of 16 to four events
-per foreground pass, yielding more often to sensor, experiment, USB1/ABORT and LED
-service. This bounds event count, not individual callback or ISR duration. It is
-hardening, not proof of the reported freeze's root cause. A missed trajectory
-deadline is handled by the engine and does not intentionally stop LED service.
+After confirmed initial positioning, before acquisition or scanning, the engine
+reads the original INFO, SSPD, POLI, LLIM and HLIM settings. It temporarily uses
+INFO=0 for setting queries. Replies must be new publications after each query;
+cached values cannot satisfy setup. Each operation has a 1.5 s deadline, and
+setup has a 5 s total deadline (ordinary feedback health checks also apply).
+
+The controller travel envelope is center ± (amplitude + guard), where guard is
+max(amplitude/4, 1.560 µm), rounded to encoder counts. It must fit the signed
+encoder range and lie entirely inside the original LLIM/HLIM limits. The engine
+never widens pre-existing limits during setup. It writes and reads back both
+narrowed limits before permitting SCAN. The original SSPD setting must be at least
+1.25 × requested peak velocity; an inadequate setting is rejected instead of
+silently exceeding it. The engine does not home or change the encoder reference.
+
+POLI is temporarily set to 2 ms and read back; INFO=4 enables EPOS, DPOS, STAT
+and TIME feedback. Before starting the wave, the engine requires fresh feedback
+and two distinct EPOS reception timestamps. This requests frequent feedback but
+does not assume the XD-C produces simultaneous 100 Hz measurements. Software
+faults on excessive following error (greater than the guard), escape from the
+controller envelope, stale feedback, index operations, limit/fault bits,
+transport failure or missed deadlines. Scanning status is permitted only while
+the engine owns sine scanning. Stopped SCAN/STOP transitions may temporarily
+clear the closed-loop bit; an active scan still must report closed-loop control.
+
+The earlier 250 Hz DPOS build caused a reported freeze after actuator movement,
+with the foreground LED stopping. Its root cause remains unresolved. The new
+controller-side limits remain installed if Teensy execution stops, but they are
+not an emergency stop and do not guarantee zero overshoot or protection after
+encoder/controller failure. Independent stop access is still necessary for a
+physical trial; the new control mode is not a demonstrated fix for the freeze.
+
+### Stop, center and restore
+
+At waveform completion, STOP cancels scanning. The original SSPD is restored
+before issuing the final center DPOS, so a near-zero waveform speed cannot
+strand the finite move. Center arrival still needs DPOS echo followed by a new
+position-reached status with scanning off. ABORT and faults immediately request
+STOP and cancel any pending speed/direction sequence.
+
+All exits restore changed controller settings through a bounded foreground
+Restoring state. After scanning has been requested, this first waits for USB TX
+completion and a fresh, post-STOP status with scanning off and motor off or
+position reached, before restoring the wider original limits. Restoration has
+a 2 s deadline, keeps ABORT responsive, and does not add acquisition samples.
+Repeated ABORT retries STOP without restarting the restoration deadline.
+Disconnect, changed connection epoch, or failed restoration retains a dataset
+with `settings_restore_sent=false`. Remaining narrow limits may stay installed;
+check controller limits, speed and telemetry settings before further motion.
+No SAVE command is issued. `settings_restore_sent=true` means the restore writes
+completed USB transfer, not an independent readback of every restored setting.
+
+The retained C transport checks both software FIFO emptiness and in-flight USB
+completion. STOP clears unsent bytes but cannot recall an already submitted
+packet. The host task processes at most four USB events per foreground pass;
+this bounds event count, not individual callback or ISR duration.
 
 ## Timing, sample layout and memory
 
@@ -131,13 +165,14 @@ deadline is handled by the engine and does not intentionally stop LED service.
 | Clock | Existing monotonic Teensy SysTick, 1 ms resolution, wrapping u32 |
 | Acquisition schedule | 50 ms / 20 Hz, latest cached raw values |
 | Pressure acquisition | Existing 50 ms attempt interval, completion latency unchanged |
-| Sinusoidal targets | 20 ms / 50 Hz, duplicate counts suppressed; 0.100–2.000 Hz wave frequency |
+| Sinusoidal velocity control | 10 ms / 100 Hz; 0.100–2.000 Hz wave frequency |
 | Record | 40 bytes, ten explicit little-endian 32-bit words |
 | Capacity | 4,096 records |
 | Sample-buffer RAM | 163,840 bytes / 160 KiB, zero-initialized DTCM `.bss` |
 | Maximum acquisition bound | 204,750 ms (204.75 s), including final settling |
 | Maximum sinusoidal waveform duration | 194,750 ms, plus reserved 10 s settling |
 | Initial positioning | Additional 10 s maximum, before acquisition |
+| Scan setup / terminal restoration | Up to 5 s / 2 s, outside acquisition |
 
 Validation reserves `floor(duration_bound_ms / 50) + 1` records including t=0.
 Quasi-static bound is `steps * (10_000 + hold_ms)`; sinusoidal bound is
@@ -153,7 +188,7 @@ never silently shortened. A 204.75 s bound reserves all 4,096 records.
 | 16 | epos_age_ms | u32, logging time minus EPOS reception time |
 | 20 | pressure_age_ms | u32, logging time minus pressure publication time |
 | 24 | stat_age_ms | u32, logging time minus STAT reception time |
-| 28 | target | i32, last commanded target at this logging instant |
+| 28 | target | i32, sine reference at logging time, or last quasi-static DPOS target |
 | 32 | controller_ticks | u32, latest raw XD-C TIME, 0.1 ms units |
 | 36 | controller_age_ms | u32, TIME reception age; UINT32_MAX means unavailable |
 
@@ -167,8 +202,8 @@ the paired logging times; CSV also exports all ages and raw encoder/target value
 The foreground performs at most one logging operation per poll. Late logging
 skips expired slots rather than fabricating samples, recording missed-slot count
 and maximum lateness (these counters describe acquisition, not USB delivery).
-A sinusoidal dispatch delayed by a whole target interval (20 ms) faults, even if
-the target would be unchanged; smaller delays use current phase. Scheduling stays
+A sinusoidal update delayed by a whole control interval (10 ms) faults, even if
+the speed would be unchanged; smaller delays use current phase. Scheduling stays
 anchored to acquisition start, without phase drift or catch-up bursts.
 Deadline checks and the prevalidated
 sample budget bound storage, with a defensive invariant check before every write.
@@ -201,7 +236,7 @@ commands, including PING, snapshots, stream changes and manual STOP, are busy
 while the engine owns the hardware. ABORT is the exclusive running command.
 
 On USB1 open, firmware sends one `experiment_state` announcement: `dashboard`,
-`running` (also covers positioning/arming), or `data_ready`. The desktop waits
+`running` (also covers positioning/arming/restoration), or `data_ready`. The desktop waits
 passively for that state, or a legacy Dashboard snapshot, before its handshake.
 It never sends HELLO/PING into a recovered autonomous run. On completion, firmware
 announces `data_ready` once per connection; this is not live telemetry.
@@ -256,8 +291,8 @@ The native START submission is ordered before any preempting ABORT; CSV and
 configuration remain disabled after disconnect while ownership is unresolved.
 
 During active states, Xeryon disconnect/epoch change, stale EPOS or STAT (3 s),
-existing controller fault bits, end stops, invalid encoder/closed loop, index/scan
-operations, move/trajectory/acquisition deadlines, transmit failure/backlog, or
+existing controller fault bits, end stops, invalid encoder/closed loop, index
+operations, unexpected scanning outside the sine mode, move/trajectory/acquisition deadlines, transmit failure/backlog, or
 pressure invalidity/transfer failure/250 ms staleness request STOP and retain a
 faulted dataset. ABORT retains an aborted dataset. STOP delivery is best effort
 when USB2 fails; queue acceptance is not physical stop confirmation. No software
@@ -265,7 +300,7 @@ path can guarantee actuator stopping after loss of its only communication link.
 
 ## Files and preservation review
 
-New modules: `src/experiment.rs`, `src/experiment_data.rs`,
+New modules: `src/experiment.rs`, `src/experiment_data.rs`, `src/sine_control.rs`,
 `desktop/src/experiment.rs`, `desktop/ui/experiment.js`, and
 `desktop/tests/experiment_transfer.rs`.
 
@@ -293,6 +328,19 @@ capacity, wire format and dataset acknowledgement semantics are preserved.
 Save As adds a desktop-only dialog dependency; embedded dependencies are unchanged.
 
 ## Validation and physical acceptance
+
+Current 100 Hz scan build: firmware engine and transport tests cover velocity
+cadence, correction sign/cap, delayed feedback, stale samples, query readbacks,
+controller limit preservation, STOP/reversal ordering, command stalls, Abort
+mid-sequence, final-center arrival and settings restoration. A biased velocity
+model checks that proportional feedback reduces position error; it is not a
+measurement or model identification of the actual stage. Desktop interoperability
+checks the unchanged binary format and the added control metadata. UI tests cover
+capability gating and incomplete restoration messaging. No hardware trial has
+been performed, and the earlier freeze remains unresolved.
+Validation passed: 46 firmware Rust tests, both C bridge suites, 51 desktop/native
+tests, and 18 JavaScript tests. Firmware release/HEX and Vite production assets
+build successfully. The pre-existing TinyUSB unused-function warning remains.
 
 Recovery build validation: 34 firmware Rust tests, both C bridge suites,
 39 desktop/native interoperability tests and 17 JavaScript tests passed. Release
@@ -363,9 +411,10 @@ Physical validation still required:
    and existing index/reference setup with the new firmware.
 2. Begin with small travel and amplitude. Measure 0.1–2 Hz EPOS tracking, phase
    lag, extrema, final center arrival, speed/acceleration limits, and mechanical
-   limits under actual load. First confirm LED/USB1 responsiveness with the restored
-   50 Hz build. Any future rate increase needs USB completion and encoder traces;
-   the retained 20 Hz dataset cannot characterize fast command delivery or a CPU stall.
+   limits under actual load. Confirm LED/USB1 responsiveness, limit readbacks, speed
+   update timing, EPOS age, bounded encoder correction, zero-speed transitions and
+   settings restoration. The retained 20 Hz dataset cannot characterize 100 Hz
+   command delivery or a CPU stall; use an independent trace for those checks.
 3. Measure pressure/EPOS feedback cadence, publication/interface latency, loop
    lateness, missed samples and 160 KiB-buffer operation on the real board.
 4. Exercise ABORT with USB1 backpressure, stale/disconnected USB2, sensor faults,

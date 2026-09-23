@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 #[path = "../../src/experiment.rs"]
 mod engine;
+use engine as experiment;
 #[path = "../../src/experiment_data.rs"]
 mod experiment_data;
 #[path = "../../src/line.rs"]
@@ -14,27 +15,21 @@ mod pressure;
 mod protocol;
 #[path = "../src/experiment.rs"]
 mod receiver;
+#[path = "../../src/sine_control.rs"]
+mod sine_control;
 #[path = "../../src/xeryon_motion.rs"]
 mod xeryon_motion;
 use experiment_data::*;
 use serde_json::{Value, json};
 
-struct Io;
-impl engine::Actuator for Io {
-    fn target(&mut self, _: i32, _: u32, _: bool) -> Result<(), &'static str> {
-        Ok(())
-    }
-    fn stop(&mut self) -> Result<(), &'static str> {
-        Ok(())
-    }
-}
+use sine_control::test_support::Io;
 fn telemetry(now: u32) -> protocol::Telemetry {
     let mut t = protocol::Telemetry::new();
     t.mounted = true;
     t.vid = 0x04d8;
     t.pid = 0xef4a;
     t.cdc = 2;
-    for (tag, value) in [(b"EPOS", -123), (b"DPOS", 0), (b"STAT", 1344)] {
+    for (tag, value) in [(b"EPOS", -1), (b"DPOS", 0), (b"STAT", 1344)] {
         t.record(tag, value, now);
     }
     let mut m = xeryon_motion::Motion::new();
@@ -67,18 +62,34 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     };
     e.accept(config, &telemetry(0), pressure(0), false, 0)
         .unwrap();
-    e.begin(0, &mut Io);
-    e.poll(1, &telemetry(1), pressure(1), &mut Io);
-    for now in 2..=512 {
-        e.poll(now, &telemetry(now), pressure(now), &mut Io);
+    let mut io = Io::default();
+    e.begin(0, &mut io);
+    e.poll(1, &telemetry(1), pressure(1), &mut io);
+    for now in 2..=550 {
+        let mut t = telemetry(now);
+        io.feedback(&mut t, now);
+        if e.state == engine::State::Running {
+            let phase = f64::from(now - e.started_ms) * core::f64::consts::TAU / 1000.0;
+            t.record(b"EPOS", (10.0 * phase.sin()).round() as i64, now);
+        }
+        e.poll(now, &t, pressure(now), &mut io);
+        if e.state == engine::State::Running && now - e.started_ms >= 510 {
+            break;
+        }
     }
-    e.abort(&mut Io);
+    e.abort(&mut io);
+    for now in 551..600 {
+        e.poll(now, &telemetry(now), pressure(now), &mut io);
+    }
     assert_eq!(e.len, 11);
     let mut d = receiver::Download::default();
     assert!(d.begin(e.run).starts_with("GET_DATA "));
     e.transfer(e.run).unwrap();
     let mut text = String::new();
     e.metadata(&mut text, receiver::DOWNLOAD_ID).unwrap();
+    let mut frame = protocol::Frame::new();
+    e.metadata(&mut frame, receiver::DOWNLOAD_ID).unwrap();
+    assert_eq!(frame.pending(), text.as_bytes());
     d.metadata(serde_json::from_str(&text).unwrap()).unwrap();
     let mut decoder = receiver::Decoder::default();
     let mut dataset = None;
@@ -117,9 +128,13 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     }
     let dataset = dataset.unwrap();
     assert_eq!(dataset.samples.len(), 11);
-    assert_eq!(dataset.samples[0][1], -123);
-    assert!(dataset.csv().contains("-9.594,1193046"));
+    assert_eq!(dataset.samples[0][1], -1);
+    assert!(dataset.csv().contains("-0.078,1193046"));
     assert_eq!(dataset.metadata["outcome"], "aborted");
+    assert_eq!(dataset.metadata["control"], "sspd_scan_p");
+    assert_eq!(dataset.metadata["trajectory_ms"], 10);
+    assert_eq!(dataset.metadata["kp_per_s"], 2);
+    assert_eq!(dataset.metadata["settings_restore_sent"], true);
     assert!(!e.owns_hardware());
 }
 #[test]

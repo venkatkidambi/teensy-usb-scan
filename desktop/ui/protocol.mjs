@@ -57,6 +57,7 @@ export function parseMessage(line) {
     }
   } else if(m.type==='hello') {
     if(m.protocol!==1||m.board!=='Teensy 4.1'||typeof m.firmware!=='string'||typeof m.motion!=='boolean'||typeof m.pressure!=='boolean') throw Error('Incompatible firmware; upload this project’s telemetry build');
+    if(m.sine_velocity!==undefined&&typeof m.sine_velocity!=='boolean')throw Error('Invalid sine_velocity capability');
     if(m.experiments!==undefined&&typeof m.experiments!=='boolean')throw Error('Invalid experiment capability');
     if(m.plunger_limits!==undefined&&typeof m.plunger_limits!=='boolean') throw Error('Invalid plunger limits capability');
     if(m.xeryon_speed!==undefined&&typeof m.xeryon_speed!=='boolean') throw Error('Invalid Xeryon speed capability');

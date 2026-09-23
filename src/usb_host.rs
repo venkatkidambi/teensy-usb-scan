@@ -206,6 +206,29 @@ pub fn autonomous(on: bool) {
 
 pub struct ExperimentActuator;
 impl crate::experiment::Actuator for ExperimentActuator {
+    fn tx_idle(&self) -> bool {
+        // SAFETY: foreground-only query into C-owned transport state.
+        unsafe { usb_serial_tx_idle() }
+    }
+    fn command(&mut self, command: crate::sine_control::Command) -> Result<bool, &'static str> {
+        if !self.tx_idle() {
+            return Ok(false);
+        }
+        let mut buffer = [0; 20];
+        let bytes = command.encode(&mut buffer);
+        // SAFETY: C copies the entire short line before returning.
+        if !unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, false) } {
+            return Err("Xeryon scan command transmit failed");
+        }
+        if command.tag == "SCAN" {
+            cortex_m::interrupt::free(|cs| {
+                let mut motion = MOTION.borrow(cs).borrow_mut();
+                motion.state = 0; // Scan lifecycle and deadlines belong to the engine.
+                motion.target = None;
+            });
+        }
+        Ok(true)
+    }
     fn target(&mut self, target: i32, now: u32, track: bool) -> Result<(), &'static str> {
         // SAFETY: foreground-only query into the existing C transport. Fault
         // instead of queuing a target behind an unfinished USB transfer.

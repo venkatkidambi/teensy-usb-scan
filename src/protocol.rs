@@ -5,6 +5,7 @@ use core::fmt::{self, Write};
 pub const TAGS: [&str; 8] = [
     "EPOS", "DPOS", "STAT", "SRNO", "SOFT", "FREQ", "TIME", "SYNC",
 ];
+pub const SETTING_TAGS: [&str; 5] = ["INFO", "POLI", "SSPD", "LLIM", "HLIM"];
 
 #[derive(Clone, Copy, Default)]
 pub struct Sample {
@@ -23,6 +24,8 @@ pub struct Telemetry {
     pub records: u32,
     pub malformed: u32,
     pub samples: [Sample; TAGS.len()],
+    pub settings: [Sample; SETTING_TAGS.len()],
+    pub setting_revisions: [u32; SETTING_TAGS.len()],
     pub plunger_io: Option<crate::plunger::Io>,
     pub pressure: Option<crate::pressure::Reading>,
     pub plunger: Option<(crate::plunger::Motion, Option<u16>)>,
@@ -48,6 +51,12 @@ impl Telemetry {
                 ms: 0,
                 valid: false,
             }; TAGS.len()],
+            settings: [Sample {
+                value: 0,
+                ms: 0,
+                valid: false,
+            }; SETTING_TAGS.len()],
+            setting_revisions: [0; SETTING_TAGS.len()],
         }
     }
 
@@ -66,6 +75,14 @@ impl Telemetry {
                 ms: now,
                 valid: true,
             };
+        }
+        if let Some(i) = SETTING_TAGS.iter().position(|s| s.as_bytes() == tag) {
+            self.settings[i] = Sample {
+                value,
+                ms: now,
+                valid: true,
+            };
+            self.setting_revisions[i] = self.setting_revisions[i].wrapping_add(1);
         }
     }
 

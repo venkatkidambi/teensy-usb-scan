@@ -135,3 +135,27 @@ its sign-inverted counts [-8388607, 8388608], legacy states (0 waiting for DOUT,
 `pwm_running`/`pwm_enabled`. Read snapshot records hardware diagnostics in the UI log.
 
 Firmware with `plunger_limits: true` in HELLO enforces potentiometer bounds and reports `plunger.limits: {"min":30,"max":75}` in snapshots. Bounds reset to 30–75% at boot, survive serial reconnects, and reject outward moves while allowing inward recovery. Up increases the reading. Missing/stale potentiometer feedback prevents motion. Drive is disabled at a bound; sampling latency and mechanical coast can cause overshoot.
+
+## 100 Hz sinusoidal velocity control
+
+HELLO now includes `sine_velocity: true`. START S retains the same parameters,
+but the updated firmware executes SSPD/SCAN at 10 ms with a bounded encoder
+correction. The desktop requires this capability for its sinusoidal Start button.
+Quasi-static and manual movement retain their position semantics.
+
+Before scanning, firmware reads controller settings, narrows and reads back
+LLIM/HLIM without widening existing limits, and sets POLI=2 / INFO=4. Setup can
+fault if replies, speed headroom, travel bounds or fresh feedback are unavailable.
+Positioning/setup and terminal restoration are reported as `running`; ownership
+is retained until settings restoration finishes or times out and the retained
+dataset is transferred and acknowledged. ABORT remains available throughout.
+
+Record size/version remain unchanged. In sine datasets, `target` is the desired
+position reference at the logging instant, not a streamed DPOS command. Metadata
+identifies this with `control: "sspd_scan_p"`, `target_semantics: "reference_position"`,
+`kp_per_s: 2`, `correction_fraction: 0.25`, and `feedback_max_age_ms: 50`.
+`control_updates` counts accepted velocity plans (including unchanged commands),
+and `max_control_lateness_ms` records scheduling lateness. These are not encoder
+measurement rate or USB delivery timing. `settings_restore_sent` reports completed
+USB writes of the restored settings, not independently verified readbacks; false
+means controller settings may remain altered. CSV retains all metadata.
