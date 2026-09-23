@@ -30,6 +30,13 @@ works. Each request uses a nonzero u32 ID; only one request is in flight at a ti
 
 Responses are newline-delimited JSON. Example:
 
+Snapshots optionally include `xeryon_setup` (null before a setup query). Its
+`query`, `attempts`, `started_ms`, `rx_bytes`, `records`, `malformed`, and
+`rx_prefix_hex` fields describe the last setup query through its retries.
+The raw prefix is limited to 64 bytes, encoded as lowercase hexadecimal.
+Cleanup freezes the capture; the next experiment clears it. This diagnostic
+does not certify controller execution or replace setting readback validation.
+
 ```json
 {"type":"hello","id":1,"protocol":1,"firmware":"0.1.0","board":"Teensy 4.1","motion":true,"pressure":true}
 {"type":"snapshot","id":0,"ms":12500,"epoch":1,"vid":1240,"pid":61258,"mounted":true,"cdc":2,"records":30,"malformed":0,"skipped":0,"values":{"EPOS":{"value":-123,"ms":12450},"STAT":{"value":1344,"ms":12480}}}

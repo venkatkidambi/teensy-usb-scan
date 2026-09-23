@@ -17,6 +17,8 @@ mod protocol;
 mod receiver;
 #[path = "../../src/sine_control.rs"]
 mod sine_control;
+#[path = "../../src/xeryon.rs"]
+mod xeryon;
 #[path = "../../src/xeryon_motion.rs"]
 mod xeryon_motion;
 use experiment_data::*;
@@ -65,7 +67,9 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     let mut io = Io::default();
     e.begin(0, &mut io);
     e.poll(1, &telemetry(1), pressure(1), &mut io);
-    for now in 2..=550 {
+    let mut abort_ms = None;
+    // Setup settling time is separate from the 510 ms acquisition under test.
+    for now in 2..=2_000 {
         let mut t = telemetry(now);
         io.feedback(&mut t, now);
         if e.state == engine::State::Running {
@@ -74,13 +78,19 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         }
         e.poll(now, &t, pressure(now), &mut io);
         if e.state == engine::State::Running && now - e.started_ms >= 510 {
+            abort_ms = Some(now);
             break;
         }
     }
+    let abort_ms = abort_ms.expect("waveform did not reach 510 ms");
     e.abort(&mut io);
-    for now in 551..600 {
+    for now in abort_ms + 1..abort_ms + 500 {
         e.poll(now, &telemetry(now), pressure(now), &mut io);
+        if e.data_ready() {
+            break;
+        }
     }
+    assert!(e.data_ready());
     assert_eq!(e.len, 11);
     let mut d = receiver::Download::default();
     assert!(d.begin(e.run).starts_with("GET_DATA "));

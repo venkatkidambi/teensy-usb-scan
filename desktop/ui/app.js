@@ -104,7 +104,7 @@ async function request(command,quiet=false){
     if(command==='PING')text('rtt',`${Math.round(performance.now()-start)} ms`);
     if(reply.type==='ack')streaming=reply.stream;
     if(!quiet)activity(`${command} → ${reply.type} #${reply.id}`);
-    if(command==='SNAPSHOT')activity(`Hardware ${JSON.stringify({plunger:reply.plunger,plunger_io:reply.plunger_io,pressure:reply.pressure})}`);
+    if(command==='SNAPSHOT')activity(`Hardware ${JSON.stringify({xeryon_setup:reply.xeryon_setup,plunger:reply.plunger,plunger_io:reply.plunger_io,pressure:reply.pressure})}`);
     if(connected&&!quiet)notice(streaming?'Connected locally. Receiving telemetry.':'Display stream paused. Hardware monitoring continues.');
     if(reply.type==='xeryon_ack')notice(reply.action==='move'?`Move queued · target ${position(reply.target)} µm. Waiting for controller feedback.`:'Stop queued. Check actuator feedback.');
     return reply;

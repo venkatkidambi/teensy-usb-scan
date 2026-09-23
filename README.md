@@ -40,11 +40,23 @@ It is not retained across power cycles. This bare-metal firmware does not includ
 Teensyduino's Arduino `CrashReport` API.
 
 A normal heartbeat with `Scan SSPD reply timeout` is a handled setup failure:
-USB transmission completed but no fresh speed-setting reply was received.
+USB transmission completed but no fresh speed-setting reply was decoded.
 The firmware now pauses after each setup transfer (100 ms after INFO=0, 20 ms
 otherwise) and retries unanswered reads up to three transmissions within the
 existing deadline. This timing change needs hardware verification; it does not
 bypass speed or travel-limit readback checks.
+
+If it persists, update firmware and desktop, reproduce once, then click
+**Read snapshot** on the Dashboard after results download. Copy the `Hardware`
+log's `xeryon_setup` object. It retains the last setup query, attempt count,
+total received bytes, decoded/malformed record counts, and the first 64 raw
+received bytes as hexadecimal (`rx_prefix_hex`), across retries and cleanup.
+Zero `rx_bytes` means no bytes reached the receive callback during that query;
+nonzero `malformed` means the decoder rejected input. Valid records without an
+SSPD reply can instead indicate the controller is still streaming other tags.
+The capture resets on the next experiment. It uses fixed storage and does no
+logging or text formatting during setup or the waveform. This is diagnostic
+instrumentation, not a confirmed fix for the hardware timeout.
 
 Bare-metal Rust (`no_std`, `no_main`) plus the TinyUSB 0.21.0 C host stack.
 Cargo builds everything; no Arduino, PlatformIO, or operating system is used.

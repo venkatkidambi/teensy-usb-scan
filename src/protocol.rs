@@ -30,12 +30,14 @@ pub struct Telemetry {
     pub pressure: Option<crate::pressure::Reading>,
     pub plunger: Option<(crate::plunger::Motion, Option<u16>)>,
     pub xeryon_motion: Option<crate::xeryon_motion::Motion>,
+    pub xeryon_setup: crate::xeryon::SetupTrace,
 }
 
 impl Telemetry {
     pub const fn new() -> Self {
         Self {
             xeryon_motion: None,
+            xeryon_setup: crate::xeryon::SetupTrace::new(),
             plunger_io: None,
             pressure: None,
             plunger: None,
@@ -104,6 +106,8 @@ impl Telemetry {
             }
         }
         out.write_str("}")?;
+        out.write_str(",\"xeryon_setup\":")?;
+        self.xeryon_setup.write_json(out)?;
         if let Some(m) = self.xeryon_motion {
             write!(
                 out,
@@ -491,6 +495,11 @@ mod tests {
         for tag in TAGS {
             t.record(tag.as_bytes(), i64::MIN, u32::MAX);
         }
+        t.xeryon_setup.begin("SSPD", u32::MAX);
+        t.xeryon_setup.capture(&[0xff; 64]);
+        t.xeryon_setup.received = u32::MAX;
+        t.xeryon_setup.records = u32::MAX;
+        t.xeryon_setup.malformed = u32::MAX;
         let mut motor = crate::plunger::Motion::default();
         motor.position = i32::MIN;
         t.plunger = Some((motor, Some(4095)));
@@ -518,6 +527,11 @@ mod tests {
                 .contains("\"xeryon_motion\":{\"state\":1,\"target\":-33554432}")
         );
         let original = f.pending().to_vec();
+        assert!(
+            core::str::from_utf8(&original)
+                .unwrap()
+                .contains("\"query\":\"SSPD=?\"")
+        );
         f.consume(512);
         assert_eq!(f.pending(), &original[512..]);
         f.consume(f.pending().len());
