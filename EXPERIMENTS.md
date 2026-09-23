@@ -103,10 +103,16 @@ after whole cycles; no extra ramp-in or ramp-out cycles are inserted.
 ### Setup and controller-side bounds
 
 After confirmed initial positioning, before acquisition or scanning, the engine
-reads the original INFO, SSPD, POLI, LLIM and HLIM settings. It temporarily uses
-INFO=0 for setting queries. Replies must be new publications after each query;
+sets INFO=0 before reading the original SSPD, POLI, LLIM and HLIM settings.
+It does not query the previous INFO mode: modes 3, 4 and 7 have no requested
+parameter slot and can leave that query unanswered. On exit it sets INFO=4
+(EPOS, STAT, DPOS, TIME), including after partial setup failure; the previous
+telemetry mode is not preserved. No settings are saved to controller flash.
+Replies must be new publications after each query;
 cached values cannot satisfy setup. Each operation has a 1.5 s deadline, and
 setup has a 5 s total deadline (ordinary feedback health checks also apply).
+Timeouts identify the setting and distinguish reads, verification readbacks,
+and an unfinished USB transmission.
 
 The controller travel envelope is center ± (amplitude + guard), where guard is
 max(amplitude/4, 1.560 µm), rounded to encoder counts. It must fit the signed

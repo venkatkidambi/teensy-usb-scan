@@ -12,7 +12,6 @@ const SSPD: usize = 2;
 const LLIM: usize = 3;
 const HLIM: usize = 4;
 const SETUP_TIMEOUT_MS: u32 = 5_000;
-// The first INFO query can arrive in the default ~970 ms telemetry rotation.
 const REPLY_TIMEOUT_MS: u32 = 1_500;
 const RESTORE_TIMEOUT_MS: u32 = 2_000;
 
@@ -92,7 +91,10 @@ pub struct Session {
 impl Session {
     pub fn new() -> Self {
         Self {
-            saved: [None; 5],
+            // INFO modes 3/4/7 have no requested-parameter slot, so querying
+            // INFO before disabling the stream can deadlock setup. Own the
+            // telemetry mode explicitly and return to EPOS/STAT/DPOS/TIME.
+            saved: [Some(4), None, None, None, None],
             changed: 0,
             setup_step: 0,
             setup_started: None,
@@ -138,7 +140,7 @@ impl Session {
             return Err("Scan setup deadline");
         }
         let (low, high) = scan_bounds(center_nm, amplitude_nm)?;
-        if self.setup_step >= 6 {
+        if self.setup_step >= 5 {
             // Never widen existing controller limits or exceed its existing speed setting.
             if self.saved[LLIM].unwrap() > low || self.saved[HLIM].unwrap() < high {
                 return Err("Sine plus guard exceeds controller travel limits");
@@ -150,7 +152,6 @@ impl Session {
             }
         }
         let steps = [
-            Setup::Read(INFO),
             Setup::Write(INFO, 0),
             Setup::Read(SSPD),
             Setup::Read(POLI),
@@ -184,7 +185,20 @@ impl Session {
         }
         if let Some(sent) = self.sent {
             if now.wrapping_sub(sent) >= REPLY_TIMEOUT_MS {
-                return Err("Scan setting reply timeout");
+                return Err(if !io.tx_idle() {
+                    "Scan setting USB transmit timeout"
+                } else {
+                    match step {
+                        Setup::Read(SSPD) => "Scan SSPD reply timeout",
+                        Setup::Read(POLI) => "Scan POLI reply timeout",
+                        Setup::Read(LLIM) => "Scan LLIM reply timeout",
+                        Setup::Read(HLIM) => "Scan HLIM reply timeout",
+                        Setup::Verify(LLIM, _) => "Scan LLIM readback timeout",
+                        Setup::Verify(HLIM, _) => "Scan HLIM readback timeout",
+                        Setup::Verify(POLI, _) => "Scan POLI readback timeout",
+                        _ => "Scan setting completion timeout",
+                    }
+                });
             }
             if !io.tx_idle() {
                 return Ok(false);
@@ -491,7 +505,8 @@ pub mod test_support {
             if let Some(i) = SETTING_TAGS.iter().position(|&tag| tag == command.tag) {
                 if let Some(value) = command.value {
                     self.settings[i] = value;
-                } else {
+                } else if matches!(self.settings[INFO], 0 | 2 | 5 | 6) {
+                    // Mirror the controller's requested-parameter telemetry slot.
                     self.revisions[i] = self.revisions[i].wrapping_add(1);
                 }
             }
@@ -616,6 +631,60 @@ mod tests {
         assert!(!io.commands.iter().any(|c| c.tag == "SCAN"));
     }
     #[test]
+    fn setup_enters_query_mode_from_every_stream_mode_and_restores_telemetry() {
+        for mode in 0..=7 {
+            let mut session = Session::new();
+            let mut io = Io::default();
+            io.settings[INFO] = mode;
+            let original = io.settings;
+            prepare(&mut session, &mut io).unwrap();
+            assert_eq!(io.commands[0], Command::set("INFO", 0));
+            assert!(!io.commands.contains(&Command {
+                tag: "INFO",
+                value: None,
+            }));
+            session.begin_restore(100);
+            for now in 100..120 {
+                if session.restore(&feedback(now, 0.0), now, &mut io).unwrap() {
+                    break;
+                }
+            }
+            assert!(!session.changed());
+            assert_eq!(io.settings[INFO], 4);
+            assert_eq!(io.settings[1..], original[1..]);
+        }
+    }
+    #[test]
+    fn stalled_query_mode_write_faults_before_queries_and_restores_telemetry() {
+        let mut session = Session::new();
+        let mut io = Io::default();
+        session
+            .prepare(config(10_000, 1000), &feedback(0, 0.0), 0, &mut io)
+            .unwrap();
+        io.busy = true;
+        assert_eq!(
+            session.prepare(
+                config(10_000, 1000),
+                &feedback(REPLY_TIMEOUT_MS, 0.0),
+                REPLY_TIMEOUT_MS,
+                &mut io,
+            ),
+            Err("Scan setting USB transmit timeout")
+        );
+        assert_eq!(io.commands, [Command::set("INFO", 0)]);
+        session.begin_restore(REPLY_TIMEOUT_MS);
+        io.busy = false;
+        assert_eq!(
+            session.restore(&feedback(1501, 0.0), 1501, &mut io),
+            Ok(false)
+        );
+        assert_eq!(
+            session.restore(&feedback(1502, 0.0), 1502, &mut io),
+            Ok(true)
+        );
+        assert_eq!(io.settings[INFO], 4);
+    }
+    #[test]
     fn setup_verifies_narrow_limits_and_restores_original_settings_after_stop() {
         let mut session = Session::new();
         let mut io = Io::default();
@@ -666,7 +735,7 @@ mod tests {
         for now in 0..100 {
             let mut t = feedback(now, 0.0);
             io.feedback(&mut t, now);
-            if session.setup_step == 7 {
+            if session.setup_step == 6 {
                 t.settings[LLIM].value = -999;
             }
             if let Err(e) = session.prepare(config(10_000, 1000), &t, now, &mut io) {
@@ -686,11 +755,18 @@ mod tests {
         session
             .prepare(config(10_000, 1000), &t, 0, &mut io)
             .unwrap();
+        session
+            .prepare(config(10_000, 1000), &t, 1, &mut io)
+            .unwrap();
+        session
+            .prepare(config(10_000, 1000), &t, 2, &mut io)
+            .unwrap();
         assert_eq!(
-            session.prepare(config(10_000, 1000), &t, REPLY_TIMEOUT_MS, &mut io),
-            Err("Scan setting reply timeout")
+            session.prepare(config(10_000, 1000), &t, REPLY_TIMEOUT_MS + 2, &mut io),
+            Err("Scan SSPD reply timeout")
         );
-        assert!(!session.changed());
+        assert_eq!(session.changed, 1 << INFO);
+        assert!(!io.commands.iter().any(|c| c.tag == "SCAN"));
         let mut session = Session::new();
         prepare(&mut session, &mut io).unwrap();
         session.scan_started = true;
