@@ -10,13 +10,23 @@ enum { OFF, WAIT_ENUM, LINE_CODING, LINE_STATE, READY, FAILED };
 enum { ATTACHED, OPENED, REMOVED, CONTROL_FAILED, CONTROL_TIMEOUT };
 static uint8_t state, cdc_index, address, interface;
 static bool busy;
+static bool tx_pending;
 static uint32_t started;
 static uintptr_t generation;
 
-// Foreground-only readiness query for bounded autonomous setpoint scheduling.
-// One packet may be in flight, but no older target may wait in the software FIFO.
-bool usb_serial_tx_empty(void) {
-  return state == READY && tuh_cdc_write_available(cdc_index) == CFG_TUH_CDC_TX_BUFSIZE;
+// FIFO space alone does not establish completion: flush removes bytes from the
+// FIFO before the USB transfer finishes. Experiments require both to be idle.
+bool usb_serial_tx_idle(void) {
+  return state == READY && !tx_pending &&
+         tuh_cdc_write_available(cdc_index) == CFG_TUH_CDC_TX_BUFSIZE;
+}
+
+void tuh_cdc_tx_complete_cb(uint8_t idx) {
+  if (state != READY || idx != cdc_index) return;
+  // TinyUSB calls this BEFORE flushing the next queued packet. Manual SSPD/DPOS
+  // and STOP can queue behind an in-flight command, so retain pending until the
+  // final packet completes. A failed/stalled transfer never marks TX idle.
+  tx_pending = tuh_cdc_write_available(idx) != CFG_TUH_CDC_TX_BUFSIZE;
 }
 
 // Enqueue a complete short command, never a partial command or a blocking write.
@@ -25,6 +35,7 @@ bool usb_serial_send(const uint8_t *data, uint32_t len, bool stop) {
   if (state != READY || !data || !len || len > 32) return false;
   if (stop) tuh_cdc_write_clear(cdc_index);
   if (tuh_cdc_write_available(cdc_index) < len) return false;
+  tx_pending = true;
   if (tuh_cdc_write(cdc_index, data, len) != len) {
     tuh_cdc_write_clear(cdc_index);
     return false;
@@ -42,6 +53,7 @@ void tuh_cdc_mount_cb(uint8_t idx) {
   interface = info.desc.bInterfaceNumber;
   state = WAIT_ENUM;
   busy = false;
+  tx_pending = false;
   started = tusb_time_millis_api();
   scanner_serial_event(ATTACHED, address, interface);
 }
@@ -51,6 +63,7 @@ void tuh_cdc_umount_cb(uint8_t idx) {
   ++generation;
   state = OFF;
   busy = false;
+  tx_pending = false;
   scanner_serial_event(REMOVED, address, interface);
 }
 

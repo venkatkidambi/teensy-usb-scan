@@ -66,7 +66,7 @@ The existing USB2 path sends bounded `DPOS=<signed encoder counts>\n` commands.
 The manufacturer documents DPOS as an absolute closed-loop target, and STOP as
 the stage stop command: [XD-C manual, sections 4.1–4.3](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.1%20-%20JPL.pdf).
 
-The Teensy evaluates a sinusoidal target every 4 ms (250 Hz), with phase
+The Teensy evaluates a sinusoidal target every 20 ms (50 Hz), with phase
 `elapsed_ms * frequency_millihz / 1_000_000` modulo one cycle. A range-reduced
 polynomial computes sine without a dependency or heap use; native numerical tests
 bound its absolute sine error below 5e-14. Position is rounded directly to the
@@ -78,11 +78,13 @@ retains the last successfully commanded waveform target.
 The trajectory command encoder uses bounded integer conversion rather than
 general formatting in the waveform path.
 
-At 2 Hz this provides 125 target opportunities per cycle, up from 25. The longest
-DPOS line is 14 bytes, so 250 Hz uses at most 3,500 command bytes/s (35 kbit/s with
-8N1 framing), leaving margin against the configured 115200 baud rate. This is a
-transport budget, not a measured controller command-throughput guarantee. Higher
-rates need a hardware trace proving that USB and controller processing keep up.
+The experimental 250 Hz build caused a reported freeze after actuator motion,
+with the Teensy's main-loop LED no longer blinking. The default is restored to
+50 Hz (25 target opportunities per cycle at 2 Hz). The baud-rate calculation alone
+did not establish reliable hardware operation; neither the exact stall location
+nor a physical fix has been confirmed. Higher rates require on-device diagnosis.
+The retained duplicate suppression and direct rounding reduce redundant commands
+and quantization error but do not deliver the abandoned fivefold rate increase.
 
 `SSPD` is a speed magnitude in whole µm/s, not a signed instantaneous velocity
 command. Continuous velocity operation uses `SCAN` for direction. Streaming the
@@ -106,11 +108,21 @@ remain visibly quantized; a 1 µm amplitude spans only about 26 encoder counts
 peak to peak. Starting and finishing at center also entails a velocity transition;
 the requested finite sine has no added ramp-in/ramp-out cycles.
 
-A new narrow C query checks whether the TX software FIFO is empty before each
-experiment target. At most an in-flight packet and one waiting target can exist;
-a nonempty queue at the next target dispatch faults instead of accumulating stale
-targets. STOP clears unsent queued bytes using the existing transport operation.
-An already submitted USB packet cannot be recalled.
+The C readiness query now requires both an empty TX software FIFO and completion
+of the prior USB transfer. A FIFO can empty as soon as its bytes enter the endpoint
+buffer, before delivery. A pending-transfer flag is cleared by TinyUSB's successful
+TX callback only when no more bytes are queued; the callback runs before TinyUSB
+flushes the next packet. At a new experiment target, incomplete TX faults with
+`Xeryon previous transmit incomplete` rather than adding another target. STOP
+still clears waiting bytes and can queue behind the in-flight packet. Manual
+SSPD/DPOS ordering remains supported. USB completion is not confirmation that the
+XD-C has executed a command, and an already submitted packet cannot be recalled.
+
+The host event budget is reduced from the vendored default of 16 to four events
+per foreground pass, yielding more often to sensor, experiment, USB1/ABORT and LED
+service. This bounds event count, not individual callback or ISR duration. It is
+hardening, not proof of the reported freeze's root cause. A missed trajectory
+deadline is handled by the engine and does not intentionally stop LED service.
 
 ## Timing, sample layout and memory
 
@@ -119,7 +131,7 @@ An already submitted USB packet cannot be recalled.
 | Clock | Existing monotonic Teensy SysTick, 1 ms resolution, wrapping u32 |
 | Acquisition schedule | 50 ms / 20 Hz, latest cached raw values |
 | Pressure acquisition | Existing 50 ms attempt interval, completion latency unchanged |
-| Sinusoidal targets | 4 ms / 250 Hz, duplicate counts suppressed; 0.100–2.000 Hz wave frequency |
+| Sinusoidal targets | 20 ms / 50 Hz, duplicate counts suppressed; 0.100–2.000 Hz wave frequency |
 | Record | 40 bytes, ten explicit little-endian 32-bit words |
 | Capacity | 4,096 records |
 | Sample-buffer RAM | 163,840 bytes / 160 KiB, zero-initialized DTCM `.bss` |
@@ -155,7 +167,7 @@ the paired logging times; CSV also exports all ages and raw encoder/target value
 The foreground performs at most one logging operation per poll. Late logging
 skips expired slots rather than fabricating samples, recording missed-slot count
 and maximum lateness (these counters describe acquisition, not USB delivery).
-A sinusoidal dispatch delayed by a whole target interval (4 ms) faults, even if
+A sinusoidal dispatch delayed by a whole target interval (20 ms) faults, even if
 the target would be unchanged; smaller delays use current phase. Scheduling stays
 anchored to acquisition start, without phase drift or catch-up bursts.
 Deadline checks and the prevalidated
@@ -260,11 +272,12 @@ New modules: `src/experiment.rs`, `src/experiment_data.rs`,
 Integration changes: firmware `main.rs`, `console.rs`, `protocol.rs`, `usb_host.rs`,
 `xeryon_motion.rs`; desktop `main.rs`, `serial.rs`, `app.js`, `protocol.mjs`,
 `index.html`, `style.css`; tests/smoke, protocol docs and package versions.
-`c/usb_serial.c` / `.h` only add a read-only FIFO readiness query; existing send,
-flush, clear, enumeration, RX and STOP logic are unchanged.
+`c/usb_serial.c` / `.h` now track pending TX completion as well as FIFO readiness;
+STOP still clears unsent bytes. USB host event budgeting is configured in
+`c/tusb_config.h`.
 
 Untouched hardware modules: `pressure.rs`, `pressure_i2c.rs`, `motor.rs`,
-`plunger.rs`, `xeryon.rs`, `line.rs`, `c/scanner.c`, USB configuration, all vendored
+`plunger.rs`, `xeryon.rs`, `line.rs`, `c/scanner.c`, all vendored
 TinyUSB code, board pin/clock initialization, linker configuration, build script,
 and upload scripts. Existing manual Xeryon commands, optional speed, position
 feedback, pressure, plunger, USB identities and Dashboard controls remain intact.
@@ -281,7 +294,15 @@ Save As adds a desktop-only dialog dependency; embedded dependencies are unchang
 
 ## Validation and physical acceptance
 
-250 Hz trajectory update validation (2026-09-23): 34 firmware Rust tests, both C
+Recovery build validation: 34 firmware Rust tests, both C bridge suites,
+39 desktop/native interoperability tests and 17 JavaScript tests passed. Release
+firmware/HEX and Vite assets rebuilt successfully. The C transport mock now models
+FIFO drain separately from transfer completion, including queued manual commands,
+missing completions, STOP replacement and disconnected callbacks. No physical
+test or flash was performed; these tests do not establish the freeze's cause or
+prove its resolution. The existing TinyUSB unused-function warning remains.
+
+Earlier 250 Hz trajectory update validation (2026-09-23; subsequently withdrawn): 34 firmware Rust tests, both C
 bridge suites, 39 desktop/native interoperability tests, and 17 JavaScript tests
 passed. Firmware release build, HEX conversion and Vite production build passed.
 New coverage checks 2 Hz command cadence, nearest-count accuracy across signed
@@ -342,9 +363,9 @@ Physical validation still required:
    and existing index/reference setup with the new firmware.
 2. Begin with small travel and amplitude. Measure 0.1–2 Hz EPOS tracking, phase
    lag, extrema, final center arrival, speed/acceleration limits, and mechanical
-   limits under actual load. Compare the new 250 Hz DPOS stream against the old
-   50 Hz stream; measure encoder error and actual command delivery with a sufficiently
-   fast trace, since the retained 20 Hz dataset cannot resolve 4 ms stepping.
+   limits under actual load. First confirm LED/USB1 responsiveness with the restored
+   50 Hz build. Any future rate increase needs USB completion and encoder traces;
+   the retained 20 Hz dataset cannot characterize fast command delivery or a CPU stall.
 3. Measure pressure/EPOS feedback cadence, publication/interface latency, loop
    lateness, missed samples and 160 KiB-buffer operation on the real board.
 4. Exercise ABORT with USB1 backpressure, stale/disconnected USB2, sensor faults,

@@ -9,14 +9,30 @@ static tuh_xfer_cb_t pending;
 static uintptr_t token;
 static uint32_t available = 512, writes, flushes, clears;
 static char transmitted[33];
+static bool in_flight;
 uint32_t tuh_cdc_write_available(uint8_t idx) { assert(idx == 0); return available; }
 uint32_t tuh_cdc_write(uint8_t idx, const void *data, uint32_t len) {
   assert(idx == 0 && len <= 32 && len <= available);
   memcpy(transmitted, data, len); transmitted[len] = 0;
+  available -= len;
   ++writes; return len;
 }
-uint32_t tuh_cdc_write_flush(uint8_t idx) { assert(idx == 0); ++flushes; return 0; }
+uint32_t tuh_cdc_write_flush(uint8_t idx) {
+  assert(idx == 0);
+  ++flushes;
+  if (in_flight) return 0;
+  uint32_t count = 512 - available;
+  if (count) { available = 512; in_flight = true; }
+  return count;
+}
 bool tuh_cdc_write_clear(uint8_t idx) { assert(idx == 0); ++clears; available = 512; return true; }
+static void complete_tx(void) {
+  assert(in_flight);
+  in_flight = false;
+  // Same ordering as cdch_xfer_cb: notify before starting queued output.
+  tuh_cdc_tx_complete_cb(0);
+  tuh_cdc_write_flush(0);
+}
 
 uint32_t tusb_time_millis_api(void) { return now; }
 bool tuh_mounted(uint8_t address) { assert(address == 1); return enumerated; }
@@ -68,7 +84,7 @@ static void complete(tusb_xfer_result_t result) {
 int main(void) {
   const uint8_t speed[] = "SSPD=16777215\n";
   const uint8_t target[] = "DPOS=-33554432\n";
-  assert(!usb_serial_tx_empty());
+  assert(!usb_serial_tx_idle());
   assert(!usb_serial_send(speed, sizeof(speed)-1, false));
   usb_serial_task();
   assert(!controls && !reads);
@@ -87,30 +103,57 @@ int main(void) {
   usb_serial_task();
   complete(XFER_RESULT_SUCCESS);
   assert(events[1] == 1);
-  assert(usb_serial_tx_empty());
+  assert(usb_serial_tx_idle());
   assert(usb_serial_send(speed, sizeof(speed)-1, false));
   assert(writes == 1 && flushes == 1 && strcmp(transmitted, "SSPD=16777215\n") == 0);
+  assert(available == 512 && !usb_serial_tx_idle()); // FIFO empty, USB still busy
+  tuh_cdc_tx_complete_cb(1); // another interface cannot release our transfer
+  assert(!usb_serial_tx_idle());
   assert(usb_serial_send(target, sizeof(target)-1, false));
   assert(writes == 2 && flushes == 2 && strcmp(transmitted, "DPOS=-33554432\n") == 0);
+  complete_tx(); // SSPD done; DPOS starts only now
+  assert(!usb_serial_tx_idle());
+  complete_tx();
+  assert(usb_serial_tx_idle());
   available = sizeof(target)-2;
-  assert(!usb_serial_tx_empty());
+  assert(!usb_serial_tx_idle());
   assert(!usb_serial_send(target, sizeof(target)-1, false));
   assert(writes == 2); // No partial line on backpressure.
   assert(usb_serial_send((const uint8_t *)"STOP\n", 5, true));
   assert(clears == 1 && writes == 3 && strcmp(transmitted, "STOP\n") == 0);
+  assert(!usb_serial_tx_idle());
+  complete_tx();
+  assert(usb_serial_tx_idle());
+
+  // No completion (NAK/stall) must never advertise idle, regardless of time or
+  // an empty FIFO. STOP replaces waiting bytes, but cannot recall the packet.
+  assert(usb_serial_send(target, sizeof(target)-1, false));
+  assert(available == 512 && !usb_serial_tx_idle());
+  now += 1000;
+  usb_serial_task();
+  assert(!usb_serial_tx_idle());
+  assert(usb_serial_send(speed, sizeof(speed)-1, false));
+  assert(usb_serial_send((const uint8_t *)"STOP\n", 5, true));
+  assert(!usb_serial_tx_idle());
+  complete_tx(); // outstanding DPOS completes, queued STOP starts
+  assert(!usb_serial_tx_idle());
+  complete_tx();
+  assert(usb_serial_tx_idle());
   assert(!usb_serial_send(speed, 33, false));
   usb_serial_task();
-  assert(reads == 1);
+  assert(reads == 2);
   tuh_cdc_umount_cb(0);
   assert(!usb_serial_send(speed, sizeof(speed)-1, false));
   usb_serial_task();
-  assert(reads == 1 && events[2] == 1);
+  assert(reads == 2 && events[2] == 1);
+  tuh_cdc_tx_complete_cb(0); // late notification cannot reopen disconnected TX
+  assert(!usb_serial_tx_idle());
 
   tuh_cdc_mount_cb(0);
   usb_serial_task();
   complete(XFER_RESULT_STALLED);
   usb_serial_task();
-  assert(events[3] == 1 && reads == 1);
+  assert(events[3] == 1 && reads == 2);
   tuh_cdc_umount_cb(0);
 
   now = UINT32_MAX - 1000;
@@ -121,7 +164,7 @@ int main(void) {
   assert(events[4] == 1);
   complete(XFER_RESULT_SUCCESS); // Late completion must not reopen the port.
   usb_serial_task();
-  assert(events[1] == 1 && reads == 1);
+  assert(events[1] == 1 && reads == 2);
   tuh_cdc_umount_cb(0);
 
   tuh_cdc_mount_cb(0);

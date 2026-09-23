@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 void usb_serial_task(void);
-bool usb_serial_tx_empty(void);
+bool usb_serial_tx_idle(void);
 bool usb_serial_send(const uint8_t *data, uint32_t len, bool stop);
 
 #endif

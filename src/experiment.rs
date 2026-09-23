@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(e.outcome, "completed");
         assert_eq!(e.len, 21);
         let mut expected = vec![0]; // initial center
-        for ms in (0..1000).step_by(4) {
+        for ms in (0..1000).step_by(TRAJECTORY_MS as usize) {
             let target =
                 (100.0 * (ms as f64 * core::f64::consts::TAU / 1000.0).sin()).round() as i32;
             if expected.last() != Some(&target) {
@@ -647,7 +647,7 @@ mod tests {
         }
     }
     #[test]
-    fn fast_sine_has_125_slots_per_cycle_and_sub_count_quantization_error() {
+    fn sine_uses_restored_cadence_and_sub_count_quantization() {
         let mut records = [Record::EMPTY; 256];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
@@ -668,10 +668,10 @@ mod tests {
             e.poll(now, &t, p, &mut io);
         }
         assert_eq!(e.outcome, "completed");
-        assert_eq!(io.targets.len(), 126); // initial + 124 changed slots + final
-        for &(target, now, tracked) in &io.targets[1..125] {
+        assert_eq!(io.targets.len(), 26); // initial + 24 changed slots + final
+        for &(target, now, tracked) in &io.targets[1..25] {
             let elapsed = now - e.started_ms;
-            assert_eq!(elapsed % 4, 0);
+            assert_eq!(elapsed % TRAJECTORY_MS, 0);
             assert!(!tracked);
             let ideal = -0.5 + 10_000.0 * (elapsed as f64 * core::f64::consts::TAU / 500.0).sin();
             assert!((f64::from(target) - ideal).abs() <= 0.50001);
@@ -679,7 +679,7 @@ mod tests {
         assert!(
             io.targets
                 .windows(2)
-                .all(|w| (w[1].0 - w[0].0).abs() <= 503)
+                .all(|w| (w[1].0 - w[0].0).abs() <= 2508)
         );
         assert_eq!(io.targets.last(), Some(&(-1, e.started_ms + 500, true)));
     }
@@ -714,17 +714,17 @@ mod tests {
     }
     #[test]
     fn sine_jitter_uses_current_phase_without_drift_and_stalls_fault() {
-        for delay in [3, 4] {
+        for delay in [TRAJECTORY_MS - 1, TRAJECTORY_MS] {
             let mut records = [Record::EMPTY; 256];
             let mut e = Engine::new(&mut records);
             let mut io = Io::default();
             start(&mut e, sinusoidal(), 0, &mut io);
             for slot in 1..=10 {
-                let elapsed = slot * 4 + delay;
+                let elapsed = slot * TRAJECTORY_MS + delay;
                 let now = e.started_ms + elapsed;
                 let (t, p) = feedback(now, e.target, true);
                 e.poll(now, &t, p, &mut io);
-                if delay == 4 {
+                if delay == TRAJECTORY_MS {
                     assert_eq!(e.reason, "Trajectory deadline missed");
                     assert_eq!(io.targets.len(), 1); // no catch-up burst
                     assert_eq!(io.stops, 1);
@@ -796,8 +796,8 @@ mod tests {
                 }
                 5 => {
                     io.fail = true;
-                    (t, p) = feedback(6, e.target, true);
-                    6 // first changed target, on time, fails at the transport
+                    (t, p) = feedback(22, e.target, true);
+                    22 // first changed target, on time, fails at the transport
                 }
                 6 => 42,
                 _ => {

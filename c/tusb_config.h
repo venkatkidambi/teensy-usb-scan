@@ -10,6 +10,9 @@
 #define CFG_TUH_DEVICE_MAX 1
 #define CFG_TUH_HUB 0
 #define CFG_TUH_CDC 1
+// Return to pressure, trajectory, USB1/ABORT and LED service after a small batch.
+// The vendored default is 16; this bounds event count, not callback duration.
+#define CFG_TUH_TASK_EVENTS_PER_RUN 4
 #define CFG_TUH_CDC_RX_BUFSIZE 1024
 #define CFG_TUH_CDC_TX_BUFSIZE 512
 #define CFG_TUH_ENUMERATION_BUFSIZE 1024

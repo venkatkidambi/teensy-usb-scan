@@ -11,7 +11,7 @@ failure leaves the dataset available for another attempt. Reconnecting
 recovers an active run or downloads its retained data without sending a heartbeat.
 See [the experiment design and limits](../EXPERIMENTS.md).
 
-Sinusoidal motion evaluates absolute position targets at 250 Hz (4 ms), suppressing
+Sinusoidal motion evaluates absolute position targets at 50 Hz (20 ms), suppressing
 duplicate encoder counts; recording remains 20 Hz. Position resolution is 0.078 µm.
 The controller's speed, acceleration and tuning still determine physical tracking.
 

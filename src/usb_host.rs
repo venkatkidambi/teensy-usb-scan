@@ -93,7 +93,7 @@ fn reset_telemetry() {
 }
 
 unsafe extern "C" {
-    fn usb_serial_tx_empty() -> bool;
+    fn usb_serial_tx_idle() -> bool;
     fn usb_serial_send(data: *const u8, len: u32, stop: bool) -> bool;
     fn scanner_init() -> bool;
     fn scanner_task();
@@ -208,9 +208,9 @@ pub struct ExperimentActuator;
 impl crate::experiment::Actuator for ExperimentActuator {
     fn target(&mut self, target: i32, now: u32, track: bool) -> Result<(), &'static str> {
         // SAFETY: foreground-only query into the existing C transport. Fault
-        // instead of growing a backlog of trajectory targets during USB stalls.
-        if !unsafe { usb_serial_tx_empty() } {
-            return Err("Xeryon transmit backlog");
+        // instead of queuing a target behind an unfinished USB transfer.
+        if !unsafe { usb_serial_tx_idle() } {
+            return Err("Xeryon previous transmit incomplete");
         }
         // Bounded integer encoding avoids core::fmt in the waveform path.
         let mut bytes = [0u8; 20];
