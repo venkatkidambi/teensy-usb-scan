@@ -194,6 +194,25 @@ function render(){
   text('plunger-state',!connected?'Waiting for connection':!hello?.motion?'Firmware does not support plunger control':!plunger?'Waiting for feedback':performance.now()-received>=3000?'Stale feedback':plunger.running?`Drive ${plunger.up?'up':'down'} enabled · PWM ${plunger.speed}`:'Stopped');
   const limits=plunger?.limits;
   text('plunger-limits-state',!connected?'Connect to read active position limits.':!hello?.plunger_limits?'Upload current firmware to enable position limits.':limits?`Active limits: ${limits.min}%–${limits.max}% · changes apply while stopped.`:'Waiting for active position limits.');
+  const gauge=$('plunger-gauge'),potPercent=plunger?.pot==null?null:100*plunger.pot/4095;
+  const potFresh=connected&&performance.now()-received<3000;
+  const outside=potPercent!=null&&limits&&(potPercent<limits.min||potPercent>limits.max);
+  gauge.classList.toggle('outside',!!outside);gauge.classList.toggle('stale',!potFresh);
+  for(const id of ['plunger-gauge-window','plunger-gauge-min','plunger-gauge-max'])$(id).hidden=!limits;
+  if(limits){
+    $('plunger-gauge-window').style.bottom=`${limits.min}%`;
+    $('plunger-gauge-window').style.height=`${limits.max-limits.min}%`;
+    for(const key of ['min','max']){
+      $(`plunger-gauge-${key}`).style.bottom=`${limits[key]}%`;
+      text(`plunger-gauge-${key}`,`${key==='min'?'Min':'Max'} ${limits[key]}%`);
+    }
+  }
+  $('plunger-gauge-marker').hidden=potPercent==null;
+  if(potPercent!=null)$('plunger-gauge-marker').style.bottom=`${potPercent}%`;
+  const gaugeStatus=potPercent==null?'No feedback':!potFresh?'Stale feedback':!limits?'Limits unavailable':outside?'Outside limits':'Within limits';
+  text('plunger-gauge-value',potPercent==null?'—':`${potPercent.toFixed(1)}%`);
+  text('plunger-gauge-status',gaugeStatus);
+  gauge.setAttribute('aria-label',`Potentiometer ${potPercent==null?'unavailable':`${potPercent.toFixed(1)} percent`}. ${gaugeStatus}.${limits?` Active limits ${limits.min} to ${limits.max} percent.`:''}`);
   text('plunger-pot',plunger?.pot!=null?`Potentiometer ${plunger.pot} / 4095 (${(100*plunger.pot/4095).toFixed(1)}%)`:'Potentiometer —');
   controls();
   text('board-state',demo?'Demo':connected?stalled?'Stalled':'Online':'Offline');
