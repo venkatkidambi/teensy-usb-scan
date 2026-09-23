@@ -4,7 +4,8 @@ pub const RECORD_FIELDS: usize = 10;
 pub const RECORD_BYTES: usize = RECORD_FIELDS * 4;
 pub const CHUNK_RECORDS: usize = 16;
 pub const SAMPLE_MS: u32 = 50;
-pub const TRAJECTORY_MS: u32 = 20;
+// 250 Hz: up to 3,500 command bytes/s (14-byte DPOS), leaving transport headroom.
+pub const TRAJECTORY_MS: u32 = 4;
 pub const MOVE_TIMEOUT_MS: u32 = 10_000;
 pub const MAX_DURATION_MS: u32 = (CAPACITY as u32 - 1) * SAMPLE_MS;
 pub const MIN_POSITION: i32 = -(1 << 25);

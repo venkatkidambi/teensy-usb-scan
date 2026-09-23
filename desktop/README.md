@@ -11,6 +11,10 @@ failure leaves the dataset available for another attempt. Reconnecting
 recovers an active run or downloads its retained data without sending a heartbeat.
 See [the experiment design and limits](../EXPERIMENTS.md).
 
+Sinusoidal motion evaluates absolute position targets at 250 Hz (4 ms), suppressing
+duplicate encoder counts; recording remains 20 Hz. Position resolution is 0.078 µm.
+The controller's speed, acceleration and tuning still determine physical tracking.
+
 Tauri 2 + plain HTML/CSS/JavaScript, with serial IO in Rust. The release app
 embeds its UI and needs no Python, Node, browser tab, or HTTP server.
 

@@ -66,18 +66,45 @@ The existing USB2 path sends bounded `DPOS=<signed encoder counts>\n` commands.
 The manufacturer documents DPOS as an absolute closed-loop target, and STOP as
 the stage stop command: [XD-C manual, sections 4.1–4.3](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.1%20-%20JPL.pdf).
 
-The Teensy produces a new sinusoidal target every 20 ms (50 Hz), with phase
+The Teensy evaluates a sinusoidal target every 4 ms (250 Hz), with phase
 `elapsed_ms * frequency_millihz / 1_000_000` modulo one cycle. A range-reduced
 polynomial computes sine without a dependency or heap use; native numerical tests
-bound its absolute sine error below 7e-10. Position quantization is 78 nm/count.
+bound its absolute sine error below 5e-14. Position is rounded directly to the
+nearest 78 nm encoder count, without intermediate truncation to nanometers.
+Unchanged encoder targets are suppressed, including the initial center at t=0;
+the final center is always sent and its arrival confirmed. This avoids redundant
+point-to-point commands near extrema and for small amplitudes. A failed send
+retains the last successfully commanded waveform target.
 The trajectory command encoder uses bounded integer conversion rather than
 general formatting in the waveform path.
+
+At 2 Hz this provides 125 target opportunities per cycle, up from 25. The longest
+DPOS line is 14 bytes, so 250 Hz uses at most 3,500 command bytes/s (35 kbit/s with
+8N1 framing), leaving margin against the configured 115200 baud rate. This is a
+transport budget, not a measured controller command-throughput guarantee. Higher
+rates need a hardware trace proving that USB and controller processing keep up.
+
+`SSPD` is a speed magnitude in whole µm/s, not a signed instantaneous velocity
+command. Continuous velocity operation uses `SCAN` for direction. Streaming the
+cosine derivative that way would lose the absolute trajectory's position bound:
+velocity error integrates into position drift, and the existing asynchronous
+feedback is not a characterized high-rate outer position loop. At small amplitudes,
+whole-µm/s velocity quantization is also significant (1 µm amplitude at 0.1 Hz
+requires a peak speed of only 0.628 µm/s). Therefore the implemented strategy
+keeps absolute closed-loop position targets. Per-target SSPD changes additionally
+cost a second command and are not documented as synchronized velocity feedforward.
 
 No SCAN, open-loop MOVE, Windows waveform commands, SSPD updates, tuning, INFO,
 or stored controller settings are used by experiments. The current controller
 speed, acceleration and tuning determine actual tracking. This is sampled target
 tracking through the existing point-to-point interface, not a claim of exact
 continuous sinusoidal physical motion. Manual optional SSPD behavior is unchanged.
+For amplitude A in µm and frequency f in Hz, required peak speed is 2πfA µm/s
+and peak acceleration is (2πf)²A µm/s². Check these against the stage's capability
+and configured speed before a trial. Even with faster updates, tiny amplitudes
+remain visibly quantized; a 1 µm amplitude spans only about 26 encoder counts
+peak to peak. Starting and finishing at center also entails a velocity transition;
+the requested finite sine has no added ramp-in/ramp-out cycles.
 
 A new narrow C query checks whether the TX software FIFO is empty before each
 experiment target. At most an in-flight packet and one waiting target can exist;
@@ -92,7 +119,7 @@ An already submitted USB packet cannot be recalled.
 | Clock | Existing monotonic Teensy SysTick, 1 ms resolution, wrapping u32 |
 | Acquisition schedule | 50 ms / 20 Hz, latest cached raw values |
 | Pressure acquisition | Existing 50 ms attempt interval, completion latency unchanged |
-| Sinusoidal targets | 20 ms / 50 Hz, 0.100–2.000 Hz wave frequency |
+| Sinusoidal targets | 4 ms / 250 Hz, duplicate counts suppressed; 0.100–2.000 Hz wave frequency |
 | Record | 40 bytes, ten explicit little-endian 32-bit words |
 | Capacity | 4,096 records |
 | Sample-buffer RAM | 163,840 bytes / 160 KiB, zero-initialized DTCM `.bss` |
@@ -127,8 +154,11 @@ the paired logging times; CSV also exports all ages and raw encoder/target value
 
 The foreground performs at most one logging operation per poll. Late logging
 skips expired slots rather than fabricating samples, recording missed-slot count
-and maximum lateness. A sinusoidal dispatch delayed by a whole target interval
-faults; smaller delays use current phase. Deadline checks and the prevalidated
+and maximum lateness (these counters describe acquisition, not USB delivery).
+A sinusoidal dispatch delayed by a whole target interval (4 ms) faults, even if
+the target would be unchanged; smaller delays use current phase. Scheduling stays
+anchored to acquisition start, without phase drift or catch-up bursts.
+Deadline checks and the prevalidated
 sample budget bound storage, with a defensive invariant check before every write.
 This is a bounded cooperative loop, not a measured hard-real-time guarantee.
 
@@ -251,6 +281,15 @@ Save As adds a desktop-only dialog dependency; embedded dependencies are unchang
 
 ## Validation and physical acceptance
 
+250 Hz trajectory update validation (2026-09-23): 34 firmware Rust tests, both C
+bridge suites, 39 desktop/native interoperability tests, and 17 JavaScript tests
+passed. Firmware release build, HEX conversion and Vite production build passed.
+New coverage checks 2 Hz command cadence, nearest-count accuracy across signed
+travel, duplicate suppression, final-center confirmation, clock rollover, jitter,
+deadline faults and failed sends. The existing TinyUSB unused-function warning
+remains. No firmware was flashed and physical smoothness has not been measured.
+The measurements and artifact hash below describe the earlier 2026-09-22 build.
+
 Native engine tests cover both trajectories, signed increments, feedback-driven
 holds, clock rollover, full capacity reservation, invalid configuration, missed
 samples, transport faults, pressure/USB2 faults, ABORT, manual heartbeat policy,
@@ -303,7 +342,9 @@ Physical validation still required:
    and existing index/reference setup with the new firmware.
 2. Begin with small travel and amplitude. Measure 0.1–2 Hz EPOS tracking, phase
    lag, extrema, final center arrival, speed/acceleration limits, and mechanical
-   limits under actual load. 50 Hz DPOS updates are an implementation choice to test.
+   limits under actual load. Compare the new 250 Hz DPOS stream against the old
+   50 Hz stream; measure encoder error and actual command delivery with a sufficiently
+   fast trace, since the retained 20 Hz dataset cannot resolve 4 ms stepping.
 3. Measure pressure/EPOS feedback cadence, publication/interface latency, loop
    lateness, missed samples and 160 KiB-buffer operation on the real board.
 4. Exercise ABORT with USB1 backpressure, stale/disconnected USB2, sensor faults,

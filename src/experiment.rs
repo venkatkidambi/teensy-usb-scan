@@ -336,11 +336,18 @@ impl<'a> Engine<'a> {
                         Err("Trajectory deadline missed")
                     } else {
                         self.next_target = (elapsed / TRAJECTORY_MS + 1) * TRAJECTORY_MS;
-                        let phase = (u64::from(elapsed) * u64::from(frequency_mhz)) % 1_000_000;
-                        let nm = center_nm
-                            + (f64::from(amplitude_nm) * sine(phase as f64 / 1_000_000.0)) as i64;
-                        self.target = counts(nm).unwrap();
-                        io.target(self.target, now, false).map(|_| false)
+                        let target = sine_target(center_nm, amplitude_nm, frequency_mhz, elapsed);
+                        // Especially near extrema / at small amplitudes, multiple
+                        // slots round to the same encoder count. Keep holding it
+                        // without reissuing the controller's point-to-point move.
+                        if target == self.target {
+                            Ok(false)
+                        } else {
+                            io.target(target, now, false).map(|_| {
+                                self.target = target;
+                                false
+                            })
+                        }
                     }
                 } else {
                     Ok(false)
@@ -412,7 +419,16 @@ impl<'a> Engine<'a> {
     }
 }
 
-/// Range-reduced Taylor polynomial, |error| < 7e-10 over a cycle; no libm/heap.
+/// Quantize once, directly to the nearest encoder count (ties away from zero).
+/// Configuration validation bounds the entire trajectory to the encoder range.
+fn sine_target(center_nm: i64, amplitude_nm: u32, frequency_mhz: u32, elapsed: u32) -> i32 {
+    let phase = (u64::from(elapsed) * u64::from(frequency_mhz)) % 1_000_000;
+    let wave = sine(phase as f64 / 1_000_000.0).clamp(-1.0, 1.0);
+    let position = (center_nm as f64 + f64::from(amplitude_nm) * wave) / 78.0;
+    (position + if position < 0.0 { -0.5 } else { 0.5 }) as i32
+}
+
+/// Range-reduced Taylor polynomial, |error| < 5e-14 over a cycle; no libm/heap.
 fn sine(turns: f64) -> f64 {
     let mut x = turns * core::f64::consts::TAU;
     if x > core::f64::consts::PI {
@@ -429,7 +445,10 @@ fn sine(turns: f64) -> f64 {
         + xx * (-1.0 / 6.0
             + xx * (1.0 / 120.0
                 + xx * (-1.0 / 5040.0
-                    + xx * (1.0 / 362880.0 + xx * (-1.0 / 39916800.0 + xx / 6227020800.0))))))
+                    + xx * (1.0 / 362880.0
+                        + xx * (-1.0 / 39916800.0
+                            + xx * (1.0 / 6227020800.0
+                                + xx * (-1.0 / 1307674368000.0 + xx / 355687428096000.0))))))))
 }
 
 #[cfg(test)]
@@ -610,13 +629,141 @@ mod tests {
         }
         assert_eq!(e.outcome, "completed");
         assert_eq!(e.len, 21);
-        assert_eq!(io.targets.len(), 52); // initial, 50 waveform targets, final center
+        let mut expected = vec![0]; // initial center
+        for ms in (0..1000).step_by(4) {
+            let target =
+                (100.0 * (ms as f64 * core::f64::consts::TAU / 1000.0).sin()).round() as i32;
+            if expected.last() != Some(&target) {
+                expected.push(target);
+            }
+        }
+        expected.push(0); // final center is always sent for arrival confirmation
+        assert_eq!(io.targets.iter().map(|v| v.0).collect::<Vec<_>>(), expected);
         assert_eq!(e.samples[20].elapsed_ms, 1000);
         assert_eq!(io.stops, 1);
         for i in 0..10000 {
             let phase = i as f64 / 10000.0;
-            assert!((sine(phase) - (phase * core::f64::consts::TAU).sin()).abs() < 7e-10);
+            assert!((sine(phase) - (phase * core::f64::consts::TAU).sin()).abs() < 5e-14);
         }
+    }
+    #[test]
+    fn fast_sine_has_125_slots_per_cycle_and_sub_count_quantization_error() {
+        let mut records = [Record::EMPTY; 256];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        start(
+            &mut e,
+            ExperimentConfig::Sinusoidal {
+                center_nm: -39,
+                amplitude_nm: 780_000,
+                frequency_mhz: 2000,
+                cycles: 1,
+            },
+            0,
+            &mut io,
+        );
+        for elapsed in 1..=501 {
+            let now = e.started_ms + elapsed;
+            let (t, p) = feedback(now, e.target, true);
+            e.poll(now, &t, p, &mut io);
+        }
+        assert_eq!(e.outcome, "completed");
+        assert_eq!(io.targets.len(), 126); // initial + 124 changed slots + final
+        for &(target, now, tracked) in &io.targets[1..125] {
+            let elapsed = now - e.started_ms;
+            assert_eq!(elapsed % 4, 0);
+            assert!(!tracked);
+            let ideal = -0.5 + 10_000.0 * (elapsed as f64 * core::f64::consts::TAU / 500.0).sin();
+            assert!((f64::from(target) - ideal).abs() <= 0.50001);
+        }
+        assert!(
+            io.targets
+                .windows(2)
+                .all(|w| (w[1].0 - w[0].0).abs() <= 503)
+        );
+        assert_eq!(io.targets.last(), Some(&(-1, e.started_ms + 500, true)));
+    }
+    #[test]
+    fn sine_quantization_is_precise_across_valid_travel_and_small_amplitudes() {
+        for (center, amplitude) in [
+            (0, 78),
+            (-39, 79),
+            (39, 79),
+            (0, 2_617_245_618),
+            (i64::from(MAX_POSITION) * 78 - 78 + 38, 78),
+            (i64::from(MIN_POSITION) * 78 + 78 - 38, 78),
+        ] {
+            ExperimentConfig::Sinusoidal {
+                center_nm: center,
+                amplitude_nm: amplitude,
+                frequency_mhz: 100,
+                cycles: 1,
+            }
+            .validate()
+            .unwrap();
+            for elapsed in 0..10_000 {
+                let target = sine_target(center, amplitude, 100, elapsed);
+                let ideal = (center as f64
+                    + f64::from(amplitude)
+                        * (elapsed as f64 * core::f64::consts::TAU / 10_000.0).sin())
+                    / 78.0;
+                assert!((f64::from(target) - ideal).abs() <= 0.50001);
+                assert!((MIN_POSITION..=MAX_POSITION).contains(&target));
+            }
+        }
+    }
+    #[test]
+    fn sine_jitter_uses_current_phase_without_drift_and_stalls_fault() {
+        for delay in [3, 4] {
+            let mut records = [Record::EMPTY; 256];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            start(&mut e, sinusoidal(), 0, &mut io);
+            for slot in 1..=10 {
+                let elapsed = slot * 4 + delay;
+                let now = e.started_ms + elapsed;
+                let (t, p) = feedback(now, e.target, true);
+                e.poll(now, &t, p, &mut io);
+                if delay == 4 {
+                    assert_eq!(e.reason, "Trajectory deadline missed");
+                    assert_eq!(io.targets.len(), 1); // no catch-up burst
+                    assert_eq!(io.stops, 1);
+                    break;
+                }
+                assert_eq!(e.state, State::Running);
+                let ideal = 100.0 * (elapsed as f64 * core::f64::consts::TAU / 1000.0).sin();
+                assert!((f64::from(e.target) - ideal).abs() <= 0.50001);
+            }
+        }
+    }
+    #[test]
+    fn unchanged_sine_targets_are_suppressed_but_final_center_is_confirmed() {
+        let mut records = [Record::EMPTY; 512];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        start(
+            &mut e,
+            ExperimentConfig::Sinusoidal {
+                center_nm: 0,
+                amplitude_nm: 78,
+                frequency_mhz: 100,
+                cycles: 1,
+            },
+            0,
+            &mut io,
+        );
+        for elapsed in 1..=10_001 {
+            let now = e.started_ms + elapsed;
+            let (t, p) = feedback(now, e.target, true);
+            e.poll(now, &t, p, &mut io);
+        }
+        assert_eq!(e.outcome, "completed");
+        assert_eq!(
+            io.targets.iter().map(|v| v.0).collect::<Vec<_>>(),
+            [0, 1, 0, -1, 0, 0]
+        );
+        assert!(io.targets.last().unwrap().2);
+        assert_eq!(e.len, 201); // acquisition remains 20 Hz
     }
     #[test]
     fn faults_abort_and_deadline_preserve_partial_data() {
@@ -649,7 +796,8 @@ mod tests {
                 }
                 5 => {
                     io.fail = true;
-                    42
+                    (t, p) = feedback(6, e.target, true);
+                    6 // first changed target, on time, fails at the transport
                 }
                 6 => 42,
                 _ => {
@@ -661,6 +809,10 @@ mod tests {
             assert!(e.data_ready(), "{condition}");
             assert_eq!(e.len, 1);
             assert_eq!(io.stops, 1);
+            if condition == 5 {
+                assert_eq!(e.reason, "transmit failure");
+                assert_eq!(e.target, 0); // retain the last successfully sent target
+            }
             assert_eq!(
                 e.outcome,
                 if condition == 4 { "aborted" } else { "faulted" }
