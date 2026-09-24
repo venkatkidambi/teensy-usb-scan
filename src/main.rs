@@ -12,7 +12,6 @@ mod plunger;
 mod pressure;
 mod pressure_i2c;
 mod protocol;
-mod sine_control;
 mod usb_host;
 mod xeryon;
 mod xeryon_motion;
@@ -91,7 +90,6 @@ fn main() -> ! {
             experiment::State::MoveToStart => 2,
             experiment::State::Armed => 3,
             experiment::State::Running => 4,
-            experiment::State::Restoring => 5,
             _ => 1,
         });
         let now = usb_host::millis();

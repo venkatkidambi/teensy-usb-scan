@@ -7,18 +7,11 @@ builds optional CSV exports. See [EXPERIMENTS.md](EXPERIMENTS.md) for the state
 machine, limits, waveform strategy, safety policy, protocol, and hardware acceptance
 procedure. PC disconnect does not stop an autonomous run if the Teensy stays powered.
 
-Current sinusoidal mode uses **100 Hz SSPD/SCAN velocity updates with bounded
-encoder correction**, advertised by the `sine_velocity` firmware capability.
-It verifies temporary controller travel limits and restores settings on exit.
-This experimental mode still needs hardware validation; the earlier reported
-Teensy freeze is not diagnosed by the software tests.
-
-Sinusoidal setup now writes and verifies the nominal starting SSPD before enabling
-SCAN. The first control tick uses that verified speed; position correction begins
-at the next 10 ms tick. For 5 µm at 1 Hz, the startup readback must be `SSPD=31`.
-This closes a startup verification gap; the observed backward scan response still
-needs hardware diagnosis. Original speed and travel limits are restored through
-the existing cleanup checks.
+Sinusoidal mode sends **100 Hz DPOS position commands**, advertised by the
+`sine_position` firmware capability. Each 10 ms target follows the configured
+sine wave using elapsed Teensy time, rounded to the nearest 0.078 µm encoder count.
+Recording remains 20 Hz. The run starts and finishes at center; controller speed,
+telemetry and travel-limit settings are left as configured.
 
 If **Start** makes USB disappear, flash the current firmware and watch the orange
 pin-13 LED. Fatal diagnostics repeat **one long pulse**, a group of short pulses
@@ -32,38 +25,19 @@ for the fault, a pause, then a group for the experiment phase:
 | 5 | Foreground loop stalled for one second while SysTick still runs |
 
 Phase pulses are **1** dashboard, **2** Start validation / initial positioning,
-**3** sinusoidal settings setup, **4** waveform / final positioning, **5** cleanup.
+**3** armed, **4** waveform / final positioning, **5** cleanup.
 Report both counts. An LED that remains dark does not prove a memory leak or a
 power fault: loss of power, disabled interrupts, or a fault that prevents the
 handler from running still need hardware diagnosis. These diagnostics use an
 independent 1 KiB emergency stack, disable the wired plunger through GPIO, and
 halt without restarting the experiment. USB STOP delivery to the independently
 powered Xeryon is unavailable in a fatal handler. Normal experiment faults still
-use the existing STOP and settings-restoration path.
+use the existing STOP path.
 
 With a debugger, `FATAL_REPORT` contains the fault kind, phase, original stack
 pointer, exception number, CFSR/HFSR/MMFAR/BFAR registers and panic source line.
 It is not retained across power cycles. This bare-metal firmware does not include
 Teensyduino's Arduino `CrashReport` API.
-
-A normal heartbeat with `Scan SSPD reply timeout` is a handled setup failure:
-USB transmission completed but no fresh speed-setting reply was decoded.
-The firmware now pauses after each setup transfer (100 ms after INFO=0, 20 ms
-otherwise) and retries unanswered reads up to three transmissions within the
-existing deadline. This timing change needs hardware verification; it does not
-bypass speed or travel-limit readback checks.
-
-If it persists, update firmware and desktop, reproduce once, then click
-**Read snapshot** on the Dashboard after results download. Copy the `Hardware`
-log's `xeryon_setup` object. It retains the last setup query, attempt count,
-total received bytes, decoded/malformed record counts, and the first 64 raw
-received bytes as hexadecimal (`rx_prefix_hex`), across retries and cleanup.
-Zero `rx_bytes` means no bytes reached the receive callback during that query;
-nonzero `malformed` means the decoder rejected input. Valid records without an
-SSPD reply can instead indicate the controller is still streaming other tags.
-The capture resets on the next experiment. It uses fixed storage and does no
-logging or text formatting during setup or the waveform. This is diagnostic
-instrumentation, not a confirmed fix for the hardware timeout.
 
 Bare-metal Rust (`no_std`, `no_main`) plus the TinyUSB 0.21.0 C host stack.
 Cargo builds everything; no Arduino, PlatformIO, or operating system is used.

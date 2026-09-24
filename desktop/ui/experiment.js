@@ -11,7 +11,7 @@ function startBlocked({session,connected,hello,experimentUnresolved}) {
   if(session.experimentOwned)return 'An experiment owns the hardware. Wait for its results or press ABORT.';
   if(experimentUnresolved)return 'Reconnect to recover the previous experiment before starting another.';
   if(!hello?.experiments)return 'Update the Teensy firmware to enable experiments.';
-  if(mode==='sinusoidal'&&!hello?.sine_velocity)return 'Update the Teensy firmware to enable sinusoidal speed control.';
+  if(mode==='sinusoidal'&&!hello?.sine_position)return 'Update the Teensy firmware to enable sinusoidal position control.';
   if(session.pending)return 'Waiting for the current Teensy request to finish…';
   return '';
 }
@@ -31,7 +31,7 @@ export function experimentControls() {
   $('experiment-start-button').title=blocked;
   $('experiment-start-reason').textContent=blocked;
   $('experiment-start-reason').hidden=!blocked;
-  $('experiment-motion-detail').textContent=mode==='sinusoidal'?(hello?.sine_velocity?'100 Hz speed control with encoder correction. Controller travel limits are temporarily narrowed and settings restoration attempted after stopping. Experimental: the previous Teensy freeze remains unresolved.':'Sinusoidal speed control requires firmware with the sine_velocity capability.'):'Steps use confirmed position arrival.';
+  $('experiment-motion-detail').textContent=mode==='sinusoidal'?'100 Hz sine position commands. Starts and finishes at the center position.':'Steps use confirmed position arrival.';
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
   $('experiment-save').disabled=saving||owned||!dataset;
@@ -64,12 +64,7 @@ export function experimentMessage(message) {
     const m=dataset.metadata;
     if(mode!==m.config.kind)tab(m.config.kind);
     $('experiment-results').hidden=false;
-    $('experiment-result-summary').textContent=`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.reason} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s · CRC verified · missed samples ${m.missed_samples} · max logging lateness ${m.max_lateness_ms} ms${m.control==='sspd_scan_p'?` · 100 Hz speed control · ${m.control_updates} updates · max control lateness ${m.max_control_lateness_ms} ms`:''}${m.settings_restore_sent===false?' · Controller settings restoration incomplete; check limits and speed before further motion':''}${m.stop_queued?'':' · STOP could not be queued'}`;
-    if(m.scan_fault){
-      const f=m.scan_fault;
-      $('experiment-result-summary').textContent+=` · Fault at ${f.elapsed_ms} ms: position ${f.epos_um.toFixed(3)} µm, reference ${f.reference_um.toFixed(3)} µm, error ${f.error_um.toFixed(3)} µm (allowed ±${f.guard_um.toFixed(3)} µm), travel ${(f.low_counts*.078).toFixed(3)} to ${(f.high_counts*.078).toFixed(3)} µm, encoder age ${f.epos_age_ms} ms`;
-    }
-    if(m.settings_restore_error)$('experiment-result-summary').textContent+=` · Cleanup: ${m.settings_restore_error}`;
+    $('experiment-result-summary').textContent=`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.reason} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s · CRC verified · missed samples ${m.missed_samples} · max logging lateness ${m.max_lateness_ms} ms${m.stop_queued?'':' · STOP could not be queued'}`;
     draw();
   }
   experimentControls();

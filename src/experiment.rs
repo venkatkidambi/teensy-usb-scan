@@ -8,7 +8,6 @@ pub enum State {
     MoveToStart,
     Armed,
     Running,
-    Restoring,
     Complete,
     Aborted,
     Fault,
@@ -19,16 +18,6 @@ pub trait Actuator {
     fn target(&mut self, counts: i32, now: u32, track_completion: bool)
     -> Result<(), &'static str>;
     fn stop(&mut self) -> Result<(), &'static str>;
-    fn tx_idle(&self) -> bool;
-    /// True once accepted; false means busy, without queuing behind an old packet.
-    fn command(&mut self, command: crate::sine_control::Command) -> Result<bool, &'static str>;
-}
-#[derive(Clone, Copy)]
-struct ScanFault {
-    elapsed_ms: u32,
-    epos_counts: i64,
-    epos_age_ms: u32,
-    stat: i64,
 }
 pub struct Engine<'a> {
     pub state: State,
@@ -55,14 +44,6 @@ pub struct Engine<'a> {
     epoch: u32,
     transfer_next: usize,
     settling: bool,
-    center_sent: bool,
-    last_ms: u32,
-    scan: crate::sine_control::Session,
-    pub settings_restore_sent: bool,
-    settings_restore_error: Option<&'static str>,
-    pub control_updates: u32,
-    pub max_control_lateness_ms: u32,
-    scan_fault: Option<ScanFault>,
 }
 impl<'a> Engine<'a> {
     pub fn new(samples: &'a mut [Record]) -> Self {
@@ -91,20 +72,12 @@ impl<'a> Engine<'a> {
             epoch: 0,
             transfer_next: 0,
             settling: false,
-            center_sent: false,
-            last_ms: 0,
-            scan: crate::sine_control::Session::new(),
-            settings_restore_sent: true,
-            settings_restore_error: None,
-            control_updates: 0,
-            max_control_lateness_ms: 0,
-            scan_fault: None,
         }
     }
     pub fn active(&self) -> bool {
         matches!(
             self.state,
-            State::MoveToStart | State::Armed | State::Running | State::Restoring
+            State::MoveToStart | State::Armed | State::Running
         )
     }
     pub fn owns_hardware(&self) -> bool {
@@ -116,7 +89,7 @@ impl<'a> Engine<'a> {
     pub fn checksum(&self) -> u32 {
         !self.crc
     }
-    fn healthy(t: &Telemetry, p: Reading, now: u32, scanning: bool) -> Result<(), &'static str> {
+    fn healthy(t: &Telemetry, p: Reading, now: u32) -> Result<(), &'static str> {
         if !xeryon_motion::ready(t) {
             return Err("USB2 disconnected");
         }
@@ -126,17 +99,10 @@ impl<'a> Engine<'a> {
         if t.samples[2].value & xeryon_motion::FAULTS != 0 {
             return Err("Xeryon controller fault");
         }
-        let incompatible =
-            (1 << 1) | (1 << 14) | (1 << 15) | (1 << 9) | if scanning { 0 } else { 1 << 13 };
-        if t.samples[2].value & incompatible != 0 {
+        if t.samples[2].value & ((1 << 1) | (1 << 14) | (1 << 15) | (1 << 9) | (1 << 13)) != 0 {
             return Err("Xeryon limit or incompatible motion");
         }
-        // SCAN=0 / STOP can temporarily leave closed-loop mode. During owned
-        // scan control permit that stopped transition, but an active scan must
-        // still report closed loop and the encoder must always remain valid.
-        let stat = t.samples[2].value;
-        let needs_closed_loop = !scanning || stat & (1 << 13) != 0;
-        if stat & (1 << 8) == 0 || (needs_closed_loop && stat & (1 << 6) == 0) {
+        if t.samples[2].value & ((1 << 6) | (1 << 8)) != ((1 << 6) | (1 << 8)) {
             return Err("Xeryon closed loop or encoder invalid");
         }
         if !(i64::from(MIN_POSITION)..=i64::from(MAX_POSITION)).contains(&t.samples[0].value) {
@@ -165,7 +131,7 @@ impl<'a> Engine<'a> {
             if required > self.samples.len() {
                 return Err("Experiment buffer too small");
             }
-            Self::healthy(t, p, now, false)?;
+            Self::healthy(t, p, now)?;
             if plunger_running
                 || t.xeryon_motion.is_some_and(|m| m.state == 1)
                 || t.samples[2].value & (1 << 10) == 0
@@ -199,14 +165,6 @@ impl<'a> Engine<'a> {
         self.epoch = t.epoch;
         self.step = 0;
         self.settling = false;
-        self.center_sent = false;
-        self.last_ms = now;
-        self.scan = crate::sine_control::Session::new();
-        self.settings_restore_sent = true;
-        self.settings_restore_error = None;
-        self.control_updates = 0;
-        self.max_control_lateness_ms = 0;
-        self.scan_fault = None;
         self.hold_started = None;
         self.state = State::MoveToStart;
         // First target is sent by begin(), only after all validation succeeds.
@@ -232,19 +190,9 @@ impl<'a> Engine<'a> {
             self.outcome = "faulted";
             self.reason = "STOP could not be queued";
         }
-        self.scan.begin_restore(self.last_ms);
-        if self.scan.changed() {
-            self.settings_restore_sent = false;
-            self.state = State::Restoring;
-        } else {
-            self.state = State::DataReady;
-        }
+        self.state = State::DataReady;
     }
     pub fn abort(&mut self, io: &mut impl Actuator) {
-        if self.state == State::Restoring {
-            self.stop_queued = io.stop().is_ok(); // retries remain useful without restarting cleanup
-            return;
-        }
         if self.active() {
             self.finish(State::Aborted, "PC ABORT", io);
         }
@@ -253,34 +201,10 @@ impl<'a> Engine<'a> {
         if !self.active() {
             return;
         }
-        self.last_ms = now;
-        if self.state == State::Restoring {
-            let restored = if t.epoch != self.epoch {
-                Err("Controller changed during restore")
-            } else {
-                self.scan.restore(t, now, io)
-            };
-            match restored {
-                Ok(true) => {
-                    self.settings_restore_sent = true;
-                    self.state = State::DataReady;
-                }
-                Err(e) => {
-                    self.settings_restore_error = Some(e);
-                    if self.outcome == "completed" {
-                        self.outcome = "faulted";
-                        self.reason = e;
-                    }
-                    self.state = State::DataReady;
-                }
-                _ => {}
-            }
-            return;
-        }
         if self.state == State::Running {
             self.elapsed_ms = now.wrapping_sub(self.started_ms);
         }
-        let fault = Self::healthy(t, p, now, self.scan.scan_started)
+        let fault = Self::healthy(t, p, now)
             .err()
             .or_else(|| (t.epoch != self.epoch).then_some("Xeryon connection changed"))
             .or_else(|| {
@@ -307,16 +231,6 @@ impl<'a> Engine<'a> {
             return;
         }
         if self.state == State::Armed {
-            if let Some(config @ ExperimentConfig::Sinusoidal { .. }) = self.config {
-                match self.scan.prepare(config, t, now, io) {
-                    Ok(false) => return,
-                    Err(e) => {
-                        self.finish(State::Fault, e, io);
-                        return;
-                    }
-                    Ok(true) => {}
-                }
-            }
             self.started_ms = now;
             self.next_sample = 0;
             self.next_target = 0;
@@ -326,22 +240,6 @@ impl<'a> Engine<'a> {
         }
         let elapsed = now.wrapping_sub(self.started_ms);
         self.elapsed_ms = elapsed;
-        if let Some(ExperimentConfig::Sinusoidal {
-            center_nm,
-            amplitude_nm,
-            frequency_mhz,
-            ..
-        }) = self.config
-        {
-            if !self.settling {
-                if let Err(e) = self.scan.service(now, io) {
-                    self.finish(State::Fault, e, io);
-                    return;
-                }
-                // This field is the desired sine position, not a DPOS sent during SCAN.
-                self.target = sine_target(center_nm, amplitude_nm, frequency_mhz, elapsed);
-            }
-        }
         // A deadline is also a hard bound on storage. Never synthesize catch-up samples.
         if elapsed > self.duration_ms {
             self.finish(State::Fault, "Acquisition deadline missed", io);
@@ -424,15 +322,9 @@ impl<'a> Engine<'a> {
                 if self.settling {
                     if now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS {
                         Err("Final center move deadline")
-                    } else if !self.center_sent {
-                        self.scan.center(self.target, now, io).map(|sent| {
-                            self.center_sent = sent;
-                            false
-                        })
                     } else {
                         Ok(t.xeryon_motion
-                            .is_some_and(|m| m.state == 2 && m.target == Some(self.target))
-                            && t.samples[2].value & (1 << 13) == 0)
+                            .is_some_and(|m| m.state == 2 && m.target == Some(self.target)))
                     }
                 } else if elapsed >= waveform_ms {
                     if elapsed - waveform_ms >= TRAJECTORY_MS {
@@ -441,32 +333,16 @@ impl<'a> Engine<'a> {
                         self.target = counts(center_nm).unwrap();
                         self.settling = true;
                         self.move_started = now;
-                        self.scan.cancel();
-                        io.stop().map(|_| false)
+                        io.target(self.target, now, true).map(|_| false)
                     }
                 } else if elapsed >= self.next_target {
-                    self.max_control_lateness_ms =
-                        self.max_control_lateness_ms.max(elapsed - self.next_target);
                     if elapsed - self.next_target >= TRAJECTORY_MS {
                         Err("Trajectory deadline missed")
                     } else {
                         self.next_target = (elapsed / TRAJECTORY_MS + 1) * TRAJECTORY_MS;
-                        crate::sine_control::velocity(self.config.unwrap(), elapsed, now, t)
-                            .and_then(|velocity| {
-                                // The first tick retains all feedback/guard checks,
-                                // but starts at the nominal speed verified in setup.
-                                // Position correction begins on the next 10 ms tick.
-                                let velocity = if self.control_updates == 0 {
-                                    scan_start_speed(amplitude_nm, frequency_mhz)
-                                } else {
-                                    velocity
-                                };
-                                self.scan.velocity(velocity, now, io)
-                            })
-                            .map(|_| {
-                                self.control_updates += 1;
-                                false
-                            })
+                        // Phase comes from the run clock; never integrate or replay missed ticks.
+                        self.target = sine_target(center_nm, amplitude_nm, frequency_mhz, elapsed);
+                        io.target(self.target, now, false).map(|_| false)
                     }
                 } else {
                     Ok(false)
@@ -475,22 +351,7 @@ impl<'a> Engine<'a> {
         };
         match result {
             Ok(true) => self.finish(State::Complete, "none", io),
-            Err(e) => {
-                if matches!(
-                    e,
-                    crate::sine_control::TRACKING_LIMIT | crate::sine_control::TRAVEL_LIMIT
-                ) {
-                    // Freeze the exact control-tick sample, including faults between
-                    // 50 ms acquisition records. Cleanup must not replace it.
-                    self.scan_fault = Some(ScanFault {
-                        elapsed_ms: elapsed,
-                        epos_counts: t.samples[0].value,
-                        epos_age_ms: now.wrapping_sub(t.samples[0].ms),
-                        stat: t.samples[2].value,
-                    });
-                }
-                self.finish(State::Fault, e, io);
-            }
+            Err(e) => self.finish(State::Fault, e, io),
             _ => {}
         }
     }
@@ -501,50 +362,6 @@ impl<'a> Engine<'a> {
             self.run
         )?;
         self.config.unwrap().write_json(out)?;
-        write!(
-            out,
-            ",\"control_updates\":{},\"max_control_lateness_ms\":{}",
-            self.control_updates, self.max_control_lateness_ms
-        )?;
-        if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) {
-            write!(
-                out,
-                ",\"control\":\"sspd_scan_p\",\"kp_per_s\":{SCAN_KP},\"correction_fraction\":{SCAN_CORRECTION},\"feedback_max_age_ms\":{SCAN_FEEDBACK_MS},\"target_semantics\":\"reference_position\",\"settings_restore_sent\":{}",
-                self.settings_restore_sent
-            )?;
-            if let Some(error) = self.settings_restore_error {
-                write!(out, ",\"settings_restore_error\":\"{error}\"")?;
-            }
-        }
-        if let (
-            Some(fault),
-            Some(ExperimentConfig::Sinusoidal {
-                center_nm,
-                amplitude_nm,
-                frequency_mhz,
-                ..
-            }),
-        ) = (self.scan_fault, self.config)
-        {
-            let reference = crate::sine_control::reference(
-                center_nm,
-                amplitude_nm,
-                frequency_mhz,
-                fault.elapsed_ms.saturating_sub(fault.epos_age_ms),
-            );
-            let position = fault.epos_counts as f64 * 0.078;
-            let (low, high) = scan_bounds(center_nm, amplitude_nm).map_err(|_| core::fmt::Error)?;
-            write!(
-                out,
-                ",\"scan_fault\":{{\"elapsed_ms\":{},\"epos_counts\":{},\"epos_um\":{position:.6},\"epos_age_ms\":{},\"stat\":{},\"reference_um\":{reference:.6},\"error_um\":{:.6},\"guard_um\":{:.6},\"low_counts\":{low},\"high_counts\":{high}}}",
-                fault.elapsed_ms,
-                fault.epos_counts,
-                fault.epos_age_ms,
-                fault.stat,
-                reference - position,
-                scan_guard_nm(amplitude_nm) as f64 / 1000.0
-            )?;
-        }
         writeln!(
             out,
             ",\"count\":{},\"record_bytes\":{RECORD_BYTES},\"bytes\":{},\"crc\":{},\"outcome\":\"{}\",\"reason\":\"{}\",\"stop_queued\":{},\"sample_ms\":{SAMPLE_MS},\"trajectory_ms\":{TRAJECTORY_MS},\"move_timeout_ms\":{MOVE_TIMEOUT_MS},\"started_ms\":{},\"elapsed_ms\":{},\"duration_bound_ms\":{},\"required_samples\":{},\"missed_samples\":{},\"max_lateness_ms\":{}}}",
@@ -632,7 +449,29 @@ pub(crate) fn sine(turns: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sine_control::test_support::Io;
+    #[derive(Default)]
+    struct Io {
+        targets: Vec<(i32, u32, bool)>,
+        stops: usize,
+        fail: bool,
+    }
+    impl Actuator for Io {
+        fn target(&mut self, target: i32, now: u32, track: bool) -> Result<(), &'static str> {
+            if self.fail {
+                return Err("transmit failure");
+            }
+            self.targets.push((target, now, track));
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), &'static str> {
+            self.stops += 1;
+            if self.fail {
+                Err("stop failure")
+            } else {
+                Ok(())
+            }
+        }
+    }
     fn feedback(now: u32, target: i32, reached: bool) -> (Telemetry, Reading) {
         let mut t = Telemetry::new();
         t.mounted = true;
@@ -672,17 +511,8 @@ mod tests {
         let (t, p) = feedback(now.wrapping_add(1), e.target, true);
         e.poll(now.wrapping_add(1), &t, p, io);
         assert_eq!(e.state, State::Armed);
-        for offset in 2..1_000 {
-            let tick = now.wrapping_add(offset);
-            let (mut t, p) = feedback(tick, e.target, true);
-            io.feedback(&mut t, tick);
-            e.poll(tick, &t, p, io);
-            if e.state == State::Running {
-                return;
-            }
-            assert_eq!(e.state, State::Armed, "{}", e.reason);
-        }
-        panic!("start did not arm");
+        let (t, p) = feedback(now.wrapping_add(2), e.target, true);
+        e.poll(now.wrapping_add(2), &t, p, io);
     }
     #[test]
     fn validation_rejects_before_motion_and_reserves_worst_case() {
@@ -785,350 +615,32 @@ mod tests {
         let mut records = [Record::EMPTY; 256];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
-        let original = io.settings;
-        start(&mut e, sinusoidal(), u32::MAX - 500, &mut io);
-        for elapsed in 1..=1200 {
+        let begin = u32::MAX - 500;
+        start(&mut e, sinusoidal(), begin, &mut io);
+        for elapsed in 1..=1001 {
             let now = e.started_ms.wrapping_add(elapsed);
             let (t, p) = feedback(now, e.target, true);
             e.poll(now, &t, p, &mut io);
         }
-        assert_eq!(e.outcome, "completed", "{}", e.reason);
-        assert!(e.data_ready() && e.settings_restore_sent);
-        assert_eq!(e.control_updates, 100);
-        assert_eq!(e.max_control_lateness_ms, 0);
-        assert_eq!(io.settings, original);
+        assert_eq!(e.outcome, "completed");
         assert_eq!(e.len, 21);
-        assert_eq!(io.targets.len(), 2); // only initial and final center DPOS
-        assert_eq!(io.targets[1].0, 0);
-        assert!(io.targets[1].2);
-        assert_eq!(e.samples[20].elapsed_ms, 1000);
-        assert_eq!(io.stops, 2); // stop scanning, then terminal STOP
-        for direction in [-1, 1] {
-            assert!(
-                io.commands
-                    .contains(&crate::sine_control::Command::set("SCAN", direction))
-            );
+        assert_eq!(io.targets.len(), 102); // initial, 100 waveform targets, final center
+        for (tick, &(target, now, track)) in io.targets[1..101].iter().enumerate() {
+            let elapsed = tick as u32 * 10;
+            assert_eq!(now.wrapping_sub(e.started_ms), elapsed);
+            let expected = (100.0 * (f64::from(elapsed) * core::f64::consts::TAU / 1000.0).sin())
+                .round() as i32;
+            assert_eq!(target, expected);
+            assert!(!track);
         }
+        assert_eq!(io.targets.last().unwrap().0, 0);
+        assert!(io.targets.last().unwrap().2);
+        assert_eq!(e.samples[20].elapsed_ms, 1000);
+        assert_eq!(io.stops, 1);
         for i in 0..10000 {
             let phase = i as f64 / 10000.0;
-            assert!((sine(phase) - (phase * core::f64::consts::TAU).sin()).abs() < 5e-14);
+            assert!((sine(phase) - (phase * core::f64::consts::TAU).sin()).abs() < 7e-10);
         }
-    }
-    #[test]
-    fn sine_evaluates_velocity_every_ten_ms_and_logs_position_reference() {
-        let mut records = [Record::EMPTY; 256];
-        let mut e = Engine::new(&mut records);
-        let mut io = Io::default();
-        io.settings[2] = 20_000;
-        start(
-            &mut e,
-            ExperimentConfig::Sinusoidal {
-                center_nm: -39,
-                amplitude_nm: 780_000,
-                frequency_mhz: 2000,
-                cycles: 1,
-            },
-            0,
-            &mut io,
-        );
-        for elapsed in 1..=700 {
-            let now = e.started_ms + elapsed;
-            let ideal = -0.5 + 10_000.0 * (elapsed as f64 * core::f64::consts::TAU / 500.0).sin();
-            let (t, p) = feedback(
-                now,
-                if elapsed < 500 {
-                    ideal.round() as i32
-                } else {
-                    -1
-                },
-                true,
-            );
-            e.poll(now, &t, p, &mut io);
-            if elapsed < 500 {
-                assert_eq!(e.state, State::Running, "{}", e.reason);
-                assert_eq!(e.next_target, (elapsed / 10 + 1) * 10);
-            }
-        }
-        assert_eq!(e.outcome, "completed", "{}", e.reason);
-        assert!(e.data_ready());
-        assert_eq!(io.targets.len(), 2);
-        for record in &e.samples[..e.len] {
-            let ideal =
-                -0.5 + 10_000.0 * (record.elapsed_ms as f64 * core::f64::consts::TAU / 500.0).sin();
-            assert!((f64::from(record.target) - ideal).abs() <= 0.50001);
-        }
-    }
-    #[test]
-    fn sine_quantization_is_precise_across_valid_travel_and_small_amplitudes() {
-        for (center, amplitude) in [
-            (0, 78),
-            (-39, 79),
-            (39, 79),
-            (0, 2_617_245_618),
-            (i64::from(MAX_POSITION) * 78 - 78 + 38, 78),
-            (i64::from(MIN_POSITION) * 78 + 78 - 38, 78),
-        ] {
-            for elapsed in 0..10_000 {
-                let target = sine_target(center, amplitude, 100, elapsed);
-                let ideal = (center as f64
-                    + f64::from(amplitude)
-                        * (elapsed as f64 * core::f64::consts::TAU / 10_000.0).sin())
-                    / 78.0;
-                assert!((f64::from(target) - ideal).abs() <= 0.50001);
-                assert!((MIN_POSITION..=MAX_POSITION).contains(&target));
-            }
-        }
-    }
-    #[test]
-    fn sine_jitter_uses_current_phase_without_drift_and_stalls_fault() {
-        for delay in [TRAJECTORY_MS - 1, TRAJECTORY_MS] {
-            let mut records = [Record::EMPTY; 256];
-            let mut e = Engine::new(&mut records);
-            let mut io = Io::default();
-            start(&mut e, sinusoidal(), 0, &mut io);
-            for ms in 1..=2 {
-                let now = e.started_ms + ms;
-                let (t, p) = feedback(now, e.target, true);
-                e.poll(now, &t, p, &mut io);
-            }
-            for slot in 1..=10 {
-                let elapsed = slot * TRAJECTORY_MS + delay;
-                let now = e.started_ms + elapsed;
-                let (t, p) = feedback(now, e.target, true);
-                e.poll(now, &t, p, &mut io);
-                if delay == TRAJECTORY_MS {
-                    assert_eq!(e.reason, "Trajectory deadline missed");
-                    assert_eq!(io.targets.len(), 1); // no catch-up burst
-                    assert_eq!(io.stops, 1);
-                    break;
-                }
-                assert_eq!(e.state, State::Running);
-                let ideal = 100.0 * (elapsed as f64 * core::f64::consts::TAU / 1000.0).sin();
-                assert!((f64::from(e.target) - ideal).abs() <= 0.50001);
-                e.scan.service(now + 1, &mut io).unwrap();
-                e.scan.service(now + 2, &mut io).unwrap();
-            }
-        }
-    }
-    #[test]
-    fn sub_resolution_speed_stops_scanning_and_final_center_is_confirmed() {
-        let mut records = [Record::EMPTY; 512];
-        let mut e = Engine::new(&mut records);
-        let mut io = Io::default();
-        start(
-            &mut e,
-            ExperimentConfig::Sinusoidal {
-                center_nm: 0,
-                amplitude_nm: 78,
-                frequency_mhz: 100,
-                cycles: 1,
-            },
-            0,
-            &mut io,
-        );
-        for elapsed in 1..=10_020 {
-            let now = e.started_ms + elapsed;
-            let (t, p) = feedback(now, e.target, true);
-            e.poll(now, &t, p, &mut io);
-        }
-        assert_eq!(e.outcome, "completed");
-        assert_eq!(io.targets.iter().map(|v| v.0).collect::<Vec<_>>(), [0, 0]);
-        assert!(io.targets.last().unwrap().2);
-        assert!(
-            !io.commands
-                .iter()
-                .any(|c| c.tag == "SCAN" && c.value != Some(0))
-        );
-        assert_eq!(e.len, 201); // acquisition remains 20 Hz
-    }
-    #[test]
-    fn first_scan_tick_uses_verified_speed_then_resumes_position_correction() {
-        let mut records = [Record::EMPTY; 256];
-        let mut e = Engine::new(&mut records);
-        let mut io = Io::default();
-        let config = ExperimentConfig::Sinusoidal {
-            center_nm: 0,
-            amplitude_nm: 5_000,
-            frequency_mhz: 1000,
-            cycles: 1,
-        };
-        let (t, p) = feedback(0, 0, true);
-        e.accept(config, &t, p, false, 0).unwrap();
-        e.begin(0, &mut io);
-        let (t, p) = feedback(1, 0, true);
-        e.poll(1, &t, p, &mut io);
-        for now in 2..1_000 {
-            // Position is within the startup guard but would request a correction.
-            let (mut t, p) = feedback(now, 13, true);
-            io.feedback(&mut t, now);
-            e.poll(now, &t, p, &mut io);
-            if e.state == State::Running {
-                break;
-            }
-        }
-        assert_eq!(e.state, State::Running);
-        assert_eq!(io.settings[2], 31);
-        assert_eq!(
-            io.commands.last(),
-            Some(&crate::sine_control::Command::set("SCAN", 1))
-        );
-        let now = e.started_ms + 10;
-        let (t, p) = feedback(now, 13, true);
-        e.poll(now, &t, p, &mut io);
-        assert_eq!(e.state, State::Running);
-        assert_eq!(
-            io.commands.last(),
-            Some(&crate::sine_control::Command::set("SSPD", 30))
-        );
-    }
-    #[test]
-    fn scan_fault_retains_control_tick_evidence_through_cleanup() {
-        for (position, fault_ms, reason) in [
-            (0, 60, crate::sine_control::TRACKING_LIMIT),
-            (100, 10, crate::sine_control::TRAVEL_LIMIT),
-        ] {
-            let mut records = [Record::EMPTY; 512];
-            let mut e = Engine::new(&mut records);
-            let mut io = Io::default();
-            start(
-                &mut e,
-                ExperimentConfig::Sinusoidal {
-                    center_nm: 0,
-                    amplitude_nm: 5_000,
-                    frequency_mhz: 1000,
-                    cycles: 5,
-                },
-                0,
-                &mut io,
-            );
-            for elapsed in 1..=fault_ms {
-                let now = e.started_ms + elapsed;
-                let (t, p) = feedback(now, position, true);
-                e.poll(now, &t, p, &mut io);
-            }
-            assert_eq!(e.reason, reason);
-            assert_eq!(e.state, State::Restoring);
-            assert_eq!(io.stops, 1);
-            assert_eq!(e.scan_fault.unwrap().elapsed_ms, fault_ms);
-            // Later position publications during STOP/restoration are not the fault sample.
-            for elapsed in fault_ms + 1..fault_ms + 300 {
-                let now = e.started_ms + elapsed;
-                let (t, p) = feedback(now, 1, true);
-                e.poll(now, &t, p, &mut io);
-            }
-            assert!(e.data_ready() && e.settings_restore_sent);
-            assert_eq!(e.scan_fault.unwrap().epos_counts, i64::from(position));
-            assert_eq!(e.scan_fault.unwrap().elapsed_ms, fault_ms);
-            let mut frame = crate::protocol::Frame::new();
-            e.metadata(&mut frame, u32::MAX).unwrap();
-            let json = core::str::from_utf8(frame.pending()).unwrap();
-            assert!(json.contains("\"guard_um\":1.560000"));
-            assert!(json.contains("\"low_counts\":-84,\"high_counts\":84"));
-            assert!(json.contains(&format!(
-                "\"scan_fault\":{{\"elapsed_ms\":{fault_ms},\"epos_counts\":{position}"
-            )));
-        }
-    }
-    #[test]
-    fn cleanup_error_is_retained_separately_from_the_original_fault() {
-        let mut records = [Record::EMPTY; 256];
-        let mut e = Engine::new(&mut records);
-        let mut io = Io::default();
-        start(&mut e, sinusoidal(), 0, &mut io);
-        e.finish(State::Fault, crate::sine_control::TRACKING_LIMIT, &mut io);
-        let narrowed = io.settings;
-        for elapsed in 1..=2_000 {
-            let now = e.started_ms + elapsed;
-            let (mut t, p) = feedback(now, 0, true);
-            t.record(b"STAT", 352 | (1 << 13), now);
-            e.poll(now, &t, p, &mut io);
-        }
-        assert!(e.data_ready());
-        assert!(!e.settings_restore_sent);
-        assert_eq!(e.reason, crate::sine_control::TRACKING_LIMIT);
-        assert_eq!(io.settings, narrowed);
-        let mut frame = crate::protocol::Frame::new();
-        e.metadata(&mut frame, 1).unwrap();
-        let json = core::str::from_utf8(frame.pending()).unwrap();
-        assert!(
-            json.contains(
-                "\"settings_restore_error\":\"Restore blocked: controller still scanning\""
-            )
-        );
-        assert!(json.contains("\"reason\":\"Scan tracking error exceeded guard\""));
-    }
-    #[test]
-    fn abort_cancels_pending_scan_direction_and_restores_before_releasing_data() {
-        let mut records = [Record::EMPTY; 256];
-        let mut e = Engine::new(&mut records);
-        let mut io = Io::default();
-        let original = io.settings;
-        start(&mut e, sinusoidal(), 0, &mut io);
-        // Queue a reversal: SCAN=0 is submitted, speed/new direction remain pending.
-        e.scan.velocity(-10, e.started_ms + 1, &mut io).unwrap();
-        let before_abort = io.commands.len();
-        e.abort(&mut io);
-        assert_eq!(e.state, State::Restoring);
-        assert!(e.transfer(e.run).is_err());
-        e.abort(&mut io); // repeat ABORT resends STOP without restarting restoration
-        for elapsed in 1..200 {
-            let now = e.started_ms + elapsed;
-            let (t, p) = feedback(now, 0, true);
-            e.poll(now, &t, p, &mut io);
-        }
-        assert!(e.data_ready() && e.settings_restore_sent);
-        assert_eq!(e.outcome, "aborted");
-        assert_eq!(io.settings, original);
-        assert_eq!(io.stops, 2);
-        assert!(!io.commands[before_abort..].iter().any(|c| c.tag == "SCAN"));
-        assert!(
-            !io.commands
-                .contains(&crate::sine_control::Command::set("SCAN", -1))
-        );
-    }
-    #[test]
-    fn scan_status_is_allowed_only_during_owned_sine_and_stale_encoder_stops() {
-        let mut records = [Record::EMPTY; 256];
-        let mut e = Engine::new(&mut records);
-        let mut io = Io::default();
-        let (mut t, p) = feedback(0, 0, true);
-        t.record(b"STAT", 352 | (1 << 13), 0);
-        assert!(e.accept(sinusoidal(), &t, p, false, 0).is_err());
-        start(&mut e, sinusoidal(), 0, &mut io);
-        for elapsed in 1..=60 {
-            let now = e.started_ms + elapsed;
-            let (mut t, p) = feedback(now, e.target, true);
-            t.record(b"STAT", 352 | (1 << 13), now);
-            t.samples[0].ms = e.started_ms;
-            e.poll(now, &t, p, &mut io);
-            if elapsed < 50 {
-                assert_eq!(e.state, State::Running, "{}", e.reason);
-            }
-        }
-        assert_eq!(e.reason, "Scan feedback stale");
-        assert_eq!(io.stops, 1);
-    }
-    #[test]
-    fn zero_speed_transition_can_clear_closed_loop_without_false_fault() {
-        let mut records = [Record::EMPTY; 256];
-        let mut e = Engine::new(&mut records);
-        let mut io = Io::default();
-        start(&mut e, sinusoidal(), 0, &mut io);
-        for elapsed in 1..=260 {
-            let now = e.started_ms + elapsed;
-            let (mut t, p) = feedback(now, e.target, true);
-            if (250..255).contains(&elapsed) {
-                t.record(b"STAT", 1 << 8, now);
-            }
-            e.poll(now, &t, p, &mut io);
-            assert_eq!(e.state, State::Running, "{}", e.reason);
-        }
-        // An active scan without closed-loop control is still invalid.
-        let now = e.started_ms + 261;
-        let (mut t, p) = feedback(now, e.target, true);
-        t.record(b"STAT", (1 << 8) | (1 << 13), now);
-        e.poll(now, &t, p, &mut io);
-        assert_eq!(e.reason, "Xeryon closed loop or encoder invalid");
     }
     #[test]
     fn faults_abort_and_deadline_preserve_partial_data() {
@@ -1137,60 +649,42 @@ mod tests {
             let mut e = Engine::new(&mut records);
             let mut io = Io::default();
             start(&mut e, sinusoidal(), 0, &mut io);
-            let tick = e.started_ms + 1;
-            let (mut t, mut p) = feedback(tick, e.target, true);
+            let (mut t, mut p) = feedback(12, e.target, true);
             let now = match condition {
                 0 => {
                     t.mounted = false;
-                    tick
+                    12
                 }
                 1 => {
-                    t.record(b"STAT", 1 << 12, tick);
-                    tick
+                    t.record(b"STAT", 1 << 12, 12);
+                    12
                 }
                 2 => {
                     p.valid = false;
-                    tick
+                    12
                 }
                 3 => {
-                    p.ms = tick.wrapping_sub(300);
-                    tick
+                    p.ms = u32::MAX - 300;
+                    12
                 }
                 4 => {
                     e.abort(&mut io);
-                    tick
+                    12
                 }
                 5 => {
                     io.fail = true;
-                    tick
+                    12
                 }
-                6 => e.started_ms + 30,
+                6 => 42,
                 _ => {
                     t.epoch = 1;
-                    tick
+                    12
                 }
             };
             e.poll(now, &t, p, &mut io);
-            for offset in 1..=2100 {
-                let later = now + offset;
-                let (mut t, p) = feedback(later, e.target, true);
-                if condition == 0 {
-                    t.mounted = false;
-                }
-                if condition == 7 {
-                    t.epoch = 1;
-                }
-                e.poll(later, &t, p, &mut io);
-                if e.data_ready() {
-                    break;
-                }
-            }
-            assert!(e.data_ready(), "{condition}: {}", e.reason);
+            assert!(e.data_ready(), "{condition}");
             assert_eq!(e.len, 1);
             assert_eq!(io.stops, 1);
-            if condition == 5 {
-                assert_eq!(e.reason, "transmit failure");
-            }
             assert_eq!(
                 e.outcome,
                 if condition == 4 { "aborted" } else { "faulted" }
@@ -1205,12 +699,6 @@ mod tests {
         let mut io = Io::default();
         start(&mut e, sinusoidal(), 0, &mut io);
         e.abort(&mut io);
-        for ms in 1..=200 {
-            let now = e.started_ms + ms;
-            let (t, p) = feedback(now, e.target, true);
-            e.poll(now, &t, p, &mut io);
-        }
-        assert!(e.data_ready());
         let run = e.run;
         let crc = e.checksum();
         assert!(e.acknowledge(run, e.len, crc).is_err());

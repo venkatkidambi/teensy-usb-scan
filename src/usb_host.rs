@@ -14,8 +14,6 @@ static ATTACHES: AtomicU32 = AtomicU32::new(0);
 static REMOVES: AtomicU32 = AtomicU32::new(0);
 static INTERRUPTS: AtomicU32 = AtomicU32::new(0);
 static XD_C: AtomicBool = AtomicBool::new(false);
-static SETUP_TRACE: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::SetupTrace>> =
-    cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::SetupTrace::new()));
 static MOTION: cortex_m::interrupt::Mutex<RefCell<crate::xeryon_motion::Motion>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon_motion::Motion::new()));
 static TELEMETRY: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::Decoder>> =
@@ -27,7 +25,6 @@ pub fn telemetry() -> crate::protocol::Telemetry {
     cortex_m::interrupt::free(|cs| {
         let mut t = *CACHE.borrow(cs).borrow();
         t.xeryon_motion = Some(*MOTION.borrow(cs).borrow());
-        t.xeryon_setup = *SETUP_TRACE.borrow(cs).borrow();
         t
     })
 }
@@ -69,7 +66,6 @@ pub fn move_xeryon(up: bool, nm: u32, speed: Option<u32>, now: u32) -> Result<i3
 }
 
 pub fn stop_xeryon() -> Result<(), &'static str> {
-    cortex_m::interrupt::free(|cs| SETUP_TRACE.borrow(cs).borrow_mut().active = false);
     if !crate::xeryon_motion::ready(&telemetry()) {
         return Err("Xeryon is not connected");
     }
@@ -206,47 +202,11 @@ pub fn poll() {
 }
 
 pub fn autonomous(on: bool) {
-    if on {
-        cortex_m::interrupt::free(|cs| {
-            *SETUP_TRACE.borrow(cs).borrow_mut() = crate::xeryon::SetupTrace::new();
-        });
-    }
     AUTONOMOUS.store(on, Ordering::Relaxed);
 }
 
 pub struct ExperimentActuator;
 impl crate::experiment::Actuator for ExperimentActuator {
-    fn tx_idle(&self) -> bool {
-        // SAFETY: foreground-only query into C-owned transport state.
-        unsafe { usb_serial_tx_idle() }
-    }
-    fn command(&mut self, command: crate::sine_control::Command) -> Result<bool, &'static str> {
-        if !self.tx_idle() {
-            return Ok(false);
-        }
-        let mut buffer = [0; 20];
-        let bytes = command.encode(&mut buffer);
-        // SAFETY: C copies the entire short line before returning.
-        if !unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, false) } {
-            return Err("Xeryon scan command transmit failed");
-        }
-        cortex_m::interrupt::free(|cs| {
-            let mut trace = SETUP_TRACE.borrow(cs).borrow_mut();
-            if command.value.is_none() {
-                trace.begin(command.tag, millis());
-            } else {
-                trace.active = false;
-            }
-        });
-        if command.tag == "SCAN" {
-            cortex_m::interrupt::free(|cs| {
-                let mut motion = MOTION.borrow(cs).borrow_mut();
-                motion.state = 0; // Scan lifecycle and deadlines belong to the engine.
-                motion.target = None;
-            });
-        }
-        Ok(true)
-    }
     fn target(&mut self, target: i32, now: u32, track: bool) -> Result<(), &'static str> {
         // SAFETY: foreground-only query into the existing C transport. Fault
         // instead of queuing a target behind an unfinished USB transfer.
@@ -447,22 +407,10 @@ unsafe extern "C" fn scanner_serial_rx(data: *const u8, len: u32) {
         cortex_m::interrupt::free(|cs| {
             let mut decoder = TELEMETRY.borrow(cs).borrow_mut();
             let mut cache = CACHE.borrow(cs).borrow_mut();
-            let mut trace = SETUP_TRACE.borrow(cs).borrow_mut();
-            trace.capture(bytes);
             for &byte in bytes {
                 match decoder.push(byte) {
-                    Some(Ok(record)) => {
-                        cache.record(record.tag(), record.value(), now);
-                        if trace.active {
-                            trace.records = trace.records.saturating_add(1);
-                        }
-                    }
-                    Some(Err(_)) => {
-                        cache.malformed = cache.malformed.wrapping_add(1);
-                        if trace.active {
-                            trace.malformed = trace.malformed.saturating_add(1);
-                        }
-                    }
+                    Some(Ok(record)) => cache.record(record.tag(), record.value(), now),
+                    Some(Err(_)) => cache.malformed = cache.malformed.wrapping_add(1),
                     None => {}
                 }
             }

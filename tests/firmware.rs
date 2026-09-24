@@ -57,8 +57,6 @@ fn pressure_snapshot_preserves_i2c_values_and_identity() {
 mod experiment;
 #[path = "../src/experiment_data.rs"]
 mod experiment_data;
-#[path = "../src/sine_control.rs"]
-mod sine_control;
 
 #[test]
 fn error_reply_keeps_request_id_and_partial_write_suffix() {

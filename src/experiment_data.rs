@@ -4,31 +4,7 @@ pub const RECORD_FIELDS: usize = 10;
 pub const RECORD_BYTES: usize = RECORD_FIELDS * 4;
 pub const CHUNK_RECORDS: usize = 16;
 pub const SAMPLE_MS: u32 = 50;
-pub const TRAJECTORY_MS: u32 = 10; // 100 Hz SSPD/SCAN velocity control
-pub const SCAN_KP: f64 = 2.0; // position correction, s^-1
-pub const SCAN_CORRECTION: f64 = 0.25; // fraction of peak sine speed
-pub const SCAN_FEEDBACK_MS: u32 = 50;
-
-pub fn peak_speed(amplitude_nm: u32, frequency_mhz: u32) -> f64 {
-    core::f64::consts::TAU * f64::from(amplitude_nm) * f64::from(frequency_mhz) / 1_000_000.0
-}
-
-/// Nominal positive speed at sine phase zero, in the controller's whole µm/s.
-pub fn scan_start_speed(amplitude_nm: u32, frequency_mhz: u32) -> i32 {
-    (peak_speed(amplitude_nm, frequency_mhz) + 0.5) as i32
-}
-
-pub fn scan_guard_nm(amplitude_nm: u32) -> i64 {
-    i64::from((amplitude_nm / 4).max(1560))
-}
-
-pub fn scan_bounds(center_nm: i64, amplitude_nm: u32) -> Result<(i32, i32), &'static str> {
-    let radius = i64::from(amplitude_nm) + scan_guard_nm(amplitude_nm);
-    Ok((
-        counts(center_nm.checked_sub(radius).ok_or("Trajectory overflow")?)?,
-        counts(center_nm.checked_add(radius).ok_or("Trajectory overflow")?)?,
-    ))
-}
+pub const TRAJECTORY_MS: u32 = 10; // 100 Hz sine position commands
 pub const MOVE_TIMEOUT_MS: u32 = 10_000;
 pub const MAX_DURATION_MS: u32 = (CAPACITY as u32 - 1) * SAMPLE_MS;
 pub const MIN_POSITION: i32 = -(1 << 25);
@@ -120,11 +96,6 @@ impl ExperimentConfig {
             } => {
                 if amplitude_nm < 78 || !(100..=2000).contains(&frequency_mhz) || cycles == 0 {
                     return Err("Amplitude must be positive; frequency 0.1..2 Hz; cycles positive");
-                }
-                scan_bounds(center_nm, amplitude_nm)?;
-                if peak_speed(amplitude_nm, frequency_mhz) * (1.0 + SCAN_CORRECTION) > 16_777_215.0
-                {
-                    return Err("Sine velocity plus correction exceeds SSPD range");
                 }
                 counts(
                     center_nm

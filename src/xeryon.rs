@@ -5,75 +5,6 @@ use core::fmt;
 
 pub struct Decoder(LineBuffer<64>);
 
-/// Bounded raw capture for setup diagnostics, before decoding can discard bytes.
-#[derive(Clone, Copy)]
-pub struct SetupTrace {
-    pub tag: Option<&'static str>,
-    pub active: bool,
-    pub attempts: u32,
-    pub started: u32,
-    pub received: u32,
-    pub records: u32,
-    pub malformed: u32,
-    bytes: [u8; 64],
-    len: usize,
-}
-
-impl SetupTrace {
-    pub const fn new() -> Self {
-        Self {
-            tag: None,
-            active: false,
-            attempts: 0,
-            started: 0,
-            received: 0,
-            records: 0,
-            malformed: 0,
-            bytes: [0; 64],
-            len: 0,
-        }
-    }
-
-    pub fn begin(&mut self, tag: &'static str, now: u32) {
-        if !self.active || self.tag != Some(tag) {
-            *self = Self::new();
-            self.tag = Some(tag);
-            self.started = now;
-            self.active = true;
-        }
-        self.attempts += 1;
-    }
-
-    pub fn capture(&mut self, bytes: &[u8]) {
-        if !self.active {
-            return;
-        }
-        self.received = self.received.saturating_add(bytes.len() as u32);
-        let count = bytes.len().min(self.bytes.len() - self.len);
-        self.bytes[self.len..self.len + count].copy_from_slice(&bytes[..count]);
-        self.len += count;
-    }
-
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
-    }
-
-    pub fn write_json(&self, out: &mut impl fmt::Write) -> fmt::Result {
-        let Some(tag) = self.tag else {
-            return out.write_str("null");
-        };
-        write!(
-            out,
-            "{{\"query\":\"{tag}=?\",\"attempts\":{},\"started_ms\":{},\"rx_bytes\":{},\"records\":{},\"malformed\":{},\"rx_prefix_hex\":\"",
-            self.attempts, self.started, self.received, self.records, self.malformed
-        )?;
-        for byte in self.bytes() {
-            write!(out, "{byte:02x}")?;
-        }
-        out.write_str("\"}")
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     TooLong,
@@ -232,36 +163,6 @@ impl fmt::Display for Status {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn setup_trace_keeps_raw_prefix_and_counts_all_bytes() {
-        let mut trace = SetupTrace::new();
-        trace.capture(b"ignored");
-        assert_eq!(trace.received, 0);
-        trace.begin("SSPD", 10);
-        trace.capture(b"SSPD=10000\r");
-        trace.capture(b"\n\xff");
-        trace.capture(&[b'x'; 100]);
-        assert_eq!(trace.received, 113);
-        assert_eq!(trace.bytes().len(), 64);
-        assert!(trace.bytes().starts_with(b"SSPD=10000\r\n\xff"));
-        trace.begin("SSPD", 260);
-        assert_eq!(trace.attempts, 2);
-        assert_eq!(trace.started, 10);
-        assert_eq!(trace.received, 113);
-        trace.active = false;
-        trace.capture(b"cleanup must not overwrite the evidence");
-        assert_eq!(trace.received, 113);
-        let mut json = String::new();
-        trace.write_json(&mut json).unwrap();
-        assert!(json.contains("\"rx_prefix_hex\":\"535350443d31303030300d0aff"));
-        trace.begin("POLI", 400);
-        assert_eq!(trace.attempts, 1);
-        assert_eq!(trace.received, 0);
-        trace = SetupTrace::new();
-        assert!(trace.bytes().is_empty());
-        assert_eq!(trace.received, 0);
-    }
 
     fn decode(bytes: &[u8]) -> Vec<Result<Record, Error>> {
         let mut decoder = Decoder::new();

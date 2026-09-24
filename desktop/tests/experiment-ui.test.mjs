@@ -14,7 +14,7 @@ test('START explains blockers, validates fields, submits once, and reports failu
   globalThis.ResizeObserver=class {observe(){}};
   try {
     const calls=[],logs=[];let reject;
-    const state={connected:true,hello:{experiments:true,sine_velocity:true},session:{
+    const state={connected:true,hello:{experiments:true,sine_position:true},session:{
       startExperiment(config){calls.push(config);return new Promise((_,fail)=>{reject=fail;});},
     }};
     setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls,activity:message=>logs.push(message)});
@@ -24,7 +24,7 @@ test('START explains blockers, validates fields, submits once, and reports failu
       [state,'connected',false,/Connect the Teensy/],
       [state,'experimentUnresolved',true,/Reconnect/],
       [state.hello,'experiments',false,/enable experiments/],
-      [state.hello,'sine_velocity',false,/sinusoidal speed control/],
+      [state.hello,'sine_position',false,/sinusoidal position control/],
       [state.session,'pending',true,/current Teensy request/],
       [state.session,'experimentOwned',true,/owns the hardware/],
     ]){
@@ -131,42 +131,3 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
   }
 });
 
-test('velocity sine requires firmware capability and reports incomplete restoration', () => {
-  const nodes = new Map();
-  const node = id => {
-    if (!nodes.has(id)) nodes.set(id, { value:'1', elements:[], setAttribute(){}, getBoundingClientRect:()=>({width:0}) });
-    return nodes.get(id);
-  };
-  const previousDocument=globalThis.document,previousObserver=globalThis.ResizeObserver;
-  globalThis.document={getElementById:node};
-  globalThis.ResizeObserver=class {observe(){}};
-  try {
-    const state={connected:true,hello:{experiments:true},session:{}};
-    setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls});
-    node('tab-sinusoidal').onclick();
-    assert.equal(node('experiment-start-button').disabled,true);
-    assert.match(node('experiment-motion-detail').textContent,/requires firmware/);
-    state.hello.sine_velocity=true;
-    experimentControls();
-    assert.equal(node('experiment-start-button').disabled,false);
-    experimentMessage({type:'experiment_dataset',dataset:{
-      metadata:{run:1,config:{kind:'sinusoidal'},outcome:'aborted',reason:'PC ABORT',count:0,
-        elapsed_ms:10,control:'sspd_scan_p',control_updates:2,max_control_lateness_ms:1,
-        missed_samples:0,max_lateness_ms:0,stop_queued:true,settings_restore_sent:false,
-        settings_restore_error:'Restore blocked: controller still scanning'},samples:[],
-    }});
-    assert.match(node('experiment-result-summary').textContent,/100 Hz speed control/);
-    assert.match(node('experiment-result-summary').textContent,/restoration incomplete/);
-    assert.match(node('experiment-result-summary').textContent,/Cleanup: Restore blocked: controller still scanning/);
-    experimentMessage({type:'experiment_dataset',dataset:{
-      metadata:{run:2,config:{kind:'sinusoidal'},outcome:'faulted',reason:'Scan tracking error exceeded guard',count:2,
-        elapsed_ms:60,control:'sspd_scan_p',control_updates:6,max_control_lateness_ms:0,
-        missed_samples:0,max_lateness_ms:0,stop_queued:true,settings_restore_sent:true,
-        scan_fault:{elapsed_ms:60,epos_um:0,reference_um:1.841,error_um:1.841,guard_um:1.56,
-          low_counts:-84,high_counts:84,epos_age_ms:0}},samples:[],
-    }});
-    assert.match(node('experiment-result-summary').textContent,/Fault at 60 ms: position 0.000 µm, reference 1.841 µm/);
-    assert.match(node('experiment-result-summary').textContent,/allowed ±1.560 µm/);
-    assert.match(node('experiment-result-summary').textContent,/travel -6.552 to 6.552 µm/);
-  } finally {globalThis.document=previousDocument;globalThis.ResizeObserver=previousObserver;}
-});

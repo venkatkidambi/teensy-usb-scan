@@ -46,7 +46,7 @@ pub const SCRIPT: &str = r#"
     // No physical serial port is opened and no motion command leaves this test.
     const {setupExperiments,experimentControls}=await import('./experiment.js');
     const calls=[];let rejectStart;
-    const state={connected:true,hello:{experiments:true,sine_velocity:true},session:{
+    const state={connected:true,hello:{experiments:true,sine_position:true},session:{
       startExperiment(config){calls.push(config);return new Promise((_,reject)=>{rejectStart=reject;});}
     }};
     setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls});
@@ -64,8 +64,8 @@ pub const SCRIPT: &str = r#"
     rejectStart(Error('Test rejection'));
     await new Promise(r=>setTimeout(r,0));
     if(start.disabled||status.textContent!=='START failed: Test rejection')throw Error('START rejection did not recover visibly');
-    state.hello.sine_velocity=false;experimentControls();
-    if(!start.disabled||!document.getElementById('experiment-start-reason').textContent.includes('sinusoidal speed control'))throw Error('Disabled START has no explanation');
+    state.hello.sine_position=false;experimentControls();
+    if(!start.disabled||!document.getElementById('experiment-start-reason').textContent.includes('sinusoidal position control'))throw Error('Disabled START has no explanation');
     await invoke('smoke_report',{result:{ok:true,ports:ports.length,nativeIPC:true,demo:true,disconnect:true,startClick:true,startValidation:true}});
   }catch(e){await window.__TAURI__.core.invoke('smoke_report',{result:{ok:false,error:String(e)}});}
 })();

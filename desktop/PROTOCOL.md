@@ -30,13 +30,6 @@ works. Each request uses a nonzero u32 ID; only one request is in flight at a ti
 
 Responses are newline-delimited JSON. Example:
 
-Snapshots optionally include `xeryon_setup` (null before a setup query). Its
-`query`, `attempts`, `started_ms`, `rx_bytes`, `records`, `malformed`, and
-`rx_prefix_hex` fields describe the last setup query through its retries.
-The raw prefix is limited to 64 bytes, encoded as lowercase hexadecimal.
-Cleanup freezes the capture; the next experiment clears it. This diagnostic
-does not certify controller execution or replace setting readback validation.
-
 ```json
 {"type":"hello","id":1,"protocol":1,"firmware":"0.1.0","board":"Teensy 4.1","motion":true,"pressure":true}
 {"type":"snapshot","id":0,"ms":12500,"epoch":1,"vid":1240,"pid":61258,"mounted":true,"cdc":2,"records":30,"malformed":0,"skipped":0,"values":{"EPOS":{"value":-123,"ms":12450},"STAT":{"value":1344,"ms":12480}}}
@@ -143,26 +136,16 @@ its sign-inverted counts [-8388607, 8388608], legacy states (0 waiting for DOUT,
 
 Firmware with `plunger_limits: true` in HELLO enforces potentiometer bounds and reports `plunger.limits: {"min":30,"max":75}` in snapshots. Bounds reset to 30–75% at boot, survive serial reconnects, and reject outward moves while allowing inward recovery. Up increases the reading. Missing/stale potentiometer feedback prevents motion. Drive is disabled at a bound; sampling latency and mechanical coast can cause overshoot.
 
-## 100 Hz sinusoidal velocity control
+## 100 Hz sinusoidal positioning
 
-HELLO now includes `sine_velocity: true`. START S retains the same parameters,
-but the updated firmware executes SSPD/SCAN at 10 ms with a bounded encoder
-correction. The desktop requires this capability for its sinusoidal Start button.
-Quasi-static and manual movement retain their position semantics.
+HELLO includes `sine_position: true`. START S keeps the same parameters and
+sends a sine-derived `DPOS` target every 10 ms, using elapsed Teensy time.
+The wave frequency remains 0.1–2 Hz; 100 Hz is the command update rate.
+Initial and final center positioning use confirmed finite moves. Controller
+settings are left unchanged. ABORT and faults request STOP and retain samples.
 
-Before scanning, firmware reads controller settings, narrows and reads back
-LLIM/HLIM without widening existing limits, and sets POLI=2 / INFO=4. Setup can
-fault if replies, speed headroom, travel bounds or fresh feedback are unavailable.
-Positioning/setup and terminal restoration are reported as `running`; ownership
-is retained until settings restoration finishes or times out and the retained
-dataset is transferred and acknowledged. ABORT remains available throughout.
-
-Record size/version remain unchanged. In sine datasets, `target` is the desired
-position reference at the logging instant, not a streamed DPOS command. Metadata
-identifies this with `control: "sspd_scan_p"`, `target_semantics: "reference_position"`,
-`kp_per_s: 2`, `correction_fraction: 0.25`, and `feedback_max_age_ms: 50`.
-`control_updates` counts accepted velocity plans (including unchanged commands),
-and `max_control_lateness_ms` records scheduling lateness. These are not encoder
-measurement rate or USB delivery timing. `settings_restore_sent` reports completed
-USB writes of the restored settings, not independently verified readbacks; false
-means controller settings may remain altered. CSV retains all metadata.
+The 40-byte record layout is unchanged. `target` is the last commanded position
+at the logging instant. Metadata reports `trajectory_ms: 10` and `sample_ms: 50`.
+Positioning and acquisition report `running`; results remain owned until the
+verified dataset acknowledgement. USB dispatch timing does not establish physical
+tracking accuracy or feedback sampling rate.

@@ -11,14 +11,11 @@ failure leaves the dataset available for another attempt. Reconnecting
 recovers an active run or downloads its retained data without sending a heartbeat.
 See [the experiment design and limits](../EXPERIMENTS.md).
 
-Sinusoidal motion uses **100 Hz SSPD/SCAN speed control with encoder correction**.
-It requires firmware advertising `sine_velocity: true`; Start is disabled for
-older firmware. Recording remains 20 Hz. Position resolution is 0.078 µm and
-speed resolution is 1 µm/s. The initial correction gain is 2/s, capped at 25% of
-peak sine speed. Setup verifies temporary travel limits inside the existing
-controller limits and requests fast feedback. Original settings are restored
-on exit; an incomplete restoration is shown with the result. This experimental
-mode has not been physically validated and does not resolve the earlier freeze.
+Sinusoidal motion sends **100 Hz DPOS position commands** and records at 20 Hz.
+It requires firmware advertising `sine_position: true`. Targets use elapsed Teensy
+time and 0.078 µm position resolution. The run starts and finishes at center;
+controller speed and travel limits remain as configured. Hardware tracking still
+needs verification under the intended load.
 
 Tauri 2 + plain HTML/CSS/JavaScript, with serial IO in Rust. The release app
 embeds its UI and needs no Python, Node, browser tab, or HTTP server.
