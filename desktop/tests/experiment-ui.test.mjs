@@ -93,10 +93,12 @@ test('velocity sine requires firmware capability and reports incomplete restorat
     experimentMessage({type:'experiment_dataset',dataset:{
       metadata:{run:1,config:{kind:'sinusoidal'},outcome:'aborted',reason:'PC ABORT',count:0,
         elapsed_ms:10,control:'sspd_scan_p',control_updates:2,max_control_lateness_ms:1,
-        missed_samples:0,max_lateness_ms:0,stop_queued:true,settings_restore_sent:false},samples:[],
+        missed_samples:0,max_lateness_ms:0,stop_queued:true,settings_restore_sent:false,
+        settings_restore_error:'Restore blocked: controller still scanning'},samples:[],
     }});
     assert.match(node('experiment-result-summary').textContent,/100 Hz speed control/);
     assert.match(node('experiment-result-summary').textContent,/restoration incomplete/);
+    assert.match(node('experiment-result-summary').textContent,/Cleanup: Restore blocked: controller still scanning/);
     experimentMessage({type:'experiment_dataset',dataset:{
       metadata:{run:2,config:{kind:'sinusoidal'},outcome:'faulted',reason:'Scan tracking error exceeded guard',count:2,
         elapsed_ms:60,control:'sspd_scan_p',control_updates:6,max_control_lateness_ms:0,

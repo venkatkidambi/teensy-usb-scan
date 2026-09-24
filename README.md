@@ -13,6 +13,13 @@ It verifies temporary controller travel limits and restores settings on exit.
 This experimental mode still needs hardware validation; the earlier reported
 Teensy freeze is not diagnosed by the software tests.
 
+Sinusoidal setup now writes and verifies the nominal starting SSPD before enabling
+SCAN. The first control tick uses that verified speed; position correction begins
+at the next 10 ms tick. For 5 µm at 1 Hz, the startup readback must be `SSPD=31`.
+This closes a startup verification gap; the observed backward scan response still
+needs hardware diagnosis. Original speed and travel limits are restored through
+the existing cleanup checks.
+
 If **Start** makes USB disappear, flash the current firmware and watch the orange
 pin-13 LED. Fatal diagnostics repeat **one long pulse**, a group of short pulses
 for the fault, a pause, then a group for the experiment phase:

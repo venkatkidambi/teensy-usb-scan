@@ -59,6 +59,7 @@ pub struct Engine<'a> {
     last_ms: u32,
     scan: crate::sine_control::Session,
     pub settings_restore_sent: bool,
+    settings_restore_error: Option<&'static str>,
     pub control_updates: u32,
     pub max_control_lateness_ms: u32,
     scan_fault: Option<ScanFault>,
@@ -94,6 +95,7 @@ impl<'a> Engine<'a> {
             last_ms: 0,
             scan: crate::sine_control::Session::new(),
             settings_restore_sent: true,
+            settings_restore_error: None,
             control_updates: 0,
             max_control_lateness_ms: 0,
             scan_fault: None,
@@ -201,6 +203,7 @@ impl<'a> Engine<'a> {
         self.last_ms = now;
         self.scan = crate::sine_control::Session::new();
         self.settings_restore_sent = true;
+        self.settings_restore_error = None;
         self.control_updates = 0;
         self.max_control_lateness_ms = 0;
         self.scan_fault = None;
@@ -263,6 +266,7 @@ impl<'a> Engine<'a> {
                     self.state = State::DataReady;
                 }
                 Err(e) => {
+                    self.settings_restore_error = Some(e);
                     if self.outcome == "completed" {
                         self.outcome = "faulted";
                         self.reason = e;
@@ -410,7 +414,12 @@ impl<'a> Engine<'a> {
                     Ok(false)
                 }
             }
-            ExperimentConfig::Sinusoidal { center_nm, .. } => {
+            ExperimentConfig::Sinusoidal {
+                center_nm,
+                amplitude_nm,
+                frequency_mhz,
+                ..
+            } => {
                 let waveform_ms = self.duration_ms - MOVE_TIMEOUT_MS;
                 if self.settling {
                     if now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS {
@@ -443,7 +452,17 @@ impl<'a> Engine<'a> {
                     } else {
                         self.next_target = (elapsed / TRAJECTORY_MS + 1) * TRAJECTORY_MS;
                         crate::sine_control::velocity(self.config.unwrap(), elapsed, now, t)
-                            .and_then(|velocity| self.scan.velocity(velocity, now, io))
+                            .and_then(|velocity| {
+                                // The first tick retains all feedback/guard checks,
+                                // but starts at the nominal speed verified in setup.
+                                // Position correction begins on the next 10 ms tick.
+                                let velocity = if self.control_updates == 0 {
+                                    scan_start_speed(amplitude_nm, frequency_mhz)
+                                } else {
+                                    velocity
+                                };
+                                self.scan.velocity(velocity, now, io)
+                            })
                             .map(|_| {
                                 self.control_updates += 1;
                                 false
@@ -493,6 +512,9 @@ impl<'a> Engine<'a> {
                 ",\"control\":\"sspd_scan_p\",\"kp_per_s\":{SCAN_KP},\"correction_fraction\":{SCAN_CORRECTION},\"feedback_max_age_ms\":{SCAN_FEEDBACK_MS},\"target_semantics\":\"reference_position\",\"settings_restore_sent\":{}",
                 self.settings_restore_sent
             )?;
+            if let Some(error) = self.settings_restore_error {
+                write!(out, ",\"settings_restore_error\":\"{error}\"")?;
+            }
         }
         if let (
             Some(fault),
@@ -920,6 +942,46 @@ mod tests {
         assert_eq!(e.len, 201); // acquisition remains 20 Hz
     }
     #[test]
+    fn first_scan_tick_uses_verified_speed_then_resumes_position_correction() {
+        let mut records = [Record::EMPTY; 256];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        let config = ExperimentConfig::Sinusoidal {
+            center_nm: 0,
+            amplitude_nm: 5_000,
+            frequency_mhz: 1000,
+            cycles: 1,
+        };
+        let (t, p) = feedback(0, 0, true);
+        e.accept(config, &t, p, false, 0).unwrap();
+        e.begin(0, &mut io);
+        let (t, p) = feedback(1, 0, true);
+        e.poll(1, &t, p, &mut io);
+        for now in 2..1_000 {
+            // Position is within the startup guard but would request a correction.
+            let (mut t, p) = feedback(now, 13, true);
+            io.feedback(&mut t, now);
+            e.poll(now, &t, p, &mut io);
+            if e.state == State::Running {
+                break;
+            }
+        }
+        assert_eq!(e.state, State::Running);
+        assert_eq!(io.settings[2], 31);
+        assert_eq!(
+            io.commands.last(),
+            Some(&crate::sine_control::Command::set("SCAN", 1))
+        );
+        let now = e.started_ms + 10;
+        let (t, p) = feedback(now, 13, true);
+        e.poll(now, &t, p, &mut io);
+        assert_eq!(e.state, State::Running);
+        assert_eq!(
+            io.commands.last(),
+            Some(&crate::sine_control::Command::set("SSPD", 30))
+        );
+    }
+    #[test]
     fn scan_fault_retains_control_tick_evidence_through_cleanup() {
         for (position, fault_ms, reason) in [
             (0, 60, crate::sine_control::TRACKING_LIMIT),
@@ -968,13 +1030,43 @@ mod tests {
         }
     }
     #[test]
+    fn cleanup_error_is_retained_separately_from_the_original_fault() {
+        let mut records = [Record::EMPTY; 256];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        start(&mut e, sinusoidal(), 0, &mut io);
+        e.finish(State::Fault, crate::sine_control::TRACKING_LIMIT, &mut io);
+        let narrowed = io.settings;
+        for elapsed in 1..=2_000 {
+            let now = e.started_ms + elapsed;
+            let (mut t, p) = feedback(now, 0, true);
+            t.record(b"STAT", 352 | (1 << 13), now);
+            e.poll(now, &t, p, &mut io);
+        }
+        assert!(e.data_ready());
+        assert!(!e.settings_restore_sent);
+        assert_eq!(e.reason, crate::sine_control::TRACKING_LIMIT);
+        assert_eq!(io.settings, narrowed);
+        let mut frame = crate::protocol::Frame::new();
+        e.metadata(&mut frame, 1).unwrap();
+        let json = core::str::from_utf8(frame.pending()).unwrap();
+        assert!(
+            json.contains(
+                "\"settings_restore_error\":\"Restore blocked: controller still scanning\""
+            )
+        );
+        assert!(json.contains("\"reason\":\"Scan tracking error exceeded guard\""));
+    }
+    #[test]
     fn abort_cancels_pending_scan_direction_and_restores_before_releasing_data() {
         let mut records = [Record::EMPTY; 256];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         let original = io.settings;
         start(&mut e, sinusoidal(), 0, &mut io);
-        // First speed command has been accepted, direction is still in the plan.
+        // Queue a reversal: SCAN=0 is submitted, speed/new direction remain pending.
+        e.scan.velocity(-10, e.started_ms + 1, &mut io).unwrap();
+        let before_abort = io.commands.len();
         e.abort(&mut io);
         assert_eq!(e.state, State::Restoring);
         assert!(e.transfer(e.run).is_err());
@@ -988,7 +1080,11 @@ mod tests {
         assert_eq!(e.outcome, "aborted");
         assert_eq!(io.settings, original);
         assert_eq!(io.stops, 2);
-        assert!(!io.commands.iter().any(|c| c.tag == "SCAN"));
+        assert!(!io.commands[before_abort..].iter().any(|c| c.tag == "SCAN"));
+        assert!(
+            !io.commands
+                .contains(&crate::sine_control::Command::set("SCAN", -1))
+        );
     }
     #[test]
     fn scan_status_is_allowed_only_during_owned_sine_and_stale_encoder_stops() {

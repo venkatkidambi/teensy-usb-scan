@@ -13,6 +13,11 @@ pub fn peak_speed(amplitude_nm: u32, frequency_mhz: u32) -> f64 {
     core::f64::consts::TAU * f64::from(amplitude_nm) * f64::from(frequency_mhz) / 1_000_000.0
 }
 
+/// Nominal positive speed at sine phase zero, in the controller's whole µm/s.
+pub fn scan_start_speed(amplitude_nm: u32, frequency_mhz: u32) -> i32 {
+    (peak_speed(amplitude_nm, frequency_mhz) + 0.5) as i32
+}
+
 pub fn scan_guard_nm(amplitude_nm: u32) -> i64 {
     i64::from((amplitude_nm / 4).max(1560))
 }

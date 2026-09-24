@@ -130,7 +130,16 @@ narrowed limits before permitting SCAN. The original SSPD setting must be at lea
 silently exceeding it. The engine does not home or change the encoder reference.
 
 POLI is temporarily set to 2 ms and read back; INFO=4 enables EPOS, DPOS, STAT
-and TIME feedback. Before starting the wave, the engine requires fresh feedback
+and TIME feedback. Before INFO=4, setup also writes and reads back the rounded
+phase-zero speed (2π × amplitude × frequency), preserving the original SSPD for
+restoration. Missing or mismatched readback prevents scanning. The first control
+tick uses that verified nominal speed; bounded position correction begins on the
+next 10 ms tick. Feedback, tracking and travel checks still run on the first tick.
+If the nominal speed rounds to zero, setup verifies SSPD=1 and the first tick
+remains stopped; it never sends SSPD=0. Later waveform speed changes still use
+USB completion without readback. This closes an unverified startup transition;
+it does not establish the cause of the observed backward encoder response.
+Before starting the wave, the engine requires fresh feedback
 and two distinct EPOS reception timestamps. This requests frequent feedback but
 does not assume the XD-C produces simultaneous 100 Hz measurements. Software
 faults on excessive following error (greater than the guard), escape from the
@@ -169,6 +178,11 @@ completion and a fresh, post-STOP status with scanning off and motor off or
 position reached, before restoring the wider original limits. Restoration has
 a 2 s deadline, keeps ABORT responsive, and does not add acquisition samples.
 Repeated ABORT retries STOP without restarting the restoration deadline.
+If cleanup fails, `settings_restore_error` preserves its reason separately from
+the original run fault and appears in the desktop result summary. Restore
+timeouts distinguish unfinished USB transmission, missing fresh post-STOP
+status, scanning still reported, and motor-on without position-reached. These
+diagnostics do not relax the conditions for restoring wider travel limits.
 Disconnect, changed connection epoch, or failed restoration retains a dataset
 with `settings_restore_sent=false`. Remaining narrow limits may stay installed;
 check controller limits, speed and telemetry settings before further motion.

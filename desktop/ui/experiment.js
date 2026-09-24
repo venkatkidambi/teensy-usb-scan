@@ -50,6 +50,7 @@ export function experimentMessage(message) {
       const f=m.scan_fault;
       $('experiment-result-summary').textContent+=` · Fault at ${f.elapsed_ms} ms: position ${f.epos_um.toFixed(3)} µm, reference ${f.reference_um.toFixed(3)} µm, error ${f.error_um.toFixed(3)} µm (allowed ±${f.guard_um.toFixed(3)} µm), travel ${(f.low_counts*.078).toFixed(3)} to ${(f.high_counts*.078).toFixed(3)} µm, encoder age ${f.epos_age_ms} ms`;
     }
+    if(m.settings_restore_error)$('experiment-result-summary').textContent+=` · Cleanup: ${m.settings_restore_error}`;
     draw();
   }
   experimentControls();

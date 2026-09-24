@@ -178,6 +178,11 @@ impl Session {
             Setup::Verify(HLIM, high),
             Setup::Write(POLI, 2),
             Setup::Verify(POLI, 2),
+            // Confirm the starting speed while queries are still enabled.
+            // USB OUT completion alone cannot confirm that SSPD took effect.
+            // A sub-resolution waveform still stops via SCAN=0, never SSPD=0.
+            Setup::Write(SSPD, scan_start_speed(amplitude_nm, frequency_mhz).max(1)),
+            Setup::Verify(SSPD, scan_start_speed(amplitude_nm, frequency_mhz).max(1)),
             Setup::Write(INFO, 4),
             Setup::Feedback,
         ];
@@ -211,6 +216,7 @@ impl Session {
                         Setup::Verify(LLIM, _) => "Scan LLIM readback timeout",
                         Setup::Verify(HLIM, _) => "Scan HLIM readback timeout",
                         Setup::Verify(POLI, _) => "Scan POLI readback timeout",
+                        Setup::Verify(SSPD, _) => "Scan initial SSPD readback timeout",
                         _ => "Scan setting completion timeout",
                     }
                 });
@@ -259,7 +265,11 @@ impl Session {
                     }
                     if let Setup::Verify(_, expected) = step {
                         if value != expected {
-                            return Err("Controller scan setting mismatch");
+                            return Err(if i == SSPD {
+                                "Controller initial SSPD mismatch"
+                            } else {
+                                "Controller scan setting mismatch"
+                            });
                         }
                     } else {
                         self.saved[i] = Some(value);
@@ -400,7 +410,24 @@ impl Session {
             return Ok(true);
         }
         if now.wrapping_sub(self.restore_started) >= RESTORE_TIMEOUT_MS {
-            return Err("Controller settings restore timeout");
+            return Err(if !io.tx_idle() {
+                "Restore USB transmit timeout"
+            } else if self.scan_started && !self.stop_confirmed {
+                let s = t.samples[2];
+                if !s.valid
+                    || now.wrapping_sub(s.ms) >= SCAN_FEEDBACK_MS
+                    || s.ms.wrapping_sub(self.restore_started) >= 0x8000_0000
+                    || s.ms == self.restore_started
+                {
+                    "Restore needs fresh post-STOP status"
+                } else if s.value & (1 << 13) != 0 {
+                    "Restore blocked: controller still scanning"
+                } else {
+                    "Restore blocked: motor on without position reached"
+                }
+            } else {
+                "Controller settings restore timeout"
+            });
         }
         if !crate::xeryon_motion::ready(t) {
             return Err("Controller disconnected during restore");
@@ -639,6 +666,124 @@ mod tests {
             let bytes = cmd.encode(&mut buffer);
             assert_eq!(bytes, expected.as_bytes());
             assert!(bytes.len() <= 17);
+        }
+    }
+    #[test]
+    fn reported_5um_run_requests_positive_scan_and_rejects_backward_feedback() {
+        let c = ExperimentConfig::Sinusoidal {
+            center_nm: 374_556,
+            amplitude_nm: 5_000,
+            frequency_mhz: 1000,
+            cycles: 5,
+        };
+        let start = 62_612;
+        let mut t = feedback(start, 0.0);
+        t.record(b"EPOS", 4801, start);
+        t.record(b"STAT", 1345, start - 4);
+        let speed = velocity(c, 0, start, &t).unwrap();
+        assert_eq!(speed, 31);
+        let mut session = Session::new();
+        let mut io = Io::default();
+        session.velocity(speed, start, &mut io).unwrap();
+        session.service(start + 1, &mut io).unwrap();
+        session.service(start + 2, &mut io).unwrap();
+        let lines: Vec<_> = io
+            .commands
+            .iter()
+            .map(|command| {
+                let mut bytes = [0; 20];
+                command.encode(&mut bytes).to_vec()
+            })
+            .collect();
+        assert_eq!(lines, [b"SSPD=31\n".to_vec(), b"SCAN=1\n".to_vec()]);
+        // The 10 ms sample was not recorded. Check every encoder value that
+        // could pass its guard; none may request a negative direction.
+        let (low, high) = scan_bounds(374_556, 5_000).unwrap();
+        for count in low..=high {
+            t.record(b"EPOS", i64::from(count), start + 10);
+            t.record(b"STAT", 8545, start + 10);
+            if let Ok(speed) = velocity(c, 10, start + 10, &t) {
+                assert!(speed > 0);
+            }
+        }
+        t.record(b"EPOS", 4737, start + 18);
+        t.record(b"STAT", 8545, start + 18);
+        assert_eq!(velocity(c, 20, start + 20, &t), Err(TRACKING_LIMIT));
+    }
+    #[test]
+    fn setup_verifies_initial_speed_and_preserves_the_original_for_restoration() {
+        let mut session = Session::new();
+        let mut io = Io::default();
+        let original_speed = io.settings[SSPD];
+        let now = prepare(&mut session, &mut io).unwrap();
+        let speed = scan_start_speed(10_000, 1000);
+        assert_eq!(io.settings[SSPD], speed);
+        assert_eq!(session.saved[SSPD], Some(original_speed));
+        let write = io
+            .commands
+            .iter()
+            .position(|c| *c == Command::set("SSPD", speed))
+            .unwrap();
+        assert_eq!(
+            io.commands[write + 1],
+            Command {
+                tag: "SSPD",
+                value: None
+            }
+        );
+        assert_eq!(io.commands[write + 2], Command::set("INFO", 4));
+        assert!(!io.commands.iter().any(|c| c.tag == "SCAN"));
+        let before = io.commands.len();
+        session.velocity(speed, now + 1, &mut io).unwrap();
+        assert_eq!(&io.commands[before..], [Command::set("SCAN", 1)]);
+        session.begin_restore(now + 2);
+        for tick in now + 3..now + 300 {
+            if session
+                .restore(&feedback(tick, 0.0), tick, &mut io)
+                .unwrap()
+            {
+                break;
+            }
+        }
+        assert!(!session.changed());
+        assert_eq!(io.settings[SSPD], original_speed);
+    }
+    #[test]
+    fn initial_speed_must_have_a_fresh_matching_readback_before_scanning() {
+        for lost in [false, true] {
+            let mut session = Session::new();
+            let mut io = Io::default();
+            let speed = scan_start_speed(10_000, 1000);
+            let mut fault = None;
+            for now in 0..3_000 {
+                if io.commands.contains(&Command::set("SSPD", speed)) {
+                    if lost {
+                        io.drop_queries = usize::MAX;
+                    } else {
+                        io.settings[SSPD] = 10_000;
+                    } // write was not applied
+                }
+                let mut t = feedback(now, 0.0);
+                io.feedback(&mut t, now);
+                match session.prepare(config(10_000, 1000), &t, now, &mut io) {
+                    Err(e) => {
+                        fault = Some(e);
+                        break;
+                    }
+                    Ok(true) => panic!("unverified initial speed permitted scanning"),
+                    Ok(false) => {}
+                }
+            }
+            assert_eq!(
+                fault,
+                Some(if lost {
+                    "Scan initial SSPD readback timeout"
+                } else {
+                    "Controller initial SSPD mismatch"
+                })
+            );
+            assert_eq!(session.saved[SSPD], Some(10_000));
+            assert!(!io.commands.iter().any(|c| c.tag == "SCAN"));
         }
     }
     #[test]
@@ -918,9 +1063,49 @@ mod tests {
         let narrowed = io.settings;
         assert_eq!(
             session.restore(&feedback(0, 0.0), 2100, &mut io),
-            Err("Controller settings restore timeout")
+            Err("Restore needs fresh post-STOP status")
         );
         assert_eq!(io.settings, narrowed);
+    }
+    #[test]
+    fn restore_reports_the_blocking_condition_without_widening_limits() {
+        for (busy, stat, error) in [
+            (true, 1344, "Restore USB transmit timeout"),
+            (
+                false,
+                352 | (1 << 13),
+                "Restore blocked: controller still scanning",
+            ),
+            (
+                false,
+                352,
+                "Restore blocked: motor on without position reached",
+            ),
+        ] {
+            let mut session = Session::new();
+            let mut io = Io::default();
+            let now = prepare(&mut session, &mut io).unwrap();
+            session.scan_started = true;
+            session.begin_restore(now);
+            let commands = io.commands.len();
+            let narrowed = io.settings;
+            io.busy = busy;
+            for elapsed in 1..=RESTORE_TIMEOUT_MS {
+                let tick = now + elapsed;
+                let mut t = feedback(tick, 0.0);
+                t.record(b"STAT", stat, tick);
+                assert_eq!(
+                    session.restore(&t, tick, &mut io),
+                    if elapsed == RESTORE_TIMEOUT_MS {
+                        Err(error)
+                    } else {
+                        Ok(false)
+                    }
+                );
+            }
+            assert_eq!(io.settings, narrowed);
+            assert_eq!(io.commands.len(), commands);
+        }
     }
     #[test]
     fn correction_has_correct_sign_cap_and_sample_time_alignment() {
