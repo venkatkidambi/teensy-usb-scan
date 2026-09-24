@@ -2,6 +2,65 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupExperiments, experimentMessage, experimentControls } from '../ui/experiment.js';
 
+test('START explains blockers, validates fields, submits once, and reports failures', async () => {
+  const nodes=new Map();
+  const node=id=>{
+    if(!nodes.has(id))nodes.set(id,{value:'1',elements:[],setAttribute(){},
+      reportValidity:()=>true,getBoundingClientRect:()=>({width:0})});
+    return nodes.get(id);
+  };
+  const previousDocument=globalThis.document,previousObserver=globalThis.ResizeObserver;
+  globalThis.document={getElementById:node};
+  globalThis.ResizeObserver=class {observe(){}};
+  try {
+    const calls=[],logs=[];let reject;
+    const state={connected:true,hello:{experiments:true,sine_velocity:true},session:{
+      startExperiment(config){calls.push(config);return new Promise((_,fail)=>{reject=fail;});},
+    }};
+    setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls,activity:message=>logs.push(message)});
+    node('tab-sinusoidal').onclick();
+    const submit=()=>node('experiment-form').onsubmit({preventDefault(){}});
+    for(const [object,key,value,expected] of [
+      [state,'connected',false,/Connect the Teensy/],
+      [state,'experimentUnresolved',true,/Reconnect/],
+      [state.hello,'experiments',false,/enable experiments/],
+      [state.hello,'sine_velocity',false,/sinusoidal speed control/],
+      [state.session,'pending',true,/current Teensy request/],
+      [state.session,'experimentOwned',true,/owns the hardware/],
+    ]){
+      const old=object[key];object[key]=value;experimentControls();
+      assert.equal(node('experiment-start-button').disabled,true);
+      assert.match(node('experiment-start-reason').textContent,expected);
+      await submit();assert.match(node('experiment-state').textContent,expected);
+      object[key]=old;
+    }
+    assert.equal(calls.length,0);
+    experimentControls();
+    assert.equal(node('experiment-start-button').disabled,false);
+    assert.equal(node('experiment-start-reason').hidden,true);
+    node('experiment-repeats').reportValidity=()=>false;
+    node('experiment-repeats').validationMessage='Please enter a whole number.';
+    await submit();
+    assert.match(node('experiment-state').textContent,/Number of cycles: Please enter a whole number/);
+    assert.equal(calls.length,0);
+    node('experiment-repeats').reportValidity=()=>true;
+    for(const [key,value] of Object.entries({start:'374.556',increment:'5',timing:'1',repeats:'5'}))node(`experiment-${key}`).value=value;
+    const pending=submit();
+    assert.match(node('experiment-state').textContent,/Sending START/);
+    assert.equal(node('experiment-start-button').disabled,true);
+    await submit();
+    assert.deepEqual(calls,[{kind:'sinusoidal',start_um:374.556,increment_um:5,timing:1,repeats:5}]);
+    reject(Error('Controller is not ready'));await pending;
+    assert.equal(node('experiment-state').textContent,'START failed: Controller is not ready');
+    assert.equal(logs.at(-1),'START failed: Controller is not ready');
+    assert.equal(node('experiment-start-button').disabled,false);
+    state.session.startExperiment=()=>{throw Error('Bridge unavailable');};
+    await submit();
+    assert.equal(node('experiment-state').textContent,'START failed: Bridge unavailable');
+    assert.equal(node('experiment-start-button').disabled,false);
+  } finally {globalThis.document=previousDocument;globalThis.ResizeObserver=previousObserver;}
+});
+
 test('Save CSV opens native Save As, prevents duplicate requests, and retains results', async () => {
   const nodes = new Map();
   const node = id => {

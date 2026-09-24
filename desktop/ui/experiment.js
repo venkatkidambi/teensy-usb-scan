@@ -1,17 +1,36 @@
 // UI only: native Rust validates configuration, receives binary data and builds CSV.
 const $=id=>document.getElementById(id);
-let mode='dashboard',dataset=null,context=null,saving=false;
+let mode='dashboard',dataset=null,context=null,saving=false,starting=false;
 const modes=['dashboard','quasi_static','sinusoidal'];
 const fields=['start','increment','timing','repeats'];
 const configurations={quasi_static:['0','1','1','3'],sinusoidal:['0','1','1','3']};
+function startBlocked({session,connected,hello,experimentUnresolved}) {
+  if(starting)return 'Sending START to the Teensy…';
+  if(saving)return 'Wait for CSV saving to finish.';
+  if(!connected||!session)return 'Connect the Teensy to start an experiment.';
+  if(session.experimentOwned)return 'An experiment owns the hardware. Wait for its results or press ABORT.';
+  if(experimentUnresolved)return 'Reconnect to recover the previous experiment before starting another.';
+  if(!hello?.experiments)return 'Update the Teensy firmware to enable experiments.';
+  if(mode==='sinusoidal'&&!hello?.sine_velocity)return 'Update the Teensy firmware to enable sinusoidal speed control.';
+  if(session.pending)return 'Waiting for the current Teensy request to finish…';
+  return '';
+}
+function startStatus(message) {
+  $('experiment-state').textContent=message;
+  context.activity?.(message);
+}
 export function experimentControls() {
   if(!context)return;
   const {session,connected,hello,snapshot,experimentUnresolved}=context.state();
-  const owned=!!session?.experimentOwned||experimentUnresolved;
+  const owned=starting||!!session?.experimentOwned||experimentUnresolved;
   for(const name of modes) $(`tab-${name}`).disabled=owned;
   $('dashboard-panel').inert=owned;
   for(const control of $('experiment-form').elements)control.disabled=owned;
-  $('experiment-start-button').disabled=saving||owned||!connected||!hello?.experiments||(mode==='sinusoidal'&&!hello?.sine_velocity)||!!session?.pending;
+  const blocked=startBlocked(context.state());
+  $('experiment-start-button').disabled=!!blocked;
+  $('experiment-start-button').title=blocked;
+  $('experiment-start-reason').textContent=blocked;
+  $('experiment-start-reason').hidden=!blocked;
   $('experiment-motion-detail').textContent=mode==='sinusoidal'?(hello?.sine_velocity?'100 Hz speed control with encoder correction. Controller travel limits are temporarily narrowed and settings restoration attempted after stopping. Experimental: the previous Teensy freeze remains unresolved.':'Sinusoidal speed control requires firmware with the sine_velocity capability.'):'Steps use confirmed position arrival.';
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
@@ -77,12 +96,25 @@ export function setupExperiments(api) {
   for(const name of modes)$(`tab-${name}`).onclick=()=>tab(name);
   $('experiment-current').onclick=()=>{$('experiment-start').value=(api.state().snapshot.values.EPOS.value*.078).toFixed(3);};
   $('experiment-form').onsubmit=async event=>{
-    event.preventDefault();const {session,experimentUnresolved,hello}=api.state();if(saving||!session||session.experimentOwned||experimentUnresolved)return;
-    if(mode==='sinusoidal'&&!hello?.sine_velocity){$('experiment-state').textContent='Update firmware to use 100 Hz sinusoidal speed control.';return;}
+    event.preventDefault();
+    const state=api.state(),blocked=startBlocked(state);
+    if(blocked){startStatus(blocked);return;}
+    // Validate here so a native number-input rejection cannot swallow START
+    // before we can display a persistent explanation in the panel and log.
+    for(const key of fields){
+      const input=$(`experiment-${key}`);
+      if(!input.reportValidity()){
+        startStatus(`${$(`experiment-${key}-label`).textContent}: ${input.validationMessage}`);
+        return;
+      }
+    }
     const config={kind:mode,start_um:Number($('experiment-start').value),increment_um:Number($('experiment-increment').value),timing:Number($('experiment-timing').value),repeats:Number($('experiment-repeats').value)};
-    try{const pending=session.startExperiment(config);experimentControls();await pending;}
-    catch(e){$('experiment-state').textContent=String(e.message??e);}
-    finally{api.controls();}
+    starting=true;
+    startStatus('Sending START to the Teensy…');
+    experimentControls();
+    try{await state.session.startExperiment(config);}
+    catch(e){startStatus(`START failed: ${e.message??e}`);}
+    finally{starting=false;api.controls();}
   };
   $('experiment-abort').onclick=async()=>{
     try{await api.state().session.request('ABORT');}

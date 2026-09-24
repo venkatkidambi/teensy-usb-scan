@@ -22,14 +22,15 @@
   </nav>
   <section id="experiment-panel" class="panel" hidden>
     <div class="panel-heading"><div><h2 id="experiment-title">Quasi-static experiment</h2><p id="experiment-state" role="status">Configure a run. Timing and acquisition run on the Teensy.</p></div><button id="experiment-abort" class="stop-button" disabled>ABORT</button></div>
-    <form id="experiment-form" class="plunger-controls">
+    <form id="experiment-form" class="plunger-controls" novalidate>
       <label><span id="experiment-start-label">Start position (µm)</span><input id="experiment-start" type="number" step="0.001" value="0" required></label>
       <button id="experiment-current" type="button">Use current</button>
       <label><span id="experiment-increment-label">Signed step (µm)</span><input id="experiment-increment" type="number" step="0.001" value="1" required></label>
       <label><span id="experiment-timing-label">Hold time (s)</span><input id="experiment-timing" type="number" min="0.001" step="0.001" value="1" required></label>
       <label><span id="experiment-repeats-label">Number of steps</span><input id="experiment-repeats" type="number" min="1" step="1" value="3" required></label>
-      <button id="experiment-start-button" type="submit" class="primary" disabled>START</button>
+      <button id="experiment-start-button" type="submit" class="primary" aria-describedby="experiment-start-reason" disabled>START</button>
     </form>
+    <p id="experiment-start-reason" class="pressure-detail" role="status" hidden></p>
     <p class="pressure-detail">20 Hz recording · up to 204.75 s. Quasi-static reserves 10 s per move plus each hold; sinusoidal reserves 10 s for final center arrival. Start positions use the current encoder reference. Sinusoidal frequency: 0.1–2 Hz with 100 Hz speed updates and encoder correction; tracking depends on the controller and load. Position resolution: 0.078 µm. Speed resolution: 1 µm/s.</p>
     <p id="experiment-motion-detail" class="pressure-detail"></p>
     <div id="experiment-results" hidden>

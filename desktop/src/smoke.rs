@@ -42,7 +42,31 @@ pub const SCRIPT: &str = r#"
     document.querySelector('#connect').click();
     await new Promise(r=>setTimeout(r,100));
     if(document.querySelector('#epos').textContent!=='—'||document.querySelector('#pressure-raw').textContent!=='—')throw Error('Disconnect failed to clear data');
-    await invoke('smoke_report',{result:{ok:true,ports:ports.length,nativeIPC:true,demo:true,disconnect:true}});
+    // Exercise actual webview button/form behavior with an isolated fake sender.
+    // No physical serial port is opened and no motion command leaves this test.
+    const {setupExperiments,experimentControls}=await import('./experiment.js');
+    const calls=[];let rejectStart;
+    const state={connected:true,hello:{experiments:true,sine_velocity:true},session:{
+      startExperiment(config){calls.push(config);return new Promise((_,reject)=>{rejectStart=reject;});}
+    }};
+    setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls});
+    document.getElementById('tab-sinusoidal').click();
+    const start=document.getElementById('experiment-start-button');
+    const status=document.getElementById('experiment-state');
+    const repeats=document.getElementById('experiment-repeats');
+    repeats.value='1.5';
+    start.click();
+    if(calls.length||!status.textContent.includes('Number of cycles:'))throw Error('Invalid START was silent or sent a command');
+    for(const [key,value] of Object.entries({start:'374.556',increment:'5',timing:'1',repeats:'5'}))document.getElementById(`experiment-${key}`).value=value;
+    start.click();start.click();
+    if(calls.length!==1||!status.textContent.includes('Sending START'))throw Error('START click did not submit exactly once with visible status');
+    if(JSON.stringify(calls[0])!==JSON.stringify({kind:'sinusoidal',start_um:374.556,increment_um:5,timing:1,repeats:5}))throw Error('START form values incorrect');
+    rejectStart(Error('Test rejection'));
+    await new Promise(r=>setTimeout(r,0));
+    if(start.disabled||status.textContent!=='START failed: Test rejection')throw Error('START rejection did not recover visibly');
+    state.hello.sine_velocity=false;experimentControls();
+    if(!start.disabled||!document.getElementById('experiment-start-reason').textContent.includes('sinusoidal speed control'))throw Error('Disabled START has no explanation');
+    await invoke('smoke_report',{result:{ok:true,ports:ports.length,nativeIPC:true,demo:true,disconnect:true,startClick:true,startValidation:true}});
   }catch(e){await window.__TAURI__.core.invoke('smoke_report',{result:{ok:false,error:String(e)}});}
 })();
 "#;

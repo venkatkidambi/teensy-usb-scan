@@ -257,5 +257,5 @@ $('demo').addEventListener('click',()=>{
 });
 setInterval(()=>{if(connected&&session&&!session.experimentOwned&&!session.pending&&performance.now()-lastPing>2000){lastPing=performance.now();void request('PING',true).catch(()=>{});}render();if(history.length||pressureHistory.length)draw();},500);
 $('xeryon-speed').value='';
-setupExperiments({state:()=>({session,connected,hello,snapshot,experimentUnresolved}),positionAge:()=>age(snapshot?.values.EPOS),invoke,controls});
+setupExperiments({state:()=>({session,connected,hello,snapshot,experimentUnresolved}),positionAge:()=>age(snapshot?.values.EPOS),invoke,controls,activity});
 render();controls();void refresh();
