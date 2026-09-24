@@ -44,6 +44,7 @@ pub struct Engine<'a> {
     epoch: u32,
     transfer_next: usize,
     settling: bool,
+    fault_stat: Option<u32>,
 }
 impl<'a> Engine<'a> {
     pub fn new(samples: &'a mut [Record]) -> Self {
@@ -72,6 +73,7 @@ impl<'a> Engine<'a> {
             epoch: 0,
             transfer_next: 0,
             settling: false,
+            fault_stat: None,
         }
     }
     pub fn active(&self) -> bool {
@@ -101,8 +103,8 @@ impl<'a> Engine<'a> {
         if !xeryon_motion::fresh(t, 0, now) || !xeryon_motion::fresh(t, 2, now) {
             return Err("Xeryon feedback stale");
         }
-        if t.samples[2].value & xeryon_motion::FAULTS != 0 {
-            return Err("Xeryon controller fault");
+        if let Some(reason) = xeryon_motion::controller_fault(t.samples[2].value) {
+            return Err(reason);
         }
         if t.samples[2].value & ((1 << 1) | (1 << 14) | (1 << 15) | (1 << 9) | (1 << 13)) != 0 {
             return Err("Xeryon limit or incompatible motion");
@@ -175,6 +177,7 @@ impl<'a> Engine<'a> {
         self.epoch = t.epoch;
         self.step = 0;
         self.settling = false;
+        self.fault_stat = None;
         self.hold_started = None;
         self.state = State::MoveToStart;
         // First target is sent by begin(), only after all validation succeeds.
@@ -226,6 +229,11 @@ impl<'a> Engine<'a> {
                     .map(|m| m.interruption_reason.unwrap_or("Xeryon motion failed"))
             });
         if let Some(e) = fault {
+            // Preserve the triggering word before STOP and later publications
+            // replace the live Dashboard status, even between logging ticks.
+            if t.samples[2].valid && t.samples[2].value & xeryon_motion::FAULTS != 0 {
+                self.fault_stat = Some(t.samples[2].value as u32);
+            }
             self.finish(State::Fault, e, io);
             return;
         }
@@ -375,6 +383,9 @@ impl<'a> Engine<'a> {
             self.run
         )?;
         self.config.unwrap().write_json(out)?;
+        if let Some(stat) = self.fault_stat {
+            write!(out, ",\"fault_stat\":{stat}")?;
+        }
         writeln!(
             out,
             ",\"count\":{},\"record_bytes\":{RECORD_BYTES},\"bytes\":{},\"crc\":{},\"outcome\":\"{}\",\"reason\":\"{}\",\"stop_queued\":{},\"sample_ms\":{SAMPLE_MS},\"trajectory_ms\":{TRAJECTORY_MS},\"move_timeout_ms\":{MOVE_TIMEOUT_MS},\"started_ms\":{},\"elapsed_ms\":{},\"duration_bound_ms\":{},\"required_samples\":{},\"missed_samples\":{},\"max_lateness_ms\":{}}}",
@@ -596,7 +607,7 @@ mod tests {
         t.record(b"STAT", 1089 | (1 << 12), 0);
         assert_eq!(
             e.accept(sinusoidal(), &t, p, false, 0),
-            Err("Xeryon controller fault")
+            Err("Xeryon encoder error")
         );
         t.record(b"STAT", 1089, 0);
         e.accept(sinusoidal(), &t, p, false, 0).unwrap();
@@ -739,6 +750,15 @@ mod tests {
             assert!(e.data_ready(), "{condition}");
             assert_eq!(e.len, 1);
             assert_eq!(io.stops, 1);
+            if condition == 1 {
+                assert_eq!(e.reason, "Xeryon encoder error");
+                // A later healthy status must not erase the fault evidence.
+                t.record(b"STAT", 1089, now + 1);
+                e.poll(now + 1, &t, p, &mut io);
+                let mut meta = String::new();
+                e.metadata(&mut meta, 1).unwrap();
+                assert!(meta.contains("\"fault_stat\":4096"));
+            }
             assert_eq!(
                 e.outcome,
                 if condition == 4 { "aborted" } else { "faulted" }

@@ -24,6 +24,19 @@ pub use crate::experiment_data::{MAX_POSITION, MIN_POSITION};
 pub const MAX_TRAVEL_NM: u32 = 2_617_245_618;
 pub const FAULTS: i64 = (1 << 2) | (1 << 3) | (1 << 12) | (1 << 16) | (1 << 18) | (1 << 21);
 
+pub fn controller_fault(stat: i64) -> Option<&'static str> {
+    [
+        (2, "Xeryon thermal protection 1"),
+        (3, "Xeryon thermal protection 2"),
+        (12, "Xeryon encoder error"),
+        (16, "Xeryon position error limit (ELIM)"),
+        (18, "Xeryon safety timeout (TOU2)"),
+        (21, "Xeryon positioning timeout (TOU3)"),
+    ]
+    .into_iter()
+    .find_map(|(bit, reason)| (stat & (1 << bit) != 0).then_some(reason))
+}
+
 pub fn ready(t: &Telemetry) -> bool {
     t.mounted && t.cdc == 2 && t.vid == 0x04d8 && t.pid == 0xef4a
 }
@@ -102,6 +115,17 @@ mod tests {
     }
     #[test]
     fn stale_feedback_disconnect_fault_and_timeouts_stop_motion() {
+        assert_eq!(controller_fault(1089), None);
+        for (bit, expected) in [
+            (2, "Xeryon thermal protection 1"),
+            (3, "Xeryon thermal protection 2"),
+            (12, "Xeryon encoder error"),
+            (16, "Xeryon position error limit (ELIM)"),
+            (18, "Xeryon safety timeout (TOU2)"),
+            (21, "Xeryon positioning timeout (TOU3)"),
+        ] {
+            assert_eq!(controller_fault(1089 | (1 << bit)), Some(expected));
+        }
         let mut m = Motion::new();
         for condition in 0..5 {
             m.start(228, 100);
@@ -134,7 +158,7 @@ mod tests {
                     [
                         "USB2 disconnected",
                         "encoder feedback stale",
-                        "controller fault",
+                        "Xeryon position error limit (ELIM)",
                         "desktop heartbeat missing",
                         "move deadline",
                     ][condition]
@@ -162,8 +186,8 @@ pub fn target(t: &Telemetry, up: bool, nm: u32, now: u32) -> Result<i32, &'stati
         return Err("Waiting for fresh Xeryon position and status");
     }
     let stat = t.samples[2].value;
-    if stat & FAULTS != 0 {
-        return Err("Xeryon reports a controller fault");
+    if let Some(reason) = controller_fault(stat) {
+        return Err(reason);
     }
     if stat & ((1 << 9) | (1 << 13)) != 0 || (stat & (1 << 5) != 0 && stat & (1 << 10) == 0) {
         return Err("Xeryon is already moving");
@@ -229,8 +253,8 @@ impl Motion {
             Some("encoder feedback stale")
         } else if !fresh(t, 2, now) {
             Some("controller status stale")
-        } else if t.samples[2].value & FAULTS != 0 {
-            Some("controller fault")
+        } else if let Some(reason) = controller_fault(t.samples[2].value) {
+            Some(reason)
         } else if now.wrapping_sub(self.started) >= 60_000 {
             Some("move deadline")
         } else if !autonomous && now.wrapping_sub(self.heartbeat) >= 5000 {

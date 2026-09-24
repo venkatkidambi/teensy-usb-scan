@@ -146,6 +146,9 @@ settings are left unchanged. ABORT and faults request STOP and retain samples.
 
 The 40-byte record layout is unchanged. `target` is the last commanded position
 at the logging instant. Metadata reports `trajectory_ms: 10` and `sample_ms: 50`.
+Controller faults include a specific `reason` and, when observed by the engine,
+`fault_stat`: the triggering STAT word retained before STOP. The results display
+this word because the live Dashboard may show a later, cleared status.
 Positioning and acquisition report `running`; results remain owned until the
 verified dataset acknowledgement. USB dispatch timing does not establish physical
 tracking accuracy or feedback sampling rate.
