@@ -89,7 +89,12 @@ impl<'a> Engine<'a> {
     pub fn checksum(&self) -> u32 {
         !self.crc
     }
-    fn healthy(t: &Telemetry, p: Reading, now: u32) -> Result<(), &'static str> {
+    fn healthy(
+        t: &Telemetry,
+        p: Reading,
+        now: u32,
+        require_closed_loop: bool,
+    ) -> Result<(), &'static str> {
         if !xeryon_motion::ready(t) {
             return Err("USB2 disconnected");
         }
@@ -102,8 +107,11 @@ impl<'a> Engine<'a> {
         if t.samples[2].value & ((1 << 1) | (1 << 14) | (1 << 15) | (1 << 9) | (1 << 13)) != 0 {
             return Err("Xeryon limit or incompatible motion");
         }
-        if t.samples[2].value & ((1 << 6) | (1 << 8)) != ((1 << 6) | (1 << 8)) {
-            return Err("Xeryon closed loop or encoder invalid");
+        // STAT bit 8 means the index reference is known, not encoder health.
+        // Experiments use the current EPOS coordinate system, just like manual
+        // DPOS moves. Encoder errors (bit 12) are already rejected by FAULTS.
+        if require_closed_loop && t.samples[2].value & (1 << 6) == 0 {
+            return Err("Xeryon closed loop inactive");
         }
         if !(i64::from(MIN_POSITION)..=i64::from(MAX_POSITION)).contains(&t.samples[0].value) {
             return Err("Invalid encoder position");
@@ -131,10 +139,12 @@ impl<'a> Engine<'a> {
             if required > self.samples.len() {
                 return Err("Experiment buffer too small");
             }
-            Self::healthy(t, p, now)?;
+            // DPOS enters closed-loop positioning; a stopped controller need
+            // not already be in that mode before the initial target is sent.
+            Self::healthy(t, p, now, false)?;
             if plunger_running
                 || t.xeryon_motion.is_some_and(|m| m.state == 1)
-                || t.samples[2].value & (1 << 10) == 0
+                || (t.samples[2].value & (1 << 5) != 0 && t.samples[2].value & (1 << 10) == 0)
             {
                 return Err("Stop manual motion before START");
             }
@@ -204,7 +214,10 @@ impl<'a> Engine<'a> {
         if self.state == State::Running {
             self.elapsed_ms = now.wrapping_sub(self.started_ms);
         }
-        let fault = Self::healthy(t, p, now)
+        // Initial positioning can still see pre-DPOS status. Its existing
+        // deadline and echo/reached checks bound this transition; require
+        // closed loop once armed, before starting acquisition or the waveform.
+        let fault = Self::healthy(t, p, now, self.state != State::MoveToStart)
             .err()
             .or_else(|| (t.epoch != self.epoch).then_some("Xeryon connection changed"))
             .or_else(|| {
@@ -574,6 +587,47 @@ mod tests {
         assert_eq!(e.state, State::Dashboard);
         assert_eq!(e.run, 0);
         assert_eq!(counts(-117), Ok(-2));
+
+        let mut records = [Record::EMPTY; 256];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        let (mut t, p) = feedback(0, 0, true);
+        // Reported hardware status: closed loop + reached, index not known.
+        t.record(b"STAT", 1089 | (1 << 12), 0);
+        assert_eq!(
+            e.accept(sinusoidal(), &t, p, false, 0),
+            Err("Xeryon controller fault")
+        );
+        t.record(b"STAT", 1089, 0);
+        e.accept(sinusoidal(), &t, p, false, 0).unwrap();
+        e.begin(0, &mut io);
+        e.poll(1, &t, p, &mut io);
+        e.poll(2, &t, p, &mut io);
+        assert_eq!(e.state, State::Running);
+        e.abort(&mut io);
+
+        // STOP can leave both closed-loop and reached clear. DPOS re-enters
+        // positioning; pre-command feedback must not immediately fault it.
+        let mut e = Engine::new(&mut records);
+        t.record(b"STAT", 1 | (1 << 5), 0);
+        assert_eq!(
+            e.accept(sinusoidal(), &t, p, false, 0),
+            Err("Stop manual motion before START")
+        );
+        t.record(b"STAT", 1, 0);
+        e.accept(sinusoidal(), &t, p, false, 0).unwrap();
+        e.begin(0, &mut io);
+        t.xeryon_motion.as_mut().unwrap().state = 1;
+        e.poll(1, &t, p, &mut io);
+        assert_eq!(e.state, State::MoveToStart);
+        t.record(b"STAT", 1089, 2);
+        t.xeryon_motion.as_mut().unwrap().state = 2;
+        e.poll(2, &t, p, &mut io);
+        e.poll(3, &t, p, &mut io);
+        assert_eq!(e.state, State::Running);
+        t.record(b"STAT", 1, 4);
+        e.poll(4, &t, p, &mut io);
+        assert_eq!(e.reason, "Xeryon closed loop inactive");
     }
     #[test]
     fn quasi_static_records_motion_and_holds_and_uses_confirmed_reach() {

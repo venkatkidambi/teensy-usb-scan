@@ -45,9 +45,11 @@ terminal outcome and reason remain in metadata after entering DataReady.
 
 START checks the complete configuration, arithmetic overflow, rounded signed
 26-bit positions, worst-case duration, sample count, available storage, hardware
-identity, feedback freshness, healthy pressure, closed loop, valid encoder, and
+identity, feedback freshness, healthy pressure, controller/encoder errors, and
 stopped manual motion **before the first DPOS**. It does not home, find index,
-change limits or change the encoder reference. Existing setup must be correct.
+change limits or change the encoder reference. Targets use the current EPOS
+coordinate system; STAT bit 8 (index reference known) is not required. The initial
+DPOS enters closed-loop positioning, which is required before acquisition begins.
 
 For quasi-static, start positioning completes first, then acquisition begins.
 Step 1 is `start + increment`; there are exactly `steps` increments, each followed
@@ -209,7 +211,8 @@ The native START submission is ordered before any preempting ABORT; CSV and
 configuration remain disabled after disconnect while ownership is unresolved.
 
 During active states, Xeryon disconnect/epoch change, stale EPOS or STAT (3 s),
-existing controller fault bits, end stops, invalid encoder/closed loop, index/scan
+existing controller fault bits (including encoder error), end stops, loss of closed
+loop after initial positioning, index/scan
 operations, move/trajectory/acquisition deadlines, transmit failure/backlog, or
 pressure invalidity/transfer failure/250 ms staleness request STOP and retain a
 faulted dataset. ABORT retains an aborted dataset. STOP delivery is best effort
