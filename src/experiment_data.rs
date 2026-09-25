@@ -10,6 +10,7 @@ pub const MAX_SPEED_UM_S: u32 = 0x00ff_ffff;
 pub const MAX_DURATION_MS: u32 = (CAPACITY as u32 - 1) * SAMPLE_MS;
 pub const MIN_POSITION: i32 = -(1 << 25);
 pub const MAX_POSITION: i32 = (1 << 25) - 1;
+pub const MAX_TRAVEL_NM: u32 = MAX_POSITION as u32 * 78;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExperimentConfig {

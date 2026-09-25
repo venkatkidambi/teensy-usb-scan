@@ -113,30 +113,28 @@ Stop supersedes the desktop's pending request. If not acknowledged within 500 ms
 the UI closes the serial connection to drop DTR. Firmware stops on USB1 session
 closure, five seconds without a valid command, or a 60-second move deadline.
 Manual clients must send periodic PING commands during long moves.
-Firmware 0.1.4 uses the NanoManipulator I²C pressure sensor and reports
-`pressure: true`. Its snapshot `pressure` object contains:
+The LPS22HHTR driver reports `pressure: true`. Its snapshot `pressure` object contains:
 
-- `sensor: "i2c"`, `address: 92` (0x5C), and `who` (WHO_AM_I byte, or null).
-- `raw` and `average`: unsigned 24-bit raw counts, 0 through 16777215.
-  The average uses 16 entries initialized to zero, matching the Arduino sketch.
-- `temperature`: unsigned 16-bit raw register value, without unit conversion.
-- `ms`: last successful sample timestamp; `samples`: wrapping u32 sample count.
-- `valid`: false during initialization or after a transfer error. Numeric fields
-  may retain old values and must not be displayed as current when invalid.
+- `sensor: "lps22hh"`, `address: 92` (0x5C), `odr_hz: 200`, and `who`
+  (WHO_AM_I byte, expected 179 / 0xB3, or null when unavailable).
+- `raw` and `average`: signed 24-bit counts, -8388608 through 8388607,
+  sign-extended into i32; pressure in hPa is `raw / 4096`.
+  The average divides a zero-initialized 16-entry window by 16.
+- `temperature`: signed 16-bit register value; °C is `temperature / 100`.
+- `ms`: last fresh sample publication timestamp; `samples`: wrapping u32 count
+  of fresh conversions read, nominally 200 per second.
+- `valid`: false during initialization or after a sensor/transfer error. Numeric
+  fields may retain old values and must not be displayed as current when invalid.
 - `state`: 0 initializing, 1 waiting for first sample, 2 receiving,
-  3 transaction timeout, 4 bus error / no acknowledgement.
-- `errors`: wrapping u32 failed-transaction count.
-- `saturated`: always false; retained for compatibility with the earlier schema.
+  3 transaction timeout, 4 bus error / no acknowledgement, 5 unexpected device ID,
+  6 no fresh conversion for 100 ms, 7 configuration readback mismatch.
+- `errors`: wrapping u32 count of acquisition/setup failures.
 
-The sensor uses SDA pin 18, SCL pin 19, 400 kHz. Acquisition continues while
-streaming is paused. There are no new PC commands; WHO_AM_I and raw temperature
-are included in snapshots. Update the desktop app with this firmware because
-older parsers enforce the HX711 signed range.
-
-The updated app also accepts legacy HX711 firmware: absent `sensor` identifies
-its sign-inverted counts [-8388607, 8388608], legacy states (0 waiting for DOUT,
-1 settling, 2 receiving, 3 conversion timeout, 4 invalid transfer), and optional
-`pins` booleans `dout_high`, `sck_high`, `sck_requested_high`.
+The sensor uses SDA pin 18, SCL pin 19, 400 kHz I²C and repeated-start register
+reads. Data-ready is checked every millisecond; one five-byte burst reads both
+values only when fresh. Acquisition continues while streaming is paused.
+Dashboard snapshots remain 10 Hz and experiment recording remains 20 Hz.
+Update firmware and desktop together for this sensor-specific pressure schema.
 
 `plunger_io` remains unchanged: physical pad readbacks `standby`, `ain1`, `ain2`,
 2-bit `encoder`, signed 16-bit `pwm_count`/`pwm_compare`, and boolean

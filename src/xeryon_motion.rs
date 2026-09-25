@@ -22,10 +22,7 @@ pub fn write_move(
     writeln!(out, "DPOS={target}").map_err(|_| "Xeryon command too long")
 }
 
-pub use crate::experiment_data::{MAX_POSITION, MIN_POSITION};
-pub const MAX_TRAVEL_NM: u32 = 2_617_245_618;
-pub const FAULTS: i64 = (1 << 2) | (1 << 3) | (1 << 12) | (1 << 16) | (1 << 18) | (1 << 21);
-
+pub use crate::experiment_data::{MAX_POSITION, MAX_TRAVEL_NM, MIN_POSITION};
 pub fn controller_fault(stat: i64) -> Option<&'static str> {
     [
         (2, "Xeryon thermal protection 1"),

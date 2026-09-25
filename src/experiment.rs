@@ -125,7 +125,7 @@ impl<'a> Engine<'a> {
         }
         // STAT bit 8 means the index reference is known, not encoder health.
         // Experiments use the current EPOS coordinate system, just like manual
-        // DPOS moves. Encoder errors (bit 12) are already rejected by FAULTS.
+        // DPOS moves. controller_fault already rejects encoder errors (bit 12).
         if require_closed_loop && t.samples[2].value & (1 << 6) == 0 {
             return Err("Xeryon closed loop inactive");
         }
@@ -257,7 +257,7 @@ impl<'a> Engine<'a> {
         if let Some(e) = fault {
             // Preserve the triggering word before STOP and later publications
             // replace the live Dashboard status, even between logging ticks.
-            if t.samples[2].valid && t.samples[2].value & xeryon_motion::FAULTS != 0 {
+            if t.samples[2].valid && xeryon_motion::controller_fault(t.samples[2].value).is_some() {
                 self.fault_stat = Some(t.samples[2].value as u32);
             }
             self.finish(State::Fault, e, io);

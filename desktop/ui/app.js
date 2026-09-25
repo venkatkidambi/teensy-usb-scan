@@ -180,10 +180,10 @@ function render(){
   text('pressure-raw',pressureValid?number.format(pressure.raw):'—');
   text('pressure-average',pressureValid?number.format(pressure.average):'—');
   text('pressure-samples',number.format(pressure?.samples??0));
-  text('pressure-state',demo?'Simulated':!connected?'Offline':!hello?.pressure?'Unavailable':!pressureValid?pressureState(pressure):!pressureFresh?'Stale':pressure.saturated?'Saturated':'Receiving');
+  text('pressure-state',demo?'Simulated':!connected?'Offline':!hello?.pressure?'Unavailable':!pressureValid?pressureState(pressure):!pressureFresh?'Stale':'Receiving');
   text('pressure-age',pressureValid?`${pressureFresh?'Updated':'Stale'} · ${(pressureAge/1000).toFixed(1)}s ago`:'NO DATA');
-  text('pressure-sensor',pressure?.sensor==='i2c'||!pressure?'I²C · address 0x5C':'HX711 · legacy firmware');
-  text('pressure-detail',!active?'Raw readings appear when the I²C sensor responds.':!pressure?'Waiting for pressure telemetry.':`${pressureState(pressure)} · transfer errors ${pressure.errors??0}${pressure.sensor==='i2c'?` · WHO_AM_I ${pressure.who===null?'unavailable':`0x${pressure.who.toString(16).padStart(2,'0')}`} · temperature (raw) ${pressureValid?pressure.temperature:'—'}`:''}${pressure.pins?` · DT ${pressure.pins.dout_high?'HIGH':'LOW'} · SCK ${pressure.pins.sck_high?'HIGH (should be LOW)':'LOW'}`:''}`);
+  text('pressure-sensor','LPS22HHTR · I²C 0x5C · 200 Hz');
+  text('pressure-detail',!active?'LPS22HHTR readings appear when the sensor responds.':!pressure?'Waiting for pressure telemetry.':`${pressureState(pressure)} · errors ${pressure.errors} · WHO_AM_I ${pressure.who===null?'unavailable':`0x${pressure.who.toString(16).padStart(2,'0')}`} · temperature ${pressureValid?`${(pressure.temperature/100).toFixed(2)} °C`:'—'}`);
   const xm=snapshot?.xeryon_motion;
   $('xeryon-speed').disabled=!connected||!hello?.xeryon_speed;
   text('xeryon-motion-state',demo?'Demo — motion controls are disabled.':xeryonBlocked()||(xm?.state===2?'Target reached.':xm?.state===3?'Stop requested.':xm?.state===4?'Move interrupted — check feedback and the activity log.':hello?.xeryon_speed?'Ready. Enter travel; leave speed blank to use the controller setting.':'Ready. Speed uses the controller setting with this firmware. Enter travel, then choose Up or Down.'));
@@ -227,11 +227,11 @@ function render(){
   $('empty').hidden=history.length>0;
   if(stalled)notice('The Teensy is not answering connection checks. Displayed values may be stale; reconnect to retry.',true);
 }
-function drawSeries(canvasId,points,series,format,range){
+function drawSeries(canvasId,points,series,format){
   const canvas=$(canvasId),ctx=canvas.getContext('2d'),r=canvas.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2);
   canvas.width=Math.round(r.width*dpr);canvas.height=Math.round(r.height*dpr);ctx.scale(dpr,dpr);
   const left=57,right=r.width-14,top=12,bottom=r.height-29,now=performance.now();
-  let lo=range?.[0]??Infinity,hi=range?.[1]??-Infinity;for(const p of points)for(const[key]of series){const value=p[key];if(value!==null){lo=Math.min(lo,value);hi=Math.max(hi,value);}}
+  let lo=Infinity,hi=-Infinity;for(const p of points)for(const[key]of series){const value=p[key];if(value!==null){lo=Math.min(lo,value);hi=Math.max(hi,value);}}
   if(!Number.isFinite(lo)){lo=-100;hi=100;}const pad=Math.max((hi-lo)*.15,1);lo-=pad;hi+=pad;
   ctx.font='9px system-ui';ctx.fillStyle='#929f88';ctx.textAlign='right';
   for(let i=0;i<5;i++){const y=top+(bottom-top)*i/4;ctx.strokeStyle='#edf1e7';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();ctx.fillText(format(hi-(hi-lo)*i/4),left-8,y+3);}
@@ -249,7 +249,7 @@ const plotResize=new ResizeObserver(draw);
 for(const id of ['plot','pressure-plot'])plotResize.observe($(id).parentElement);
 $('demo').addEventListener('click',()=>{
   if(session||busy)return;reset();demo=true;const start=performance.now();hello={firmware:'preview',protocol:1,pressure:true,motion:false};epoch=1;
-  const make=ms=>({type:'snapshot',id:0,ms,epoch:1,vid:0x04d8,pid:0xef4a,mounted:true,cdc:2,records:Math.floor(ms/10),malformed:0,skipped:0,pressure:{sensor:'i2c',address:92,who:177,temperature:2500,state:2,errors:0,raw:Math.round(100000+15000*Math.sin(ms/1800)),average:Math.round(100000+12000*Math.sin(ms/1800-.4)),ms,samples:Math.floor(ms/100),valid:true,saturated:false},values:Object.fromEntries(Object.entries({EPOS:Math.round(1200+180*Math.sin(ms/6000)),DPOS:1200,STAT:352,SRNO:12345,SOFT:20103}).map(([tag,value])=>[tag,{value,ms}]))});
+  const make=ms=>({type:'snapshot',id:0,ms,epoch:1,vid:0x04d8,pid:0xef4a,mounted:true,cdc:2,records:Math.floor(ms/10),malformed:0,skipped:0,pressure:{sensor:'lps22hh',address:92,odr_hz:200,who:179,temperature:2500,state:2,errors:0,raw:Math.round(100000+15000*Math.sin(ms/1800)),average:Math.round(100000+12000*Math.sin(ms/1800-.4)),ms,samples:Math.floor(ms/5),valid:true},values:Object.fromEntries(Object.entries({EPOS:Math.round(1200+180*Math.sin(ms/6000)),DPOS:1200,STAT:352,SRNO:12345,SOFT:20103}).map(([tag,value])=>[tag,{value,ms}]))});
   for(let i=0;i<600;i++)history.push({time:start-60000+i*100,e:make(i*100).values.EPOS.value,d:1200});
   accept(make(60000));text('session-label','SIMULATED SESSION');notice('Demo mode — all readings are simulated. No serial port is open.');controls();
   demoTimer=setInterval(()=>accept(make(Math.floor(performance.now()-start)+60000)),100);

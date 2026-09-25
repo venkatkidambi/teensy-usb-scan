@@ -1,6 +1,10 @@
 // Native tests for hardware-independent firmware modules.
+#[path = "../src/command.rs"]
+mod command;
 #[path = "../src/line.rs"]
 mod line;
+#[path = "../src/plunger_config.rs"]
+mod plunger_config;
 #[path = "../src/protocol.rs"]
 mod protocol;
 #[path = "../src/xeryon.rs"]
@@ -31,26 +35,30 @@ mod plunger;
 
 #[path = "../src/pressure.rs"]
 mod pressure;
+#[path = "../src/pressure_i2c.rs"]
+mod pressure_i2c;
 
 #[test]
 fn pressure_snapshot_preserves_i2c_values_and_identity() {
     let mut telemetry = protocol::Telemetry::new();
     telemetry.pressure = Some(pressure::Reading {
-        raw: 0xffffff,
-        average: 0xffffff,
+        raw: -8_388_608,
+        average: 8_388_607,
         ms: 42,
         samples: 16,
         valid: true,
         state: 2,
-        who: Some(0xb1),
-        temperature: 65535,
+        who: Some(pressure::WHO_AM_I),
+        temperature: -2500,
         ..Default::default()
     });
     let mut frame = protocol::Frame::new();
     telemetry.snapshot(&mut frame, 7, 50, 0).unwrap();
     let json = core::str::from_utf8(frame.pending()).unwrap();
-    assert!(json.contains("\"raw\":16777215,\"average\":16777215"));
-    assert!(json.contains("\"sensor\":\"i2c\",\"address\":92,\"temperature\":65535,\"who\":177"));
+    assert!(json.contains("\"raw\":-8388608,\"average\":8388607"));
+    assert!(json.contains(
+        "\"sensor\":\"lps22hh\",\"address\":92,\"odr_hz\":200,\"temperature\":-2500,\"who\":179"
+    ));
 }
 
 #[path = "../src/experiment.rs"]

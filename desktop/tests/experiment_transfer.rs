@@ -1,5 +1,7 @@
 //! Firmware engine -> actual binary wire framing -> native receiver interoperability.
 #![allow(dead_code)]
+#[path = "../../src/command.rs"]
+mod command;
 #[path = "../../src/experiment.rs"]
 mod engine;
 #[path = "../../src/experiment_data.rs"]
@@ -8,6 +10,8 @@ mod experiment_data;
 mod line;
 #[path = "../../src/plunger.rs"]
 mod plunger;
+#[path = "../../src/plunger_config.rs"]
+mod plunger_config;
 #[path = "../../src/pressure.rs"]
 mod pressure;
 #[path = "../../src/protocol.rs"]
@@ -232,9 +236,12 @@ fn native_configuration_is_validated_in_rust() {
     .command(5)
     .unwrap();
     assert_eq!(command, "START 5 Q -1234 78 500 2 10");
-    assert!(receiver::valid_start(
-        &command.split_ascii_whitespace().collect::<Vec<_>>()
-    ));
+    let command::Command::Start(id, config) = command::Command::parse(command.as_bytes()).unwrap()
+    else {
+        panic!("Expected START");
+    };
+    assert_eq!(id, 5);
+    assert!(config.validate().is_ok());
     for speed in [1, 10, MAX_SPEED_UM_S] {
         let config: receiver::Input = serde_json::from_value(json!({
             "kind":"quasi_static", "start_um":0, "increment_um":1,
@@ -271,10 +278,7 @@ fn native_configuration_is_validated_in_rust() {
         "START 1 S 0 78 500 2 10",
         "START 1 Q 0 78 500 2 10 extra",
     ] {
-        assert!(!receiver::valid_start(
-            &command.split_ascii_whitespace().collect::<Vec<_>>()
-        ));
-        assert!(protocol::Command::parse(command.as_bytes()).is_err());
+        assert!(command::Command::parse(command.as_bytes()).is_err());
     }
     for timing in [0.0, 2.001, f64::NAN, f64::INFINITY] {
         assert!(

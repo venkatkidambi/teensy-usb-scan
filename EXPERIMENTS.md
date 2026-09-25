@@ -18,9 +18,11 @@ the Teensy. CSV is generated in desktop Rust only when Save CSV is selected.
 - Xeryon ASCII feedback populates the existing EPOS/DPOS/STAT/TIME cache with Teensy
   reception timestamps. Finite move completion still requires a matching DPOS
   received after command dispatch, then a later STAT with position-reached bit 10.
-- Pressure remains the existing nonblocking 400 kHz I²C driver, pins 18/19,
-  address 0x5C, a new acquisition attempt every 50 ms, a 20 ms transaction deadline,
-  and the existing 16-sample average. Experiments store raw pressure.
+- LPS22HHTR pressure uses nonblocking 400 kHz I²C on pins 18/19, address 0x5C,
+  200 Hz sensor output, 1 ms data-ready checks and a five-byte repeated-start
+  pressure/temperature burst. Transactions have a 20 ms deadline; missing fresh
+  conversions for 100 ms invalidates the sensor. The 16-sample average remains
+  for the dashboard; experiments store the latest raw pressure at 20 Hz.
 - Plunger PWM, quadrature ISR, ADC, calibration and stop behavior remain unchanged.
   START rejects any active manual plunger or Xeryon motion.
 
@@ -111,7 +113,7 @@ cadence; those must be measured on hardware.
 | --- | --- |
 | Clock | Existing monotonic Teensy SysTick, 1 ms resolution, wrapping u32 |
 | Acquisition schedule | 50 ms / 20 Hz, latest cached raw values |
-| Pressure acquisition | Existing 50 ms attempt interval, completion latency unchanged |
+| Pressure acquisition | LPS22HHTR 200 Hz output; 1 ms readiness polling; burst read at 400 kHz |
 | Sinusoidal targets | 10 ms / 100 Hz, 0.100–2.000 Hz wave frequency |
 | Record | 40 bytes, ten explicit little-endian 32-bit words |
 | Capacity | 4,096 records |
@@ -129,7 +131,7 @@ never silently shortened. A 204.75 s bound reserves all 4,096 records.
 | --- | --- | --- |
 | 0 | elapsed_ms | u32, actual logging time relative to acquisition start |
 | 4 | epos | i32, raw encoder counts |
-| 8 | pressure_raw | i32, existing driver value (currently unsigned 24-bit) |
+| 8 | pressure_raw | i32, sign-extended 24-bit LPS22HHTR counts (4096 counts/hPa) |
 | 12 | stat | u32, raw controller status |
 | 16 | epos_age_ms | u32, logging time minus EPOS reception time |
 | 20 | pressure_age_ms | u32, logging time minus pressure publication time |
@@ -139,8 +141,8 @@ never silently shortened. A 204.75 s bound reserves all 4,096 records.
 | 36 | controller_age_ms | u32, TIME reception age; UINT32_MAX means unavailable |
 
 EPOS/STAT/TIME are asynchronous feedback, not a simultaneous measurement. The
-pressure publication timestamp occurs after its temperature transaction, as in
-the unchanged driver. Ages retain the available latency information; neither a
+pressure publication timestamp occurs after the combined pressure/temperature burst
+completes. Only a fresh conversion advances that timestamp. Ages retain the available latency information; neither a
 software timestamp nor TIME establishes sensor conversion time or clock alignment.
 Pressure/position samples can repeat between sensor updates. The frontend plots
 the paired logging times; CSV also exports all ages and raw encoder/target values.

@@ -1,5 +1,8 @@
 //! USB1 is owned solely by the foreground loop. No heap, threads, or blocking IO.
-use crate::protocol::{Command, Commands, Frame};
+use crate::{
+    command::Command,
+    protocol::{Commands, Frame},
+};
 use core::{cell::RefCell, fmt::Write};
 use cortex_m::interrupt::{self, Mutex};
 use teensy4_bsp::usbd::{self, BusAdapter};

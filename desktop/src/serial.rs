@@ -1,3 +1,4 @@
+use crate::command::{Command, MAX_COMMAND_BYTES};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
@@ -47,56 +48,31 @@ pub fn ports() -> Result<Vec<Port>, String> {
     Ok(ports)
 }
 
-// This allowlist mirrors firmware protocol v1. No arbitrary serial writes.
-pub fn validate_command(command: &str) -> bool {
-    if command.len() > 128 || command.contains(['\r', '\n']) {
-        return false;
+// Parse with the firmware grammar; dataset-transfer requests remain native-only.
+fn parse_command(command: &str) -> Result<Command, &'static str> {
+    if command.len() > MAX_COMMAND_BYTES || command.contains(['\r', '\n']) {
+        return Err("Unsupported command");
     }
-    let parts: Vec<_> = command.split_ascii_whitespace().collect();
-    if parts.len() < 2
-        || !parts[1].bytes().all(|b| b.is_ascii_digit())
-        || !parts[1].parse::<u32>().is_ok_and(|id| id > 0)
+    let mut words = command.split_ascii_whitespace();
+    let name = words.next();
+    if !words
+        .next()
+        .is_some_and(|id| id.bytes().all(|b| b.is_ascii_digit()))
     {
-        return false;
+        return Err("Unsupported command");
     }
-    if crate::experiment::valid_start(&parts) {
-        return true;
+    // Dashboard arguments historically require unsigned decimal digits, while
+    // START accepts the signed numeric syntax used by experiment configuration.
+    if name != Some("START") && words.any(|word| word.starts_with('+')) {
+        return Err("Unsupported command");
     }
-    match parts.as_slice() {
-        [
-            "HELLO" | "PING" | "SNAPSHOT" | "PLUNGER_STOP" | "PLUNGER_ZERO" | "XERYON_STOP"
-            | "ABORT",
-            _,
-        ]
-        | ["STREAM", _, "0" | "1"] => true,
-        ["XERYON_MOVE", _, "U" | "D", nm, speed @ ..] if speed.len() <= 1 => {
-            let speed_valid = speed.is_empty()
-                || speed[0].bytes().all(|b| b.is_ascii_digit())
-                    && speed[0]
-                        .parse::<u32>()
-                        .is_ok_and(|s| (1..=16777215).contains(&s));
-            speed_valid
-                && nm.bytes().all(|b| b.is_ascii_digit())
-                && nm
-                    .parse::<u32>()
-                    .is_ok_and(|n| (78..=2_617_245_618).contains(&n))
+    let parsed = Command::parse(command.as_bytes()).map_err(|_| "Unsupported command")?;
+    match parsed {
+        Command::Start(_, config) if config.validate().is_err() => Err("Unsupported command"),
+        Command::GetData(..) | Command::GetChunk(..) | Command::AckData(..) => {
+            Err("Unsupported command")
         }
-        ["PLUNGER_LIMITS", _, min, max] => {
-            min.bytes().all(|b| b.is_ascii_digit())
-                && max.bytes().all(|b| b.is_ascii_digit())
-                && min
-                    .parse::<u8>()
-                    .is_ok_and(|lo| max.parse::<u8>().is_ok_and(|hi| lo < hi && hi <= 100))
-        }
-        ["PLUNGER_MOVE", _, "U" | "D", speed, um] => {
-            speed.bytes().all(|b| b.is_ascii_digit())
-                && speed.parse::<u8>().is_ok_and(|s| s > 0)
-                && um.bytes().all(|b| b.is_ascii_digit())
-                && um
-                    .parse::<u32>()
-                    .is_ok_and(|d| d > 0 && (u64::from(d) * 16688 + 500) / 1000 <= i32::MAX as u64)
-        }
-        _ => false,
+        _ => Ok(parsed),
     }
 }
 
@@ -361,21 +337,16 @@ impl Connection {
         })
     }
     pub fn send(&self, command: String) -> Result<(), String> {
-        if !validate_command(&command) {
-            return Err("Unsupported command".into());
-        }
+        let parsed = parse_command(&command)?;
         if self.finished.load(Ordering::Acquire) {
             return Err("Serial connection closed".into());
         }
         let mut q = self.inbox.lock().map_err(|e| e.to_string())?;
-        let mut words = command.split_ascii_whitespace();
-        let name = words.next();
-        let id = words.next().and_then(|s| s.parse::<u32>().ok());
-        let abort = name == Some("ABORT");
+        let abort = matches!(parsed, Command::Abort(_));
         if q.owned && !abort {
             return Err("Experiment owns hardware; only ABORT is allowed".into());
         }
-        let start_id = if name == Some("START") { id } else { None };
+        let start_id = matches!(parsed, Command::Start(..)).then(|| parsed.id());
         self.tx
             .try_send(command)
             .map_err(|_| "Serial command queue busy or disconnected")?;
@@ -456,7 +427,7 @@ mod tests {
             "STREAM 3 0",
             "STREAM 4 1",
         ] {
-            assert!(validate_command(command));
+            assert!(parse_command(command).is_ok(), "{command}");
         }
         for command in [
             "XERYON_MOVE 1 U 77",
@@ -492,8 +463,41 @@ mod tests {
             "STREAM 1 2",
             "PING 1 extra",
         ] {
-            assert!(!validate_command(command), "{command}");
+            assert!(parse_command(command).is_err(), "{command}");
         }
+    }
+    #[test]
+    fn shared_grammar_preserves_desktop_restrictions() {
+        for command in [
+            "START 1 Q -1234 +78 500 2 10",
+            "START 2 S 0 780 1000 1",
+            "ABORT 3",
+            "\tPING\t4 ",
+        ] {
+            assert!(parse_command(command).is_ok(), "{command}");
+        }
+        for command in [
+            "GET_DATA 1 1",
+            "GET_CHUNK 1 1 0",
+            "ACK_DATA_RECEIVED 1 1 0 0",
+            "PING +1",
+            "PING 1\r",
+            "PLUNGER_MOVE 1 U +64 10",
+            "PLUNGER_LIMITS 1 +30 75",
+            "XERYON_MOVE 1 U +78",
+            "XERYON_MOVE 1 U 78 +10",
+            "START 1 Q 0 78 500 2",
+            "START 1 Q 0 78 500 2 10 extra",
+            // Syntactically valid configurations still need duration/range checks.
+            "START 1 Q 0 78 500 1000 10",
+            "START 1 S 0 780 2001 1",
+            "START 1 S 2617245618 780 1000 1",
+        ] {
+            assert!(parse_command(command).is_err(), "{command}");
+        }
+        let limit = format!("PING 1{}", " ".repeat(MAX_COMMAND_BYTES - 6));
+        assert!(parse_command(&limit).is_ok());
+        assert!(parse_command(&format!("{limit} ")).is_err());
     }
     #[test]
     fn line_fragmentation_overflow_and_recovery() {

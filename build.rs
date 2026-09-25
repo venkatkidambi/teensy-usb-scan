@@ -29,9 +29,6 @@ fn main() {
         .flag("-ffunction-sections")
         .flag("-fdata-sections")
         .flag("-fno-common")
-        // Upstream compares an unsigned driver index against zero when all
-        // class drivers are disabled, as intended for this descriptor scanner.
-        .flag("-Wno-type-limits")
         .std("c11")
         .opt_level(2)
         .files([

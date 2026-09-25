@@ -18,8 +18,7 @@ export function xeryonMoveCommand(direction, travel, speed, speedSupported) {
 }
 const tags = new Set(['EPOS','DPOS','STAT','SRNO','SOFT','FREQ','TIME','SYNC']);
 export function pressureState(p) {
-  if(p?.sensor==='i2c') return ['Initializing I²C sensor','Waiting for first sample','Receiving','I²C transfer timed out','I²C bus error / no acknowledgement'][p.state]??(p.valid?'Receiving':'Initializing I²C sensor');
-  return ['Waiting for HX711 data','Settling channel B','Receiving','No conversions for 1s','DOUT stayed low after read'][p?.state]??(p?.valid?'Receiving':'Waiting for HX711 data');
+  return ['Initializing LPS22HHTR','Waiting for first sample','Receiving','I²C transfer timed out','I²C bus error / no acknowledgement','Unexpected sensor ID (expected 0xB3)','No fresh pressure conversion','Sensor configuration mismatch'][p?.state]??'Waiting for LPS22HHTR';
 }
 export function parseMessage(line) {
   if(line.startsWith('#')) return {type:'log',message:line.slice(1).trim()};
@@ -38,13 +37,11 @@ export function parseMessage(line) {
     }
     if(m.pressure!==undefined) {
       const p=m.pressure;
-      const counts=n=>Number.isInteger(n)&&(p?.sensor==='i2c'?n>=0&&n<=0xffffff:n>=-8388607&&n<=8388608);
-      if(!object(p)||!counts(p.raw)||!counts(p.average)||!u32(p.ms)||!u32(p.samples)||typeof p.valid!=='boolean'||typeof p.saturated!=='boolean') throw Error('Invalid pressure telemetry');
-      if(p.sensor!==undefined&&p.sensor!=='i2c') throw Error('Invalid pressure sensor');
-      if(p.sensor==='i2c'&&(p.address!==92||(p.who!==null&&(!u32(p.who)||p.who>255))||!u32(p.temperature)||p.temperature>65535)) throw Error('Invalid pressure I²C diagnostics');
-      if(p.state!==undefined&&(!u32(p.state)||p.state>4)) throw Error('Invalid pressure state');
-      if(p.errors!==undefined&&!u32(p.errors)) throw Error('Invalid pressure error count');
-      if(p.pins!==undefined&&(!object(p.pins)||!['dout_high','sck_high','sck_requested_high'].every(k=>typeof p.pins[k]==='boolean'))) throw Error('Invalid HX711 pin levels');
+      const counts=n=>Number.isInteger(n)&&n>=-8388608&&n<=8388607;
+      if(!object(p)||p.sensor!=='lps22hh'||!counts(p.raw)||!counts(p.average)||!u32(p.ms)||!u32(p.samples)||typeof p.valid!=='boolean') throw Error('Invalid pressure telemetry');
+      if(p.address!==92||p.odr_hz!==200||(p.who!==null&&(!u32(p.who)||p.who>255))||!Number.isInteger(p.temperature)||p.temperature< -32768||p.temperature>32767) throw Error('Invalid pressure sensor diagnostics');
+      if(!u32(p.state)||p.state>7||!u32(p.errors)) throw Error('Invalid pressure state');
+      if(p.valid&&(p.who!==0xb3||p.state!==2)) throw Error('Invalid pressure sensor identity or state');
     }
     if(m.plunger_io!==undefined) {
       const io=m.plunger_io;

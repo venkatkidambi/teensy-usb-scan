@@ -11,7 +11,7 @@
     <div class="devices" aria-label="Hardware status">
       <div class="device"><h3>Teensy 4.1 <span id="board-state" class="tag">Offline</span></h3><p id="firmware">USB1 · waiting for connection</p><small id="uptime">Bare-metal firmware</small></div>
       <div class="device"><h3>Xeryon XD-C <span id="actuator-state" class="tag">Unknown</span></h3><p id="actuator-detail">USB2 host · 04d8:ef4a</p><small id="serial">Serial number —</small></div>
-      <div class="device"><h3>Pressure input <span id="pressure-state" class="tag">Offline</span></h3><p id="pressure-sensor">I²C · address 0x5C</p><small>Raw counts · physical units uncalibrated</small></div>
+      <div class="device"><h3>Pressure input <span id="pressure-state" class="tag">Offline</span></h3><p id="pressure-sensor">LPS22HHTR · I²C 0x5C · 200 Hz</p><small>Raw pressure · 4096 counts/hPa</small></div>
     </div>
     <div class="controller-status"><div class="controller-heading"><h3>Controller status</h3><p id="stat-word">Waiting for STAT</p></div><div id="flags" class="flags"><p class="empty-copy">Active status flags appear with XD-C feedback.</p></div><div id="stat-age" class="status-age">No status received</div></div>
   </section>
@@ -61,7 +61,7 @@
     <section class="panel"><div class="panel-heading"><div><h2>Position over time</h2><p>Microns (µm) · last 60 seconds</p></div><span id="stream-state" class="tag">NO DATA</span></div><div class="plot-wrap"><canvas id="plot" role="img" aria-label="Encoder and target position in microns over time"></canvas><div id="empty"><strong>No position data</strong><p>Position feedback will appear here.</p></div></div><div class="panel-foot"><span class="legend">━ Encoder &nbsp; <span>┄ Target</span></span><span id="samples">0 samples</span></div></section>
     <section class="panel pressure-panel" aria-label="Pressure readings">
       <div class="panel-heading"><div><h2>Pressure signal</h2><p>Raw counts · last 60 seconds</p></div><span id="pressure-age" class="tag">NO DATA</span></div>
-      <p id="pressure-detail" class="pressure-detail">Raw readings appear when the I²C sensor responds.</p>
+      <p id="pressure-detail" class="pressure-detail">LPS22HHTR readings appear when the sensor responds.</p>
       <div class="pressure-readings"><span>Raw <strong id="pressure-raw">—</strong></span><span>Average <strong id="pressure-average">—</strong></span><span>Samples <strong id="pressure-samples">0</strong></span></div>
       <div class="plot-wrap"><canvas id="pressure-plot" role="img" aria-label="Raw and averaged pressure counts over time"></canvas></div>
       <div class="panel-foot"><span class="legend">━ Average &nbsp; <span>┄ Raw</span></span><span>16-sample average · uncalibrated</span></div>

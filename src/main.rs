@@ -2,6 +2,7 @@
 #![no_main]
 
 use teensy4_bsp::{self as bsp, board, hal::pit::Channel};
+mod command;
 mod console;
 mod experiment;
 mod experiment_data;
@@ -9,6 +10,7 @@ mod fault;
 mod line;
 mod motor;
 mod plunger;
+mod plunger_config;
 mod pressure;
 mod pressure_i2c;
 mod protocol;
@@ -121,7 +123,11 @@ fn main() -> ! {
         // SysTick wakes us every millisecond; host events can wake us sooner.
         // USB1 is polled, so an unopened serial terminal never blocks scanning.
         fault::heartbeat(usb_host::millis());
-        cortex_m::asm::wfi();
+        // Drain/refill I2C FIFOs at bus speed, with USB and motion still serviced
+        // on every iteration. Sleep only between sensor transactions.
+        if !pressure.busy() {
+            cortex_m::asm::wfi();
+        }
     }
 }
 

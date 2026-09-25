@@ -280,7 +280,7 @@ logging-only firmware cannot answer these requests.
 Only one directly attached device and one CDC ACM interface are supported, with
 a configuration descriptor up to 1024 bytes. Host control-transfer timeout support
 is incomplete; an unresponsive device may require unplugging or resetting the board.
-Pressure conversion to physical units requires transducer calibration. See
+LPS22HHTR pressure counts convert to hPa by dividing by 4096. See
 [EXPERIMENTS.md](EXPERIMENTS.md#validation-and-physical-acceptance) for experiment
 validation results and the remaining physical acceptance checks.
 
@@ -341,33 +341,48 @@ firmware remains viewable.
 
 ## I²C pressure input
 
-The working sensor uses the interface in NanoManipulator `Pressure.cpp`.
-Since firmware 0.1.4, pressure uses LPI2C1 on the
-standard Teensy `Wire` pins: **SDA pin 18 / A4, SCL pin 19 / A5**, address **0x5C**,
-at **400 kHz**. Keep the wiring that works with NanoManipulator. Pins A0/A1 are
-no longer used for pressure. Motor wiring and control are unchanged.
+The sensor is **ST LPS22HHTR (LPS22HH)** on LPI2C1: **SDA pin 18 / A4,
+SCL pin 19 / A5**, address **0x5C** (SA0 low). CS must be high for I²C;
+INT_DRDY must be unconnected or low at power-up. Use external SDA/SCL pull-ups
+that meet Fast-mode rise times for the actual wiring and bus capacitance.
 
-The driver writes `0x72` to register `0x10`, reads WHO_AM_I at `0x0F`, reads
-three pressure bytes starting at `0xA8`, and two raw temperature bytes at `0xAB`.
-Register-pointer writes end with STOP before the read, matching the supplied
-Arduino sketch. Pressure is unsigned little-endian 24-bit data, with no HX711
-sign inversion. Temperature preserves the sketch's unsigned raw two-byte value.
-No sensor model or physical-unit conversion is inferred from the address alone.
+The bus runs at **400 kHz**, the maximum specified for this device's I²C interface
+([datasheet, Table 7 and section 7.2](https://www.st.com.cn/resource/en/datasheet/lps22hh.pdf)).
+The 1 MHz timing mentioned for I3C address assignment is not an I²C data-transfer
+rating. Firmware checks WHO_AM_I = **0xB3** before configuration, disables I3C,
+enables address auto-increment, and sets **200 Hz** conversion with block data
+update (BDU) and no additional sensor low-pass filter. It verifies CTRL_REG1/2
+readback before sampling.
 
-Sampling starts every 50 ms. The average divides a zero-initialized 16-entry
-window by 16, matching NanoManipulator (including its initial ramp). Successful
-samples carry timestamps and a sample count. I²C errors invalidate the displayed
-reading and clear the averaging window; initialization is retried after one
-second. WHO_AM_I is reported diagnostically rather than checked against an
-assumed sensor model.
+Without an extra data-ready wire, firmware polls STATUS at most once per
+millisecond. When both pressure and temperature are ready, one repeated-start
+read fetches the five consecutive output bytes at `0x28`–`0x2C`. BDU keeps each
+value coherent by reading its most significant byte last
+([ST AN5209, section 5.5](https://www.st.com/resource/en/application_note/an5209-lps22hh-mems-nano-pressure-sensor-stmicroelectronics.pdf)).
+Unchanged values from new conversions still count; rereading old data never
+refreshes the sample timestamp. This supports the sensor's nominal **200 samples/s**
+in place of the former 20 reads/s. The pressure/temperature burst takes 72 SCL
+clocks (180 µs at 400 kHz), plus START/STOP timing and any controller stalls;
+the separate ready check takes 36 clocks. Actual rates must be checked on hardware.
 
-Transactions use the hardware FIFOs and are polled without waiting. Each has a
-20 ms deadline; a failed transaction resets the controller. A physically stuck
-bus is reported as an error and may still require hardware intervention. Motor
-interrupts, USB servicing, and disconnect handling continue during acquisition.
+The foreground services the hardware FIFOs without waiting inside the driver.
+While a transfer is pending, it continues looping through USB and motion service
+instead of sleeping for the next millisecond tick. Each I²C transaction retains
+a 20 ms deadline. Missing fresh conversions for 100 ms, a wrong identity,
+configuration mismatch, or a bus error invalidates the reading, clears the average,
+and retries initialization after one second. Bus failures also reset LPI2C1.
+A physically stuck bus may require hardware intervention.
 
-Update both firmware and desktop app. Flash with `./upload.sh` on macOS or
-`upload.cmd` on Windows, then reconnect and verify the current firmware version. The pressure
-panel should identify **I²C · address 0x5C** and report WHO_AM_I, raw temperature,
-and increasing pressure samples. Use **Read snapshot** to capture the `Hardware`
-log if it fails. Older firmware still reports HX711 diagnostics in the new app.
+Pressure is sign-extended 24-bit data at **4096 counts/hPa**; temperature is signed
+16-bit data at **100 counts/°C**. The dashboard and CSV retain raw pressure counts;
+the dashboard temperature diagnostic uses °C. The 16-entry average remains
+zero-filled at startup and now spans about **80 ms** at 200 Hz. Experiments
+continue recording the latest raw value at **20 Hz**; dashboard snapshots remain
+10 Hz. Both retain pressure age independently of the faster acquisition.
+
+Update both firmware and desktop app together. The pressure panel identifies
+**LPS22HHTR · I²C 0x5C · 200 Hz** and reports identity, temperature, errors, and
+fresh sample count. Verify approximately 200 additional samples per second,
+WHO_AM_I `0xB3`, recovery after sensor disconnect/reconnect, and uninterrupted
+USB/motion service. The driver changes have software coverage but still need
+this hardware acceptance check.

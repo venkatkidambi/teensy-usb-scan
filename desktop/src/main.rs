@@ -1,9 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[path = "../../src/command.rs"]
+mod command;
 mod experiment;
 #[allow(dead_code)]
 #[path = "../../src/experiment_data.rs"]
 mod experiment_data;
+#[path = "../../src/plunger_config.rs"]
+mod plunger_config;
 mod serial;
 #[cfg(feature = "smoke-test")]
 mod smoke;

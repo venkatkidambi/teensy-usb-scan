@@ -65,47 +65,32 @@ test('plunger schema, move framing and Stop preemption',async()=>{
   } finally { await s.close(); }
 });
 
-test('HX711 pressure schema preserves inverted signed range and freshness',()=>{
-  const m={type:'snapshot',id:0,ms:100,epoch:1,vid:0,pid:0,mounted:false,cdc:0,records:0,malformed:0,skipped:0,values:{},pressure:{raw:8388608,average:-8388607,ms:99,samples:1,valid:true,saturated:true}};
+test('LPS22HHTR pressure validates signed registers, identity, freshness and faults',()=>{
+  const m={type:'snapshot',id:0,ms:100,epoch:1,vid:0,pid:0,mounted:false,cdc:0,records:0,malformed:0,skipped:0,values:{},pressure:{sensor:'lps22hh',address:92,odr_hz:200,who:179,temperature:-2500,raw:-8388608,average:8388607,ms:99,samples:16,valid:true,state:2,errors:0}};
   assert.deepEqual(parseMessage(JSON.stringify(m)).pressure,m.pressure);
-  m.pressure.valid=false;assert.equal(parseMessage(JSON.stringify(m)).pressure.valid,false);
-  for(const [key,value] of [['raw',8388609],['raw',-8388608],['average',1.5],['ms',-1],['samples',-1],['valid',1],['saturated','yes']]){
-    const bad={...m,pressure:{...m.pressure,[key]:value}};
-    assert.throws(()=>parseMessage(JSON.stringify(bad)),/pressure/);
+  for(const [key,value] of [['raw',-8388609],['raw',8388608],['average',1.5],['ms',-1],['samples',-1],['valid',1],['who',256],['who',177],['who',null],['temperature',32768],['temperature',-32769],['temperature',1.5],['address',93],['odr_hz',100],['sensor','unknown'],['sensor',undefined],['state',1],['state',8],['errors',-1]]) {
+    assert.throws(()=>parseMessage(JSON.stringify({...m,pressure:{...m.pressure,[key]:value}})),/pressure/);
   }
+  for(const temperature of [-32768,32767])assert.doesNotThrow(()=>parseMessage(JSON.stringify({...m,pressure:{...m.pressure,temperature}})));
+  for(let state=0;state<=7;state++) {
+    if(state===2)continue;
+    assert.doesNotThrow(()=>parseMessage(JSON.stringify({...m,pressure:{...m.pressure,state,who:null,valid:false}})));
+  }
+  assert.equal(pressureState({state:0}),'Initializing LPS22HHTR');
+  assert.equal(pressureState({state:1}),'Waiting for first sample');
+  assert.equal(pressureState({state:3}),'I²C transfer timed out');
+  assert.equal(pressureState({state:4}),'I²C bus error / no acknowledgement');
+  assert.match(pressureState({state:5}),/expected 0xB3/);
+  assert.match(pressureState({state:6}),/No fresh/);
+  assert.match(pressureState({state:7}),/configuration mismatch/);
   delete m.pressure;assert.doesNotThrow(()=>parseMessage(JSON.stringify(m)));
 });
 
-test('hardware diagnostics distinguish missing data, settling and transfer failure',()=>{
-  assert.equal(pressureState({state:0,valid:false}),'Waiting for HX711 data');
-  assert.equal(pressureState({state:1,valid:false}),'Settling channel B');
-  assert.equal(pressureState({state:3,valid:false}),'No conversions for 1s');
-  assert.equal(pressureState({state:4,valid:false}),'DOUT stayed low after read');
-  assert.equal(pressureState({valid:true}),'Receiving');
+test('plunger hardware diagnostics validate pad levels',()=>{
   const m={type:'snapshot',id:0,ms:100,epoch:1,vid:0,pid:0,mounted:false,cdc:0,records:0,malformed:0,skipped:0,values:{},plunger_io:{standby:true,ain1:true,ain2:false,encoder:3,pwm_count:123,pwm_compare:16447,pwm_running:true,pwm_enabled:true}};
   assert.deepEqual(parseMessage(JSON.stringify(m)).plunger_io,m.plunger_io);
   m.plunger_io.standby=1;assert.throws(()=>parseMessage(JSON.stringify(m)),/plunger IO/);
 });
-
-test('HX711 pin readback validates booleans',()=>{
-  const m={type:'snapshot',id:0,ms:100,epoch:1,vid:0,pid:0,mounted:false,cdc:0,records:0,malformed:0,skipped:0,values:{},pressure:{raw:0,average:0,ms:0,samples:0,valid:false,saturated:false,state:0,errors:0,pins:{dout_high:true,sck_high:false,sck_requested_high:false}}};
-  assert.deepEqual(parseMessage(JSON.stringify(m)).pressure.pins,m.pressure.pins);
-  m.pressure.pins.sck_high=0;assert.throws(()=>parseMessage(JSON.stringify(m)),/pin levels/);
-});
-
-
-test('I²C pressure accepts unsigned 24-bit values and validates sensor diagnostics',()=>{
-  const m={type:'snapshot',id:0,ms:100,epoch:1,vid:0,pid:0,mounted:false,cdc:0,records:0,malformed:0,skipped:0,values:{},pressure:{sensor:'i2c',address:92,who:177,temperature:65535,raw:0xffffff,average:0xffffff,ms:99,samples:16,valid:true,saturated:false,state:2,errors:0}};
-  assert.deepEqual(parseMessage(JSON.stringify(m)).pressure,m.pressure);
-  for(const [key,value] of [['raw',-1],['average',0x1000000],['who',256],['temperature',65536],['address',93],['sensor','unknown']]) {
-    assert.throws(()=>parseMessage(JSON.stringify({...m,pressure:{...m.pressure,[key]:value}})),/pressure/);
-  }
-  m.pressure.who=null;assert.doesNotThrow(()=>parseMessage(JSON.stringify(m)));
-  assert.equal(pressureState({...m.pressure,state:0}),'Initializing I²C sensor');
-  assert.equal(pressureState({...m.pressure,state:3}),'I²C transfer timed out');
-  assert.equal(pressureState({...m.pressure,state:4}),'I²C bus error / no acknowledgement');
-});
-
 
 test('Xeryon travel units, schema, framing and Stop preemption',async()=>{
   assert.equal(xeryonTravelNm('10'),10000);

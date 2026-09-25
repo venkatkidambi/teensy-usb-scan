@@ -116,6 +116,8 @@ The separate desktop Cargo.lock pins its dependencies and does not alter firmwar
   command validation, and a worker with a 20 ms read timeout. Eight queued commands,
   32 replies, 32 logs, one latest unsolicited snapshot; lines capped at 4096 bytes.
   Reply overflow closes the connection explicitly instead of dropping acknowledgments.
+  Command parsing uses firmware's `../src/command.rs` and plunger calibration/limits
+  from `../src/plunger_config.rs`; native-only dataset requests remain blocked at IPC.
 - `ui/protocol.mjs`: schema validation, session/request IDs, expected reply types,
   2.5-second request timeout, and one in-flight request. IPC polling is serial and
   scheduled every 50 ms after the previous call finishes, preventing overlapping polls.
@@ -150,10 +152,12 @@ opens the real desktop window, exercises native IPC/port listing and demo render
 then exits with a success/failure status. It never opens a physical serial device.
 Normal launchers do not enable it.
 
-The pressure panel shows raw I²C counts, a 16-sample average, sample age, sensor
-diagnostics, and a 60-second signal plot. Physical pressure units need calibration;
-no scale is assumed. Acquisition continues independently of Xeryon enumeration or
-stream pause. Older HX711 firmware remains supported by the desktop parser and UI.
+The pressure panel shows LPS22HHTR raw counts, a 16-sample average, sample age,
+WHO_AM_I, temperature in °C, errors, and a 60-second signal plot. Pressure counts
+convert to hPa by dividing by 4096. Firmware acquires fresh conversions at the
+sensor's nominal 200 Hz output rate over 400 kHz I²C; the dashboard receives
+10 Hz snapshots and experiments record at 20 Hz. Acquisition continues independently
+of Xeryon enumeration or stream pause. Update firmware and desktop together.
 See the root README for [plunger wiring and behavior](../README.md#wired-plunger)
 and [pressure wiring and acquisition](../README.md#i²c-pressure-input), and
-[PROTOCOL.md](PROTOCOL.md) for capabilities, units and legacy compatibility.
+[PROTOCOL.md](PROTOCOL.md) for capabilities and units.

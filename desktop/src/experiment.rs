@@ -59,41 +59,6 @@ impl Input {
     }
 }
 
-pub fn valid_start(parts: &[&str]) -> bool {
-    let [
-        "START",
-        _,
-        kind,
-        start,
-        increment,
-        timing,
-        repeats,
-        tail @ ..,
-    ] = parts
-    else {
-        return false;
-    };
-    let speed = match tail {
-        [] => None,
-        [value] => match value.parse::<u32>() {
-            Ok(speed) => Some(speed),
-            Err(_) => return false,
-        },
-        _ => return false,
-    };
-    let (Ok(start), Ok(increment), Ok(timing), Ok(repeats)) = (
-        start.parse::<i64>(),
-        increment.parse::<i64>(),
-        timing.parse::<u32>(),
-        repeats.parse::<u32>(),
-    ) else {
-        return false;
-    };
-    ExperimentConfig::from_wire(kind, start, increment, timing, repeats, speed)
-        .and_then(|config| config.validate())
-        .is_ok()
-}
-
 pub enum Event {
     Line(String),
     Chunk(Value, Vec<u8>),
