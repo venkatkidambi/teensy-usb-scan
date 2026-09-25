@@ -2,8 +2,8 @@
 const $=id=>document.getElementById(id);
 let mode='dashboard',dataset=null,context=null,saving=false,starting=false;
 const modes=['dashboard','quasi_static','sinusoidal'];
-const fields=['start','increment','timing','repeats'];
-const configurations={quasi_static:['0','1','1','3'],sinusoidal:['0','1','1','3']};
+const fields=['start','increment','timing','repeats','speed'];
+const configurations={quasi_static:['0','1','1','3','10'],sinusoidal:['0','1','1','3','10']};
 function startBlocked({session,connected,hello,experimentUnresolved}) {
   if(starting)return 'Sending START to the Teensy…';
   if(saving)return 'Wait for CSV saving to finish.';
@@ -11,6 +11,7 @@ function startBlocked({session,connected,hello,experimentUnresolved}) {
   if(session.experimentOwned)return 'An experiment owns the hardware. Wait for its results or press ABORT.';
   if(experimentUnresolved)return 'Reconnect to recover the previous experiment before starting another.';
   if(!hello?.experiments)return 'Update the Teensy firmware to enable experiments.';
+  if(mode==='quasi_static'&&!hello?.quasi_static_speed)return 'Update the Teensy firmware to enable quasi-static speed control.';
   if(mode==='sinusoidal'&&!hello?.sine_position)return 'Update the Teensy firmware to enable sinusoidal position control.';
   if(session.pending)return 'Waiting for the current Teensy request to finish…';
   return '';
@@ -26,12 +27,13 @@ export function experimentControls() {
   for(const name of modes) $(`tab-${name}`).disabled=owned;
   $('dashboard-panel').inert=owned;
   for(const control of $('experiment-form').elements)control.disabled=owned;
+  $('experiment-speed').disabled=owned||mode!=='quasi_static';
   const blocked=startBlocked(context.state());
   $('experiment-start-button').disabled=!!blocked;
   $('experiment-start-button').title=blocked;
   $('experiment-start-reason').textContent=blocked;
   $('experiment-start-reason').hidden=!blocked;
-  $('experiment-motion-detail').textContent=mode==='sinusoidal'?'100 Hz sine position commands. Starts and finishes at the center position.':'Steps use confirmed position arrival.';
+  $('experiment-motion-detail').textContent=mode==='sinusoidal'?'100 Hz sine position commands. Starts and finishes at the center position.':'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.';
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
   $('experiment-save').disabled=saving||owned||!dataset;
@@ -44,6 +46,7 @@ function tab(next) {
   $('dashboard-panel').hidden=mode!=='dashboard';$('experiment-panel').hidden=mode==='dashboard';
   if(mode!=='dashboard'){
     const sine=mode==='sinusoidal';
+    $('experiment-speed-field').hidden=sine;
     $('experiment-title').textContent=sine?'Sinusoidal experiment':'Quasi-static experiment';
     for(const [key,label] of Object.entries({start:sine?'Center position (µm)':'Start position (µm)',increment:sine?'Amplitude (µm)':'Signed step (µm)',timing:sine?'Frequency (Hz)':'Hold time (s)',repeats:sine?'Number of cycles':'Number of steps'}))$(`experiment-${key}-label`).textContent=label;
     fields.forEach((k,i)=>{$(`experiment-${k}`).value=configurations[mode][i];});
@@ -98,6 +101,7 @@ export function setupExperiments(api) {
     // Validate here so a native number-input rejection cannot swallow START
     // before we can display a persistent explanation in the panel and log.
     for(const key of fields){
+      if(key==='speed'&&mode!=='quasi_static')continue;
       const input=$(`experiment-${key}`);
       if(!input.reportValidity()){
         startStatus(`${$(`experiment-${key}-label`).textContent}: ${input.validationMessage}`);
@@ -105,6 +109,7 @@ export function setupExperiments(api) {
       }
     }
     const config={kind:mode,start_um:Number($('experiment-start').value),increment_um:Number($('experiment-increment').value),timing:Number($('experiment-timing').value),repeats:Number($('experiment-repeats').value)};
+    if(mode==='quasi_static')config.speed_um_s=Number($('experiment-speed').value);
     starting=true;
     startStatus('Sending START to the Teensy…');
     experimentControls();

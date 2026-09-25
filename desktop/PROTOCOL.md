@@ -5,6 +5,14 @@ extension. See [EXPERIMENTS.md — Dataset protocol](../EXPERIMENTS.md#dataset-p
 for framing, raw record layout, CRC, ownership, passive reconnect and ACK lifecycle.
 All Dashboard commands below remain available when no experiment owns hardware.
 
+Current firmware also advertises `quasi_static_speed: true`. Quasi-static START
+requires `START <id> Q <start_nm> <step_nm> <hold_ms> <steps> <speed_um_s>` with
+integer speed 1–16777215 µm/s; missing, fractional, zero or out-of-range speeds
+are rejected. The desktop requires this capability before offering START Q.
+Sinusoidal START keeps its existing arguments. Quasi-static metadata includes
+`speed_um_s`. START acknowledges acceptance; controller speed/TOU2 readback
+checks happen before motion and report any failure in the retained dataset.
+
 USB1: CDC ACM `5824:27dd`, 115200 8-N-1, no flow control, DTR asserted.
 Baud rate is a CDC setting, not USB throughput. The desktop opens the port natively.
 The actuator is on separate USB2 (`04d8:ef4a`).

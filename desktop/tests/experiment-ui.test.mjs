@@ -58,6 +58,30 @@ test('START explains blockers, validates fields, submits once, and reports failu
     await submit();
     assert.equal(node('experiment-state').textContent,'START failed: Bridge unavailable');
     assert.equal(node('experiment-start-button').disabled,false);
+    node('tab-quasi_static').onclick();
+    await submit();
+    assert.match(node('experiment-state').textContent,/firmware.*quasi-static speed control/);
+    state.hello.quasi_static_speed=true;
+    experimentControls();
+    assert.equal(node('experiment-speed-field').hidden,false);
+    assert.equal(node('experiment-speed').disabled,false);
+    assert.equal(node('experiment-speed').value,'10');
+    node('experiment-speed').reportValidity=()=>false;
+    node('experiment-speed').validationMessage='Enter a positive whole number.';
+    node('experiment-speed-label').textContent='Actuator speed (µm/s)';
+    await submit();
+    assert.match(node('experiment-state').textContent,/Actuator speed.*positive whole number/);
+    node('experiment-speed').reportValidity=()=>true;
+    node('experiment-speed').value='25';
+    node('tab-sinusoidal').onclick();
+    assert.equal(node('experiment-speed-field').hidden,true);
+    assert.equal(node('experiment-speed').disabled,true);
+    node('tab-quasi_static').onclick();
+    assert.equal(node('experiment-speed').value,'25');
+    state.session.startExperiment=async config=>calls.push(config);
+    await submit();
+    assert.equal(calls.at(-1).speed_um_s,25);
+    assert.equal(calls.at(-1).kind,'quasi_static');
   } finally {globalThis.document=previousDocument;globalThis.ResizeObserver=previousObserver;}
 });
 
@@ -130,4 +154,3 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
     globalThis.ResizeObserver = previousObserver;
   }
 });
-

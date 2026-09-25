@@ -6,6 +6,7 @@ pub const CHUNK_RECORDS: usize = 16;
 pub const SAMPLE_MS: u32 = 50;
 pub const TRAJECTORY_MS: u32 = 10; // 100 Hz sine position commands
 pub const MOVE_TIMEOUT_MS: u32 = 10_000;
+pub const MAX_SPEED_UM_S: u32 = 0x00ff_ffff;
 pub const MAX_DURATION_MS: u32 = (CAPACITY as u32 - 1) * SAMPLE_MS;
 pub const MIN_POSITION: i32 = -(1 << 25);
 pub const MAX_POSITION: i32 = (1 << 25) - 1;
@@ -17,6 +18,7 @@ pub enum ExperimentConfig {
         step_nm: i64,
         hold_ms: u32,
         steps: u32,
+        speed_um_s: u32,
     },
     Sinusoidal {
         center_nm: i64,
@@ -45,6 +47,7 @@ impl ExperimentConfig {
         increment: i64,
         timing: u32,
         repeats: u32,
+        speed_um_s: Option<u32>,
     ) -> Result<Self, &'static str> {
         match kind {
             "Q" => Ok(Self::QuasiStatic {
@@ -52,8 +55,11 @@ impl ExperimentConfig {
                 step_nm: increment,
                 hold_ms: timing,
                 steps: repeats,
+                speed_um_s: speed_um_s
+                    .filter(|v| (1..=MAX_SPEED_UM_S).contains(v))
+                    .ok_or("Quasi-static speed must be 1..16777215 um/s")?,
             }),
-            "S" => Ok(Self::Sinusoidal {
+            "S" if speed_um_s.is_none() => Ok(Self::Sinusoidal {
                 center_nm: start,
                 amplitude_nm: u32::try_from(increment).map_err(|_| "Amplitude out of range")?,
                 frequency_mhz: timing,
@@ -68,6 +74,44 @@ impl ExperimentConfig {
             Self::Sinusoidal { center_nm, .. } => center_nm,
         })
     }
+    pub fn speed(self) -> Option<u32> {
+        match self {
+            Self::QuasiStatic { speed_um_s, .. } => Some(speed_um_s),
+            Self::Sinusoidal { .. } => None,
+        }
+    }
+    /// Twice nominal travel time plus 1 s settling, with the existing 10 s floor.
+    /// nm / (um/s) gives milliseconds. Bound even initial positioning.
+    pub fn move_timeout(self, distance_nm: u64) -> Result<u32, &'static str> {
+        let Some(speed) = self.speed() else {
+            return Ok(MOVE_TIMEOUT_MS);
+        };
+        if !(1..=MAX_SPEED_UM_S).contains(&speed) {
+            return Err("Quasi-static speed must be 1..16777215 um/s");
+        }
+        let timeout = distance_nm
+            .div_ceil(u64::from(speed))
+            .checked_mul(2)
+            .and_then(|v| v.checked_add(1000))
+            .ok_or("Move duration overflow")?
+            .max(u64::from(MOVE_TIMEOUT_MS));
+        if timeout > u64::from(MAX_DURATION_MS) {
+            return Err("Move too long at selected speed; increase speed or reduce travel");
+        }
+        Ok(timeout as u32)
+    }
+    pub fn step_timeout(self) -> Result<u32, &'static str> {
+        match self {
+            // Account for rounding each endpoint to the encoder grid.
+            Self::QuasiStatic { step_nm, .. } => self.move_timeout(
+                step_nm
+                    .unsigned_abs()
+                    .checked_add(78)
+                    .ok_or("Trajectory overflow")?,
+            ),
+            Self::Sinusoidal { .. } => Ok(MOVE_TIMEOUT_MS),
+        }
+    }
     /// Worst-case acquisition duration. Initial positioning is outside acquisition.
     pub fn validate(self) -> Result<u32, &'static str> {
         self.start()?;
@@ -77,6 +121,7 @@ impl ExperimentConfig {
                 step_nm,
                 hold_ms,
                 steps,
+                ..
             } => {
                 if step_nm.unsigned_abs() < 78 || hold_ms == 0 || steps == 0 {
                     return Err("Step must be at least one count; hold and steps must be positive");
@@ -86,7 +131,7 @@ impl ExperimentConfig {
                     .and_then(|d| start_nm.checked_add(d))
                     .ok_or("Trajectory overflow")?;
                 counts(end)?;
-                u64::from(steps) * (u64::from(hold_ms) + u64::from(MOVE_TIMEOUT_MS))
+                u64::from(steps) * (u64::from(hold_ms) + u64::from(self.step_timeout()?))
             }
             Self::Sinusoidal {
                 center_nm,
@@ -123,9 +168,10 @@ impl ExperimentConfig {
                 step_nm,
                 hold_ms,
                 steps,
+                speed_um_s,
             } => write!(
                 out,
-                "{{\"kind\":\"quasi_static\",\"start_nm\":{start_nm},\"step_nm\":{step_nm},\"hold_ms\":{hold_ms},\"steps\":{steps}}}"
+                "{{\"kind\":\"quasi_static\",\"start_nm\":{start_nm},\"step_nm\":{step_nm},\"hold_ms\":{hold_ms},\"steps\":{steps},\"speed_um_s\":{speed_um_s}}}"
             ),
             Self::Sinusoidal {
                 center_nm,

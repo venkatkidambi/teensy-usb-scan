@@ -21,6 +21,15 @@ use serde_json::{Value, json};
 
 struct Io;
 impl engine::Actuator for Io {
+    fn speed(&mut self, _: u32) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn query_motor_timeout(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn tx_idle(&self) -> bool {
+        true
+    }
     fn target(&mut self, _: i32, _: u32, _: bool) -> Result<(), &'static str> {
         Ok(())
     }
@@ -214,6 +223,7 @@ fn truncated_binary_can_only_recover_with_a_fresh_decoder_and_download() {
 fn native_configuration_is_validated_in_rust() {
     let command = receiver::Input {
         kind: "quasi_static".into(),
+        speed_um_s: Some(10),
         start_um: -1.234,
         increment_um: 0.078,
         timing: 0.5,
@@ -221,14 +231,56 @@ fn native_configuration_is_validated_in_rust() {
     }
     .command(5)
     .unwrap();
-    assert_eq!(command, "START 5 Q -1234 78 500 2");
+    assert_eq!(command, "START 5 Q -1234 78 500 2 10");
     assert!(receiver::valid_start(
         &command.split_ascii_whitespace().collect::<Vec<_>>()
     ));
+    for speed in [1, 10, MAX_SPEED_UM_S] {
+        let config: receiver::Input = serde_json::from_value(json!({
+            "kind":"quasi_static", "start_um":0, "increment_um":1,
+            "timing":0.5, "repeats":2, "speed_um_s":speed,
+        }))
+        .unwrap();
+        assert_eq!(
+            config.command(1).unwrap(),
+            format!("START 1 Q 0 1000 500 2 {speed}")
+        );
+    }
+    for speed in [
+        json!(null),
+        json!(0),
+        json!(16777216),
+        json!(-1),
+        json!(1.5),
+    ] {
+        let result = serde_json::from_value::<receiver::Input>(json!({
+            "kind":"quasi_static", "start_um":0, "increment_um":1,
+            "timing":0.5, "repeats":2, "speed_um_s":speed,
+        }));
+        assert!(
+            result
+                .map(|input| input.command(1).is_err())
+                .unwrap_or(true)
+        );
+    }
+    for command in [
+        "START 1 Q 0 78 500 2",
+        "START 1 Q 0 78 500 2 0",
+        "START 1 Q 0 78 500 2 16777216",
+        "START 1 Q 0 78 500 2 1.5",
+        "START 1 S 0 78 500 2 10",
+        "START 1 Q 0 78 500 2 10 extra",
+    ] {
+        assert!(!receiver::valid_start(
+            &command.split_ascii_whitespace().collect::<Vec<_>>()
+        ));
+        assert!(protocol::Command::parse(command.as_bytes()).is_err());
+    }
     for timing in [0.0, 2.001, f64::NAN, f64::INFINITY] {
         assert!(
             receiver::Input {
                 kind: "sinusoidal".into(),
+                speed_um_s: None,
                 start_um: 0.0,
                 increment_um: 1.0,
                 timing,

@@ -11,6 +11,14 @@ failure leaves the dataset available for another attempt. Reconnecting
 recovers an active run or downloads its retained data without sending a heartbeat.
 See [the experiment design and limits](../EXPERIMENTS.md).
 
+Quasi-static has a required **Actuator speed (µm/s)**, initially **10 µm/s**, for
+both start positioning and every step. Use positive whole numbers. The updated
+firmware sets and reads back the speed before moving, checks its movement budget
+against the controller's TOU2 timeout, and adjusts recording reservations for
+slower travel. Holds still begin after confirmed arrival. Speed is saved in CSV
+metadata and remains the controller's current speed afterward. Rebuild the app
+and flash matching firmware; older firmware cannot run this mode from the new UI.
+
 Sinusoidal motion sends **100 Hz DPOS position commands** and records at 20 Hz.
 It requires firmware advertising `sine_position: true`. Targets use elapsed Teensy
 time and 0.078 µm position resolution. The run starts and finishes at center;

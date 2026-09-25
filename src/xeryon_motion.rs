@@ -1,7 +1,14 @@
 //! Finite Xeryon positioning, in the existing 78 nm encoder calibration.
 use crate::protocol::Telemetry;
 
-pub const MAX_SPEED: u32 = 0x00ff_ffff;
+pub use crate::experiment_data::MAX_SPEED_UM_S as MAX_SPEED;
+
+pub fn write_speed(out: &mut impl core::fmt::Write, speed: u32) -> Result<(), &'static str> {
+    if !(1..=MAX_SPEED).contains(&speed) {
+        return Err("Xeryon speed must be 1..16777215 um/s");
+    }
+    writeln!(out, "SSPD={speed}").map_err(|_| "Xeryon command too long")
+}
 
 // Compose bounded newline-delimited commands; USB transport flushes each line.
 pub fn write_move(
@@ -9,15 +16,10 @@ pub fn write_move(
     target: i32,
     speed: Option<u32>,
 ) -> Result<(), &'static str> {
-    match speed {
-        Some(speed) if !(1..=MAX_SPEED).contains(&speed) => {
-            Err("Xeryon speed must be 1..16777215 um/s")
-        }
-        Some(speed) => {
-            write!(out, "SSPD={speed}\nDPOS={target}\n").map_err(|_| "Xeryon command too long")
-        }
-        None => write!(out, "DPOS={target}\n").map_err(|_| "Xeryon command too long"),
+    if let Some(speed) = speed {
+        write_speed(out, speed)?;
     }
+    writeln!(out, "DPOS={target}").map_err(|_| "Xeryon command too long")
 }
 
 pub use crate::experiment_data::{MAX_POSITION, MIN_POSITION};
@@ -255,7 +257,8 @@ impl Motion {
             Some("controller status stale")
         } else if let Some(reason) = controller_fault(t.samples[2].value) {
             Some(reason)
-        } else if now.wrapping_sub(self.started) >= 60_000 {
+        } else if !autonomous && now.wrapping_sub(self.started) >= 60_000 {
+            // Autonomous moves have speed-dependent deadlines in Engine.
             Some("move deadline")
         } else if !autonomous && now.wrapping_sub(self.heartbeat) >= 5000 {
             Some("desktop heartbeat missing")

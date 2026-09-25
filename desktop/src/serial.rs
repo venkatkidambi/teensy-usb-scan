@@ -423,7 +423,7 @@ mod tests {
             "STREAM 4 1",
             "PLUNGER_STOP 5",
             "XERYON_MOVE 6 U 78",
-            "START 7 Q 0 78 1 1",
+            "START 7 Q 0 78 1 1 10",
         ] {
             assert!(c.send(command.into()).is_err(), "{command}");
         }

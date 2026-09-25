@@ -16,6 +16,7 @@ pub struct Input {
     pub increment_um: f64,
     pub timing: f64,
     pub repeats: u32,
+    pub speed_um_s: Option<u32>,
 }
 fn scaled(value: f64, scale: f64) -> Result<i64, String> {
     let n = value * scale;
@@ -38,18 +39,47 @@ impl Input {
             "sinusoidal" => "S",
             _ => return Err("Unknown experiment mode".into()),
         };
-        let config = ExperimentConfig::from_wire(kind, start, increment, timing, self.repeats)?;
+        let config = ExperimentConfig::from_wire(
+            kind,
+            start,
+            increment,
+            timing,
+            self.repeats,
+            self.speed_um_s,
+        )?;
         config.validate()?;
-        Ok(format!(
+        let mut command = format!(
             "START {id} {kind} {start} {increment} {timing} {}",
             self.repeats
-        ))
+        );
+        if let Some(speed) = config.speed() {
+            write!(command, " {speed}").unwrap();
+        }
+        Ok(command)
     }
 }
 
 pub fn valid_start(parts: &[&str]) -> bool {
-    let ["START", _, kind, start, increment, timing, repeats] = parts else {
+    let [
+        "START",
+        _,
+        kind,
+        start,
+        increment,
+        timing,
+        repeats,
+        tail @ ..,
+    ] = parts
+    else {
         return false;
+    };
+    let speed = match tail {
+        [] => None,
+        [value] => match value.parse::<u32>() {
+            Ok(speed) => Some(speed),
+            Err(_) => return false,
+        },
+        _ => return false,
     };
     let (Ok(start), Ok(increment), Ok(timing), Ok(repeats)) = (
         start.parse::<i64>(),
@@ -59,7 +89,7 @@ pub fn valid_start(parts: &[&str]) -> bool {
     ) else {
         return false;
     };
-    ExperimentConfig::from_wire(kind, start, increment, timing, repeats)
+    ExperimentConfig::from_wire(kind, start, increment, timing, repeats, speed)
         .and_then(|config| config.validate())
         .is_ok()
 }

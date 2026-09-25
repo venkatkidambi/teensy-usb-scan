@@ -51,10 +51,33 @@ change limits or change the encoder reference. Targets use the current EPOS
 coordinate system; STAT bit 8 (index reference known) is not required. The initial
 DPOS enters closed-loop positioning, which is required before acquisition begins.
 
-For quasi-static, start positioning completes first, then acquisition begins.
+For quasi-static, the required **Actuator speed (µm/s)** defaults to 10 in the UI;
+the wire/configuration value is an integer from 1 to 16777215. Firmware advertises
+`quasi_static_speed: true`; the UI requires this capability, and START Q without
+a speed is rejected. The speed is retained as `speed_um_s` in dataset/CSV metadata.
+
+Before any DPOS, firmware sends `SSPD=<speed>` and `SSPD=?` in separate ordered
+USB transfers. It waits for the transfers to finish and a new matching readback,
+then queries `TOU2=?`. Each readback has a 3 s deadline. Missing/mismatched speed,
+invalid/missing TOU2, or transmit failure requests STOP and retains a faulted
+dataset without moving. Cached replies from before setup do not count.
+An enabled TOU2 must exceed the longest reserved movement time (start or step);
+otherwise the run faults before moving with advice to increase speed or reduce
+travel. TOU2=0 is accepted as already disabled; firmware never changes it.
+These commands and units follow the [XD-C manual, sections 4.1–4.2](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.1%20-%20JPL.pdf).
+
+The confirmed speed applies to initial positioning and every step. It remains
+the controller's current setting afterward, including for subsequent manual or
+sinusoidal moves that do not select a speed; no SAVE command is sent. Start
+positioning completes first, then acquisition begins.
 Step 1 is `start + increment`; there are exactly `steps` increments, each followed
 by a hold. Holds begin only on confirmed arrival. Samples continue through every
-move and hold. Each move has a 10 s deadline, including initial positioning.
+move and hold. Each movement deadline is `max(10000, 2 * ceil(distance_nm /
+speed_um_s) + 1000)` milliseconds, capped at 204.75 s. Steps reserve an extra
+78 nm for endpoint rounding; the start move uses the actual encoder distance.
+The engine enforces these deadlines instead of the manual motion tracker's
+60 s deadline. TOU3, ELIM, acceleration and travel protections remain unchanged;
+the speed/readback checks cannot guarantee fault-free motion under every load.
 
 For sinusoidal, initial positioning is to center. Phase is calculated from actual
 elapsed Teensy milliseconds, not from loop counts. After the requested cycles,
@@ -95,10 +118,10 @@ cadence; those must be measured on hardware.
 | Sample-buffer RAM | 163,840 bytes / 160 KiB, zero-initialized DTCM `.bss` |
 | Maximum acquisition bound | 204,750 ms (204.75 s), including final settling |
 | Maximum sinusoidal waveform duration | 194,750 ms, plus reserved 10 s settling |
-| Initial positioning | Additional 10 s maximum, before acquisition |
+| Initial positioning | Before acquisition: speed-based budget for quasi-static (at most 204.75 s); 10 s for sinusoidal |
 
 Validation reserves `floor(duration_bound_ms / 50) + 1` records including t=0.
-Quasi-static bound is `steps * (10_000 + hold_ms)`; sinusoidal bound is
+Quasi-static bound is `steps * (step_move_timeout_ms + hold_ms)`; sinusoidal bound is
 `ceil(cycles * 1_000_000 / frequency_millihz) + 10_000`. Oversized runs are rejected,
 never silently shortened. A 204.75 s bound reserves all 4,096 records.
 
@@ -142,7 +165,7 @@ Maximum command length increases from 64 to 128 bytes before LF. IDs are nonzero
 u32; the desktop reserves `0xf0000000` for its native transfer requests.
 
 ```text
-START <id> Q <start_nm:i64> <step_nm:i64> <hold_ms:u32> <steps:u32>
+START <id> Q <start_nm:i64> <step_nm:i64> <hold_ms:u32> <steps:u32> <speed_um_s:u32>
 START <id> S <center_nm:i64> <amplitude_nm:u32> <frequency_millihz:u32> <cycles:u32>
 ABORT <id>
 GET_DATA <id> <run>

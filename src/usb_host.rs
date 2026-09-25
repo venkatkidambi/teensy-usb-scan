@@ -207,6 +207,33 @@ pub fn autonomous(on: bool) {
 
 pub struct ExperimentActuator;
 impl crate::experiment::Actuator for ExperimentActuator {
+    fn speed(&mut self, speed_um_s: u32) -> Result<(), &'static str> {
+        if !self.tx_idle() {
+            return Err("Xeryon previous transmit incomplete");
+        }
+        let mut frame = crate::protocol::Frame::new();
+        crate::xeryon_motion::write_speed(&mut frame, speed_um_s)?;
+        let bytes = frame.pending();
+        // Each line is flushed independently, as in manual speed-controlled moves.
+        // Query explicitly: setting a parameter need not echo on every controller.
+        if !unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, false) }
+            || !unsafe { usb_serial_send(b"SSPD=?\n".as_ptr(), 7, false) }
+        {
+            return Err("Xeryon speed transmit unavailable");
+        }
+        Ok(())
+    }
+    fn tx_idle(&self) -> bool {
+        // SAFETY: foreground-only transport query.
+        unsafe { usb_serial_tx_idle() }
+    }
+    fn query_motor_timeout(&mut self) -> Result<(), &'static str> {
+        // SAFETY: foreground only, bounded copy after speed transfers drain.
+        if !self.tx_idle() || !unsafe { usb_serial_send(b"TOU2=?\n".as_ptr(), 7, false) } {
+            return Err("Xeryon TOU2 query transmit unavailable");
+        }
+        Ok(())
+    }
     fn target(&mut self, target: i32, now: u32, track: bool) -> Result<(), &'static str> {
         // SAFETY: foreground-only query into the existing C transport. Fault
         // instead of queuing a target behind an unfinished USB transfer.

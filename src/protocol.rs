@@ -23,6 +23,10 @@ pub struct Telemetry {
     pub records: u32,
     pub malformed: u32,
     pub samples: [Sample; TAGS.len()],
+    pub speed: Sample,
+    pub speed_updates: u32,
+    pub motor_timeout: Sample,
+    pub motor_timeout_updates: u32,
     pub plunger_io: Option<crate::plunger::Io>,
     pub pressure: Option<crate::pressure::Reading>,
     pub plunger: Option<(crate::plunger::Motion, Option<u16>)>,
@@ -32,6 +36,18 @@ pub struct Telemetry {
 impl Telemetry {
     pub const fn new() -> Self {
         Self {
+            speed: Sample {
+                value: 0,
+                ms: 0,
+                valid: false,
+            },
+            speed_updates: 0,
+            motor_timeout: Sample {
+                value: 0,
+                ms: 0,
+                valid: false,
+            },
+            motor_timeout_updates: 0,
             xeryon_motion: None,
             plunger_io: None,
             pressure: None,
@@ -60,6 +76,22 @@ impl Telemetry {
 
     pub fn record(&mut self, tag: &[u8], value: i64, now: u32) {
         self.records = self.records.wrapping_add(1);
+        if tag == b"SSPD" {
+            self.speed = Sample {
+                value,
+                ms: now,
+                valid: true,
+            };
+            self.speed_updates = self.speed_updates.wrapping_add(1);
+        }
+        if tag == b"TOU2" {
+            self.motor_timeout = Sample {
+                value,
+                ms: now,
+                valid: true,
+            };
+            self.motor_timeout_updates = self.motor_timeout_updates.wrapping_add(1);
+        }
         if let Some(i) = TAGS.iter().position(|s| s.as_bytes() == tag) {
             self.samples[i] = Sample {
                 value,
@@ -210,9 +242,14 @@ impl Command {
                 let increment = words.next().ok_or(())?.parse::<i64>().map_err(|_| ())?;
                 let timing = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
                 let repeats = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
+                let speed = words
+                    .next()
+                    .map(str::parse::<u32>)
+                    .transpose()
+                    .map_err(|_| ())?;
                 Self::Start(
                     id,
-                    ExperimentConfig::from_wire(kind, start, increment, timing, repeats)
+                    ExperimentConfig::from_wire(kind, start, increment, timing, repeats, speed)
                         .map_err(|_| ())?,
                 )
             }
@@ -359,7 +396,7 @@ mod tests {
     #[test]
     fn experiment_commands_keep_ids_and_reject_extra_arguments() {
         for text in [
-            "START 7 Q -1234 78 500 2",
+            "START 7 Q -1234 78 500 2 10",
             "START 7 S 0 780 1000 1",
             "ABORT 7",
             "GET_DATA 7 1",
@@ -374,6 +411,12 @@ mod tests {
             "START 1 X 0 78 500 2",
             "START 1 S 0 -78 500 2",
             "START 0 Q 0 78 500 2",
+            "START 1 Q 0 78 500 2",
+            "START 1 Q 0 78 500 2 0",
+            "START 1 Q 0 78 500 2 16777216",
+            "START 1 Q 0 78 500 2 -1",
+            "START 1 Q 0 78 500 2 1.5",
+            "START 1 S 0 78 500 2 10",
             "GET_CHUNK 7 1 -1",
             "ACK_DATA_RECEIVED 7 1 21 -1",
         ] {

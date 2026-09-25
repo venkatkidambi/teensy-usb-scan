@@ -15,6 +15,10 @@ pub enum State {
     Transferring,
 }
 pub trait Actuator {
+    /// Set and request SSPD in separate, ordered USB transfers.
+    fn speed(&mut self, speed_um_s: u32) -> Result<(), &'static str>;
+    fn query_motor_timeout(&mut self) -> Result<(), &'static str>;
+    fn tx_idle(&self) -> bool;
     fn target(&mut self, counts: i32, now: u32, track_completion: bool)
     -> Result<(), &'static str>;
     fn stop(&mut self) -> Result<(), &'static str>;
@@ -36,6 +40,11 @@ pub struct Engine<'a> {
     samples: &'a mut [Record],
     crc: u32,
     move_started: u32,
+    move_timeout: u32,
+    speed_pending: bool,
+    speed_updates: u32,
+    timeout_pending: bool,
+    timeout_updates: u32,
     next_sample: u32,
     next_target: u32,
     step: u32,
@@ -65,6 +74,11 @@ impl<'a> Engine<'a> {
             samples,
             crc: !0,
             move_started: 0,
+            move_timeout: MOVE_TIMEOUT_MS,
+            speed_pending: false,
+            speed_updates: 0,
+            timeout_pending: false,
+            timeout_updates: 0,
             next_sample: 0,
             next_target: 0,
             step: 0,
@@ -150,9 +164,11 @@ impl<'a> Engine<'a> {
             {
                 return Err("Stop manual motion before START");
             }
-            Ok((duration, required, config.start()?))
+            let target = config.start()?;
+            let distance = (i64::from(target) - t.samples[0].value).unsigned_abs() * 78;
+            Ok((duration, required, target, config.move_timeout(distance)?))
         })();
-        let (duration, required, target) = match validation {
+        let (duration, required, target, move_timeout) = match validation {
             Ok(v) => v,
             Err(e) => {
                 self.state = State::Dashboard;
@@ -173,6 +189,10 @@ impl<'a> Engine<'a> {
         self.reason = "none";
         self.stop_queued = false;
         self.move_started = now;
+        self.move_timeout = move_timeout;
+        self.speed_pending = config.speed().is_some();
+        self.speed_updates = t.speed_updates;
+        self.timeout_pending = false;
         self.target = target;
         self.epoch = t.epoch;
         self.step = 0;
@@ -184,7 +204,11 @@ impl<'a> Engine<'a> {
         Ok(())
     }
     pub fn begin(&mut self, now: u32, io: &mut impl Actuator) {
-        if let Err(e) = io.target(self.target, now, true) {
+        let result = match self.config.and_then(ExperimentConfig::speed) {
+            Some(speed) => io.speed(speed),
+            None => io.target(self.target, now, true),
+        };
+        if let Err(e) = result {
             self.finish(State::Fault, e, io);
         }
     }
@@ -225,7 +249,9 @@ impl<'a> Engine<'a> {
             .or_else(|| (t.epoch != self.epoch).then_some("Xeryon connection changed"))
             .or_else(|| {
                 t.xeryon_motion
-                    .filter(|m| m.state == 4)
+                    // During setup this tracker still describes the previous
+                    // manual move. The first DPOS starts a new tracked move.
+                    .filter(|m| m.state == 4 && !self.speed_pending && !self.timeout_pending)
                     .map(|m| m.interruption_reason.unwrap_or("Xeryon motion failed"))
             });
         if let Some(e) = fault {
@@ -238,7 +264,58 @@ impl<'a> Engine<'a> {
             return;
         }
         if self.state == State::MoveToStart {
-            if now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS {
+            if self.speed_pending {
+                if now.wrapping_sub(self.move_started) >= 3000 {
+                    self.finish(State::Fault, "Xeryon speed readback timeout", io);
+                } else if io.tx_idle() && t.speed.valid && t.speed_updates != self.speed_updates {
+                    if Some(t.speed.value) != self.config.unwrap().speed().map(i64::from) {
+                        self.finish(State::Fault, "Xeryon speed readback mismatch", io);
+                    } else {
+                        self.speed_pending = false;
+                        self.timeout_pending = true;
+                        self.timeout_updates = t.motor_timeout_updates;
+                        self.move_started = now;
+                        if let Err(e) = io.query_motor_timeout() {
+                            self.finish(State::Fault, e, io);
+                        }
+                    }
+                }
+                return;
+            }
+            if self.timeout_pending {
+                if now.wrapping_sub(self.move_started) >= 3000 {
+                    self.finish(State::Fault, "Xeryon TOU2 readback timeout", io);
+                } else if io.tx_idle()
+                    && t.motor_timeout.valid
+                    && t.motor_timeout_updates != self.timeout_updates
+                {
+                    let seconds = t.motor_timeout.value;
+                    let longest = self
+                        .move_timeout
+                        .max(self.config.unwrap().step_timeout().unwrap());
+                    // TOU2 is queried after SSPD, so its reply also lets any
+                    // trailing SSPD readback arrive before the first target.
+                    if Some(t.speed.value) != self.config.unwrap().speed().map(i64::from) {
+                        self.finish(State::Fault, "Xeryon speed readback mismatch", io);
+                    } else if !(0..=65535).contains(&seconds) {
+                        self.finish(State::Fault, "Invalid Xeryon TOU2 readback", io);
+                    } else if seconds != 0 && i64::from(longest) >= seconds * 1000 {
+                        self.finish(
+                            State::Fault,
+                            "Move budget reaches TOU2; increase speed or reduce travel",
+                            io,
+                        );
+                    } else {
+                        self.timeout_pending = false;
+                        self.move_started = now;
+                        if let Err(e) = io.target(self.target, now, true) {
+                            self.finish(State::Fault, e, io);
+                        }
+                    }
+                }
+                return;
+            }
+            if now.wrapping_sub(self.move_started) >= self.move_timeout {
                 self.finish(State::Fault, "Start move deadline", io);
                 return;
             }
@@ -302,9 +379,10 @@ impl<'a> Engine<'a> {
                 step_nm,
                 hold_ms,
                 steps,
+                ..
             } => {
                 if self.step != 0 && self.hold_started.is_none() {
-                    if now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS {
+                    if now.wrapping_sub(self.move_started) >= self.move_timeout {
                         Err("Step move deadline")
                     } else if t
                         .xeryon_motion
@@ -327,6 +405,7 @@ impl<'a> Engine<'a> {
                         self.target = counts(start_nm + step_nm * i64::from(self.step)).unwrap();
                         self.hold_started = None;
                         self.move_started = now;
+                        self.move_timeout = self.config.unwrap().step_timeout().unwrap();
                         io.target(self.target, now, true).map(|_| false)
                     }
                 } else {
@@ -478,8 +557,27 @@ mod tests {
         targets: Vec<(i32, u32, bool)>,
         stops: usize,
         fail: bool,
+        busy: bool,
+        speeds: Vec<u32>,
     }
     impl Actuator for Io {
+        fn query_motor_timeout(&mut self) -> Result<(), &'static str> {
+            if self.fail {
+                Err("timeout query transmit failure")
+            } else {
+                Ok(())
+            }
+        }
+        fn speed(&mut self, speed: u32) -> Result<(), &'static str> {
+            if self.fail {
+                return Err("speed transmit failure");
+            }
+            self.speeds.push(speed);
+            Ok(())
+        }
+        fn tx_idle(&self) -> bool {
+            !self.busy
+        }
         fn target(&mut self, target: i32, now: u32, track: bool) -> Result<(), &'static str> {
             if self.fail {
                 return Err("transmit failure");
@@ -532,6 +630,15 @@ mod tests {
         let (t, p) = feedback(now, 0, true);
         e.accept(config, &t, p, false, now).unwrap();
         e.begin(now, io);
+        if let Some(speed) = config.speed() {
+            let (mut t, p) = feedback(now, 0, true);
+            t.record(b"SSPD", i64::from(speed), now);
+            e.poll(now, &t, p, io);
+            assert!(!e.speed_pending);
+            t.record(b"TOU2", 60, now);
+            e.poll(now, &t, p, io);
+            assert!(!e.timeout_pending);
+        }
         let (t, p) = feedback(now.wrapping_add(1), e.target, true);
         e.poll(now.wrapping_add(1), &t, p, io);
         assert_eq!(e.state, State::Armed);
@@ -543,6 +650,7 @@ mod tests {
         assert_eq!(sinusoidal().validate(), Ok(11000));
         assert_eq!(
             ExperimentConfig::QuasiStatic {
+                speed_um_s: 10,
                 start_nm: 0,
                 step_nm: -78,
                 hold_ms: 100,
@@ -553,18 +661,21 @@ mod tests {
         );
         for config in [
             ExperimentConfig::QuasiStatic {
+                speed_um_s: 10,
                 start_nm: 0,
                 step_nm: 0,
                 hold_ms: 1,
                 steps: 1,
             },
             ExperimentConfig::QuasiStatic {
+                speed_um_s: 10,
                 start_nm: 0,
                 step_nm: -78,
                 hold_ms: u32::MAX,
                 steps: u32::MAX,
             },
             ExperimentConfig::QuasiStatic {
+                speed_um_s: 10,
                 start_nm: 0,
                 step_nm: i64::MAX,
                 hold_ms: 1,
@@ -641,6 +752,171 @@ mod tests {
         assert_eq!(e.reason, "Xeryon closed loop inactive");
     }
     #[test]
+    fn quasi_static_setup_requires_fresh_speed_and_timeout_before_any_motion() {
+        let config = ExperimentConfig::QuasiStatic {
+            start_nm: 780,
+            step_nm: 780,
+            hold_ms: 100,
+            steps: 1,
+            speed_um_s: 10,
+        };
+        for failure in [
+            "none",
+            "timeout_disabled",
+            "stale",
+            "mismatch",
+            "late_mismatch",
+            "speed_tx",
+            "timeout_tx",
+            "timeout_missing",
+            "timeout_invalid",
+            "timeout_short",
+            "abort",
+        ] {
+            let mut records = [Record::EMPTY; CAPACITY];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            let (mut t, p) = feedback(0, 0, true);
+            t.record(b"SSPD", 10, 0); // Cached value must not satisfy the new run.
+            t.record(b"TOU2", 60, 0);
+            // A healthy controller can retain a failed manual tracking result.
+            t.xeryon_motion.as_mut().unwrap().state = 4;
+            e.accept(config, &t, p, false, 0).unwrap();
+            io.fail = failure == "speed_tx";
+            e.begin(0, &mut io);
+            io.fail = false;
+            e.poll(0, &t, p, &mut io);
+            assert!(io.targets.is_empty());
+            if failure == "abort" {
+                e.abort(&mut io);
+            }
+            if failure != "stale" {
+                // Same millisecond is valid when the readback generation advances.
+                t.record(b"SSPD", if failure == "mismatch" { 11 } else { 10 }, 0);
+            }
+            io.busy = true;
+            e.poll(0, &t, p, &mut io);
+            assert!(io.targets.is_empty()); // Wait for the query transfer too.
+            io.busy = false;
+            io.fail = failure == "timeout_tx";
+            e.poll(0, &t, p, &mut io);
+            io.fail = false;
+            assert!(io.targets.is_empty());
+            e.poll(0, &t, p, &mut io);
+            assert!(io.targets.is_empty()); // Cached TOU2 is insufficient.
+            if failure == "late_mismatch" {
+                t.record(b"SSPD", 11, 0);
+            }
+            if failure != "timeout_missing" {
+                t.record(
+                    b"TOU2",
+                    match failure {
+                        "timeout_invalid" => -1,
+                        "timeout_short" => 10,
+                        "timeout_disabled" => 0,
+                        _ => 60,
+                    },
+                    0,
+                );
+            }
+            e.poll(0, &t, p, &mut io);
+            if matches!(failure, "none" | "timeout_disabled") {
+                assert_eq!(io.speeds, [10]);
+                assert_eq!(io.targets, [(10, 0, true)]);
+                assert_eq!(e.state, State::MoveToStart);
+                let mut metadata = String::new();
+                e.metadata(&mut metadata, 1).unwrap();
+                assert!(metadata.contains("\"speed_um_s\":10"));
+            } else {
+                let (mut t, p) = feedback(3000, 0, true);
+                t.record(b"SSPD", 10, 3000);
+                e.poll(3000, &t, p, &mut io);
+                assert!(io.targets.is_empty(), "{failure}");
+                assert!(e.data_ready(), "{failure}");
+                assert_eq!(e.len, 0);
+                assert_eq!(io.stops, 1);
+                match failure {
+                    "stale" => assert_eq!(e.reason, "Xeryon speed readback timeout"),
+                    "mismatch" => assert_eq!(e.reason, "Xeryon speed readback mismatch"),
+                    "timeout_missing" => assert_eq!(e.reason, "Xeryon TOU2 readback timeout"),
+                    "abort" => assert_eq!(e.outcome, "aborted"),
+                    _ => assert_eq!(e.outcome, "faulted"),
+                }
+            }
+        }
+    }
+    #[test]
+    fn slow_moves_use_speed_budget_for_start_steps_and_storage_across_clock_wrap() {
+        let config = ExperimentConfig::QuasiStatic {
+            start_nm: 39_000,
+            step_nm: -39_000,
+            hold_ms: 50,
+            steps: 1,
+            speed_um_s: 1,
+        };
+        assert_eq!(config.step_timeout(), Ok(79_156));
+        assert_eq!(config.validate(), Ok(79_206));
+        let mut records = [Record::EMPTY; CAPACITY];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        let begin = u32::MAX - 5;
+        let (mut t, p) = feedback(begin, 0, true);
+        e.accept(config, &t, p, false, begin).unwrap();
+        e.begin(begin, &mut io);
+        t.record(b"SSPD", 1, begin);
+        e.poll(begin, &t, p, &mut io);
+        t.record(b"TOU2", 120, begin);
+        e.poll(begin, &t, p, &mut io);
+        let later = begin.wrapping_add(60_001);
+        let (t, p) = feedback(later, e.target, false);
+        let mut motion = xeryon_motion::Motion::new();
+        motion.start(e.target, begin);
+        assert!(!motion.poll_policy(&t, later, true));
+        e.poll(later, &t, p, &mut io);
+        assert_eq!(e.state, State::MoveToStart);
+        let now = begin.wrapping_add(70_000);
+        let (t, p) = feedback(now, e.target, true);
+        e.poll(now, &t, p, &mut io);
+        e.poll(now, &t, p, &mut io);
+        assert_eq!(e.state, State::Running);
+        assert_eq!(io.targets.last().unwrap().0, 0);
+        assert_eq!(e.required_samples, 1585);
+        let later = now.wrapping_add(60_001);
+        let (t, p) = feedback(later, e.target, false);
+        e.poll(later, &t, p, &mut io);
+        assert_eq!(e.state, State::Running);
+        let deadline = now.wrapping_add(79_156);
+        let (t, p) = feedback(deadline, e.target, false);
+        e.poll(deadline, &t, p, &mut io);
+        assert_eq!(e.reason, "Step move deadline");
+        assert_eq!(io.stops, 1);
+        assert!(config.move_timeout(200_000).is_err());
+        assert!(
+            ExperimentConfig::QuasiStatic {
+                start_nm: 39_000,
+                step_nm: -39_000,
+                hold_ms: 50,
+                steps: 3,
+                speed_um_s: 1,
+            }
+            .validate()
+            .is_err()
+        );
+        for speed_um_s in [0, MAX_SPEED_UM_S + 1] {
+            assert!(
+                ExperimentConfig::QuasiStatic {
+                    start_nm: 0,
+                    step_nm: 78,
+                    hold_ms: 50,
+                    steps: 1,
+                    speed_um_s,
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
+    #[test]
     fn quasi_static_records_motion_and_holds_and_uses_confirmed_reach() {
         let mut records = [Record::EMPTY; 1000];
         let mut e = Engine::new(&mut records);
@@ -648,6 +924,7 @@ mod tests {
         start(
             &mut e,
             ExperimentConfig::QuasiStatic {
+                speed_um_s: 10,
                 start_nm: 0,
                 step_nm: -780,
                 hold_ms: 100,
@@ -816,6 +1093,7 @@ mod tests {
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         let config = ExperimentConfig::QuasiStatic {
+            speed_um_s: 10,
             start_nm: 0,
             step_nm: 78,
             hold_ms: 194_750,
