@@ -2,6 +2,7 @@
 use crate::{experiment_data::*, pressure::Reading, protocol::Telemetry, xeryon_motion};
 
 const MODE_FEEDBACK_GRACE_MS: u32 = 100;
+const CENTER_TOLERANCE_COUNTS: u64 = 1; // 0.078 um encoder resolution
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -33,7 +34,7 @@ pub trait Actuator {
     -> Result<(), &'static str>;
     fn stop(&mut self) -> Result<(), &'static str>;
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CenterMove {
     None,
     Stopping,
@@ -70,6 +71,8 @@ pub struct Engine<'a> {
     epoch: u32,
     transfer_next: usize,
     center_move: CenterMove,
+    center_epos_generation: u32,
+    center_confirmations: u8,
     scan: xeryon_motion::ScanState,
     motion_changed_ms: u32,
     fault_stat: Option<u32>,
@@ -123,6 +126,8 @@ impl<'a> Engine<'a> {
             epoch: 0,
             transfer_next: 0,
             center_move: CenterMove::None,
+            center_epos_generation: 0,
+            center_confirmations: 0,
             scan: xeryon_motion::ScanState::default(),
             motion_changed_ms: 0,
             fault_stat: None,
@@ -255,6 +260,8 @@ impl<'a> Engine<'a> {
         self.epoch = t.epoch;
         self.step = 0;
         self.center_move = CenterMove::None;
+        self.center_epos_generation = t.epos_generation;
+        self.center_confirmations = 0;
         self.scan = xeryon_motion::ScanState::default();
         self.fault_stat = None;
         self.feedback_pending = true;
@@ -603,13 +610,14 @@ impl<'a> Engine<'a> {
                         io.target(self.target, now, true).map(|_| {
                             self.center_move = CenterMove::Positioning;
                             self.motion_changed_ms = now;
+                            self.center_epos_generation = t.epos_generation;
+                            self.center_confirmations = 0;
                             false
                         })
                     } else {
                         Ok(self.center_move == CenterMove::Positioning
-                            && t.samples[2].value & ((1 << 6) | (1 << 13)) == (1 << 6)
-                            && t.xeryon_motion
-                                .is_some_and(|m| m.state == 2 && m.target == Some(self.target)))
+                            && io.tx_idle()
+                            && self.center_arrived(t))
                     }
                 } else if elapsed >= waveform_ms {
                     if elapsed - waveform_ms >= TRAJECTORY_MS {
@@ -653,6 +661,36 @@ impl<'a> Engine<'a> {
             Err(e) => self.finish(State::Fault, e, io),
             _ => {}
         }
+    }
+    /// Final sine return only: do not wait for the controller's settling flag
+    /// once two new encoder publications confirm center. Cached reads do not count.
+    fn center_arrived(&mut self, t: &Telemetry) -> bool {
+        let after_target = |ms: u32| {
+            let elapsed = ms.wrapping_sub(self.motion_changed_ms);
+            elapsed > 0 && elapsed < 0x8000_0000
+        };
+        let status = t.samples[2];
+        let positioning =
+            after_target(status.ms) && status.value & ((1 << 6) | (1 << 9) | (1 << 13)) == (1 << 6);
+        if !positioning {
+            self.center_confirmations = 0;
+            self.center_epos_generation = t.epos_generation;
+            return false;
+        }
+        if self.center_epos_generation != t.epos_generation {
+            self.center_epos_generation = t.epos_generation;
+            let epos = t.samples[0];
+            self.center_confirmations = if after_target(epos.ms)
+                && epos.value.abs_diff(i64::from(self.target)) <= CENTER_TOLERANCE_COUNTS
+            {
+                (self.center_confirmations + 1).min(2)
+            } else {
+                0
+            };
+        }
+        self.center_confirmations == 2
+            || t.xeryon_motion
+                .is_some_and(|m| m.state == 2 && m.target == Some(self.target))
     }
     pub fn metadata(&self, out: &mut impl core::fmt::Write, id: u32) -> core::fmt::Result {
         write!(
@@ -1510,6 +1548,56 @@ mod tests {
         assert_eq!(io.stops, 2);
         assert_eq!(io.targets.len(), 2);
     }
+    #[test]
+    fn sine_finishes_on_fresh_center_feedback_without_waiting_for_reached_flag() {
+        for begin in [0, u32::MAX - 1100] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            start(&mut e, sinusoidal(), begin, &mut io);
+            for elapsed in 1..=1002 {
+                let now = e.started_ms.wrapping_add(elapsed);
+                let (t, p) = feedback(now, e.target, true);
+                e.poll(now, &t, p, &mut io);
+            }
+            assert_eq!(e.center_move, CenterMove::Positioning);
+            let command_ms = io.targets.last().unwrap().1;
+            let (mut t, mut p) = feedback(command_ms, 0, false);
+            // Final DPOS echo / Position Reached may lag. The tracker stays pending.
+            t.record(b"STAT", 1 << 6, command_ms);
+            e.poll(command_ms.wrapping_add(1), &t, p, &mut io);
+            assert!(!e.data_ready()); // pre-command center feedback cannot complete
+            for (offset, position, busy, complete) in [
+                (20, 0, true, false),   // DPOS still in flight
+                (40, 0, false, false),  // first fresh center publication
+                (60, 2, false, false),  // outside one encoder count: reset
+                (80, -1, false, false), // first new center confirmation
+                (100, 0, false, true),  // second: finish immediately, no dwell
+            ] {
+                let now = command_ms.wrapping_add(offset);
+                io.busy = busy;
+                t.record(b"EPOS", position, now);
+                t.record(b"STAT", 1 << 6, now); // no Position Reached
+                p.ms = now;
+                e.poll(now, &t, p, &mut io);
+                assert_eq!(e.data_ready(), complete);
+                if !complete {
+                    for delay in 1..20 {
+                        e.poll(now.wrapping_add(delay), &t, p, &mut io);
+                        assert!(!e.data_ready()); // repeated reads are not confirmation
+                    }
+                }
+            }
+            assert_eq!(e.outcome, "completed");
+            assert_eq!(e.elapsed_ms, 1102);
+            assert_eq!(io.stops, 2);
+            assert_eq!(io.targets.len(), 2);
+            let count = e.len;
+            e.poll(command_ms.wrapping_add(5000), &t, p, &mut io);
+            assert_eq!(e.len, count); // no center-hold records after completion
+        }
+    }
+
     #[test]
     fn reversal_and_return_exits_always_stop_and_keep_partial_data() {
         for exit_phase in [250, 260, 1000, 1001, 1002] {

@@ -84,7 +84,8 @@ the speed/readback checks cannot guarantee fault-free motion under every load.
 For sinusoidal, initial positioning is to center. Phase is calculated from actual
 elapsed Teensy milliseconds, not from loop counts. After the requested cycles,
 continuous scanning is stopped, then an exact center target is sent and confirmed
-through the same finite-move feedback mechanism. Acquisition continues through final settling, bounded by 10 s.
+by fresh arrival feedback. The run finishes immediately on confirmed center arrival;
+there is no center hold. The return is bounded by 10 s.
 All terminal paths request STOP; metadata says whether it could be queued.
 
 ## Xeryon waveform strategy: 100 Hz velocity/direction control
@@ -127,8 +128,14 @@ representable millisecond at or after the exact requested cycle count. A late
 foreground poll uses actual time; lateness of 10 ms or more faults and stops.
 Firmware waits for STOP's transport to drain, sets SSPD to rounded vmax if it
 changed, waits for that transfer, then sends a tracked `DPOS=<center>`.
-The 10 s final-move budget includes these drains. Completion requires matching
-DPOS echo followed by Position Reached, closed loop active and scanning clear.
+The 10 s final-move budget includes these drains; it is a timeout, not a hold.
+After the final command drains, completion accepts either the tracked DPOS echo
+and Position Reached, or two distinct new encoder publications within one count
+(0.078 µm) of center. Fresh post-command status must show closed loop active,
+searching index clear and scanning clear. Cached encoder reads do not count; an
+out-of-tolerance publication resets confirmation. This lets the run finish at
+center without waiting for a delayed controller settling flag. Initial positioning
+and quasi-static arrival/hold handling retain their existing confirmation rules.
 Terminal cleanup requests STOP again and retains the dataset. The last selected
 SSPD remains configured afterward; there is no SAVE or speed restoration.
 

@@ -149,7 +149,10 @@ gate for desired sinusoidal position. START S keeps the same parameters; velocit
 is `2π f A cos(2π f t)` using actual elapsed Teensy time. Changed integer SSPD
 magnitudes and SCAN directions are sent at 10 ms updates. Reversals include a
 zero-speed stopped update. No waveform DPOS or feedback drift correction is used.
-Initial and final center positioning use confirmed finite DPOS moves. The waveform
+Initial and final center positioning use finite DPOS moves. Final arrival accepts
+the tracked Position Reached confirmation or two fresh encoder publications within
+one count of center, with fresh closed-loop/non-scanning/non-indexing status after
+the command. The run ends on arrival without a center dwell. The waveform
 ends with STOP before the final center move. ABORT/fault paths request STOP and
 retain samples. SSPD is changed during the waveform and remains at the last setting.
 
