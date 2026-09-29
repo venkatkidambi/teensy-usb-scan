@@ -3,6 +3,8 @@ use crate::{experiment_data::*, pressure::Reading, protocol::Telemetry, xeryon_m
 
 #[path = "reversal.rs"]
 pub mod reversal;
+#[path = "scheduling.rs"]
+pub mod scheduling;
 
 const MODE_FEEDBACK_GRACE_MS: u32 = 100;
 const CENTER_TOLERANCE_COUNTS: u64 = 1; // 0.078 um encoder resolution
@@ -80,6 +82,7 @@ pub struct Engine<'a> {
     center_epos_generation: u32,
     center_confirmations: u8,
     scan: xeryon_motion::ScanState,
+    pub scheduling: scheduling::Diagnostics,
     pub reversals: reversal::Diagnostics<'a>,
     motion_changed_ms: u32,
     fault_stat: Option<u32>,
@@ -136,6 +139,7 @@ impl<'a> Engine<'a> {
             center_epos_generation: 0,
             center_confirmations: 0,
             scan: xeryon_motion::ScanState::default(),
+            scheduling: scheduling::Diagnostics::default(),
             reversals: reversal::Diagnostics::new(&mut []),
             motion_changed_ms: 0,
             fault_stat: None,
@@ -256,6 +260,9 @@ impl<'a> Engine<'a> {
         self.required_samples = required;
         self.len = 0;
         self.reversals.reset();
+        let mode = self.scheduling.mode;
+        self.scheduling = scheduling::Diagnostics::default();
+        self.scheduling.mode = mode;
         self.crc = !0;
         self.elapsed_ms = 0;
         self.started_ms = 0;
@@ -318,6 +325,23 @@ impl<'a> Engine<'a> {
         }
     }
     fn finish(&mut self, state: State, reason: &'static str, io: &mut impl Actuator) {
+        if self.state == State::Running && self.center_move == CenterMove::None {
+            if let Some(ExperimentConfig::Sinusoidal {
+                amplitude_nm,
+                frequency_mhz,
+                ..
+            }) = self.config
+            {
+                self.scheduling.observe(
+                    amplitude_nm,
+                    frequency_mhz,
+                    self.elapsed_ms.min(self.duration_ms - MOVE_TIMEOUT_MS),
+                );
+            }
+        }
+        if self.state == State::Running {
+            self.scheduling.refresh(io.tx_progress());
+        }
         self.reversals.refresh(io.tx_progress(), self.started_ms);
         io.end_timing();
         #[cfg(not(test))]
@@ -347,6 +371,7 @@ impl<'a> Engine<'a> {
         }
         if self.state == State::Running {
             self.elapsed_ms = now.wrapping_sub(self.started_ms);
+            self.scheduling.refresh(io.tx_progress());
             self.reversals.refresh(io.tx_progress(), self.started_ms);
             if self.center_move == CenterMove::None {
                 self.reversals.observe(
@@ -356,6 +381,22 @@ impl<'a> Engine<'a> {
                     t,
                     !io.tx_idle(),
                 );
+            }
+            if self.center_move == CenterMove::None {
+                if let Some(ExperimentConfig::Sinusoidal {
+                    amplitude_nm,
+                    frequency_mhz,
+                    ..
+                }) = self.config
+                    && (self.elapsed_ms >= self.next_target
+                        || self.elapsed_ms >= self.duration_ms - MOVE_TIMEOUT_MS)
+                {
+                    self.scheduling.observe(
+                        amplitude_nm,
+                        frequency_mhz,
+                        self.elapsed_ms.min(self.duration_ms - MOVE_TIMEOUT_MS),
+                    );
+                }
             }
             self.epos_arrivals = t.epos_arrivals;
             self.transport = t.transport;
@@ -656,21 +697,32 @@ impl<'a> Engine<'a> {
                         })
                     }
                 } else if elapsed >= self.next_target {
+                    self.scheduling.evaluations += 1;
+                    self.scheduling.lateness.add(elapsed - self.next_target);
                     if elapsed - self.next_target >= TRAJECTORY_MS {
                         Err("Trajectory deadline missed")
                     } else {
-                        self.next_target = (elapsed / TRAJECTORY_MS + 1) * TRAJECTORY_MS;
+                        let scheduled = self.started_ms.wrapping_add(self.next_target);
                         // Phase comes from the run clock; never integrate or replay missed ticks.
                         let direction = sine_direction(frequency_mhz, elapsed);
                         let crossing = self.scan.direction.is_some_and(|last| last != direction);
+                        if crossing {
+                            let phase = u64::from(elapsed) * u64::from(frequency_mhz);
+                            let event = ((phase - 250_000) / 500_000 * 500_000 + 250_000)
+                                .div_ceil(u64::from(frequency_mhz))
+                                as u32;
+                            self.scheduling.reversal_lateness.add(elapsed - event);
+                        }
                         self.reversals.tick(elapsed, now, t, direction, crossing);
                         if !io.tx_idle() {
+                            self.scheduling.busy_due += 1;
                             Err("Xeryon previous transmit incomplete")
                         } else {
                             let result = self.scan.update(
                                 sine_velocity(amplitude_nm, frequency_mhz, elapsed),
                                 direction,
                                 |commands| {
+                                    self.scheduling.attempted += commands.len() as u32;
                                     let before = io.tx_progress().0[0];
                                     let result = io.scan(commands);
                                     let progress = io.tx_progress();
@@ -682,6 +734,14 @@ impl<'a> Engine<'a> {
                                             .min(commands.len() as u32)
                                             as usize
                                     };
+                                    self.scheduling.sent(
+                                        &commands[..accepted],
+                                        progress,
+                                        scheduled,
+                                        now,
+                                        elapsed,
+                                        direction,
+                                    );
                                     self.reversals.sent(
                                         &commands[..accepted],
                                         progress,
@@ -691,6 +751,13 @@ impl<'a> Engine<'a> {
                                     );
                                     result
                                 },
+                            );
+                            self.next_target = scheduling::next(
+                                self.scheduling.mode,
+                                amplitude_nm,
+                                frequency_mhz,
+                                elapsed,
+                                self.scheduling.held.unwrap_or(0.0),
                             );
                             // Direction flips stay in scanning mode; only initial SCAN
                             // entry and final DPOS need the mode feedback grace.
@@ -753,6 +820,14 @@ impl<'a> Engine<'a> {
                 self.reversals.total,
                 reversal::WINDOW_MS
             )?;
+        }
+        if let Some(ExperimentConfig::Sinusoidal {
+            amplitude_nm,
+            frequency_mhz,
+            ..
+        }) = self.config
+        {
+            self.scheduling.write(out, amplitude_nm, frequency_mhz)?;
         }
         if let Some(stat) = self.fault_stat {
             write!(out, ",\"fault_stat\":{stat}")?;
@@ -1112,9 +1187,43 @@ mod tests {
         e.elapsed_ms = u32::MAX;
         e.missed_samples = u32::MAX;
         e.max_lateness_ms = u32::MAX;
-        let mut frame = crate::protocol::Frame::new();
+        e.scheduling.sent(
+            &[xeryon_motion::ScanCommand::Speed(MAX_SPEED_UM_S)],
+            reversal::TxProgress([1, 0, 0, u32::MAX - 1, 0, 0]),
+            0,
+            1,
+            0,
+            1,
+        );
+        e.scheduling.refresh(reversal::TxProgress([
+            1,
+            1,
+            0,
+            u32::MAX - 1,
+            0,
+            u32::MAX - 2,
+        ]));
+        e.scheduling.sent(
+            &[xeryon_motion::ScanCommand::Speed(0)],
+            reversal::TxProgress([2, 1, 0, u32::MAX - 1, 0, 0]),
+            0,
+            u32::MAX,
+            10,
+            -1,
+        );
+        e.scheduling.evaluations = u32::MAX;
+        e.scheduling.attempted = u32::MAX;
+        e.scheduling.sent = u32::MAX;
+        e.scheduling.sspd = u32::MAX;
+        e.scheduling.over_budget = u32::MAX;
+        e.scheduling.busy_due = u32::MAX;
+        e.scheduling.queue_peak = u32::MAX;
+        e.scheduling.max_error = f64::from(MAX_SPEED_UM_S) * 2.0;
+        e.scheduling.lateness.add(u32::MAX);
+        e.scheduling.reversal_lateness.add(u32::MAX);
+        let mut frame = crate::protocol::FixedFrame::<4096>::new();
         e.metadata(&mut frame, u32::MAX).unwrap();
-        assert!(frame.len < 2048);
+        assert!(frame.len < 4096);
     }
     #[test]
     fn every_reversal_is_retained_at_maximum_frequency_and_duration() {
@@ -1150,7 +1259,15 @@ mod tests {
         assert!(e.len.div_ceil(CHUNK_RECORDS) * 2 >= e.reversals.len);
         for (i, turn) in e.reversals.records[..e.reversals.len].iter().enumerate() {
             let theoretical_peak_ms = 125 + i as u32 * 250;
-            assert_eq!(turn.crossing_ms, theoretical_peak_ms + 5);
+            assert_eq!(
+                turn.crossing_ms,
+                theoretical_peak_ms
+                    + if e.scheduling.mode == scheduling::Mode::Fixed100Hz {
+                        5
+                    } else {
+                        0
+                    }
+            );
             assert_eq!(turn.direction, if i % 2 == 0 { -1 } else { 1 });
             assert_eq!(turn.max_error_counts, 7);
         }
@@ -1572,10 +1689,67 @@ mod tests {
         ); // nonzero peak must round to at least 1 um/s
     }
     #[test]
-    fn jitter_uses_actual_velocity_and_logs_current_theoretical_position() {
+    fn adaptive_jitter_uses_actual_time_and_crossings_override_small_speed_changes() {
+        for amplitude_nm in [800, 1_000_000] {
+            let mut records = [Record::EMPTY; CAPACITY];
+            let mut e = Engine::new(&mut records);
+            e.scheduling.mode = scheduling::Mode::Adaptive;
+            let mut io = Io::default();
+            start(
+                &mut e,
+                ExperimentConfig::Sinusoidal {
+                    center_nm: 0,
+                    amplitude_nm,
+                    frequency_mhz: 1300,
+                    cycles: 1,
+                },
+                u32::MAX - 100,
+                &mut io,
+            );
+            let next = e.next_target;
+            let actual = next + 3;
+            let now = e.started_ms.wrapping_add(actual);
+            let (t, p) = feedback(now, 999, true);
+            e.poll(now, &t, p, &mut io);
+            assert_eq!(
+                e.scheduling.held,
+                Some(f64::from(velocity_speed(sine_velocity(
+                    amplitude_nm,
+                    1300,
+                    actual
+                ))))
+            );
+            assert_eq!(e.scheduling.lateness.count, 2);
+            for elapsed in actual + 1..=193 {
+                let now = e.started_ms.wrapping_add(elapsed);
+                let (t, p) = feedback(now, -123, true);
+                e.poll(now, &t, p, &mut io);
+                assert_eq!(e.state, State::Running);
+            }
+            assert_eq!(
+                &io.scans[io.scans.len() - 2..],
+                &[
+                    xeryon_motion::ScanCommand::Speed(0),
+                    xeryon_motion::ScanCommand::Direction(-1)
+                ]
+            );
+            assert_eq!(e.scheduling.reversal_lateness.count, 1);
+            assert_eq!(
+                e.next_target,
+                scheduling::next(scheduling::Mode::Adaptive, amplitude_nm, 1300, 193, 0.0)
+            );
+            assert_eq!(io.targets.len(), 1); // no waveform DPOS despite arbitrary EPOS
+            e.abort(&mut io);
+            assert_eq!(io.events.last().unwrap(), "STOP\n");
+        }
+    }
+
+    #[test]
+    fn fixed_jitter_uses_actual_velocity_and_logs_current_theoretical_position() {
         use xeryon_motion::ScanCommand::*;
         let mut records = [Record::EMPTY; 1024];
         let mut e = Engine::new(&mut records);
+        e.scheduling.mode = scheduling::Mode::Fixed100Hz;
         let mut io = Io::default();
         let config = ExperimentConfig::Sinusoidal {
             center_nm: -780,

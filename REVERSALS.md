@@ -1,5 +1,8 @@
 # Sinusoidal velocity reversal investigation
 
+Historical 100 Hz milestone: the zero/SCAN/resume policy below is retained, but
+[adaptive scheduling](ADAPTIVE_SCHEDULING.md) now controls its event times by default.
+
 ## Finding and limits of evidence
 
 The previous `ScanState::update` chose direction zero whenever the rounded SSPD

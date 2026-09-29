@@ -142,13 +142,14 @@ Update firmware and desktop together for this sensor-specific pressure schema.
 
 Firmware with `plunger_limits: true` in HELLO enforces potentiometer bounds and reports `plunger.limits: {"min":30,"max":75}` in snapshots. Bounds reset to 30–75% at boot, survive serial reconnects, and reject outward moves while allowing inward recovery. Up increases the reading. Missing/stale potentiometer feedback prevents motion. Drive is disabled at a bound; sampling latency and mechanical coast can cause overshoot.
 
-## 100 Hz sinusoidal velocity control
+## Sinusoidal velocity control
 
 HELLO adds `sine_velocity: true` and retains `sine_position: true` as the legacy UI
 gate for desired sinusoidal position. START S keeps the same parameters; velocity
 is `2π f A cos(2π f t)` using actual elapsed Teensy time. Changed integer SSPD
-magnitudes and SCAN directions are sent at 10 ms updates. Reversals include a
-zero-speed stopped update. No waveform DPOS or feedback drift correction is used.
+magnitudes use bounded adaptive 4–10 ms updates by default; theoretical sign
+crossings are mandatory events. Reversals send SSPD=0 then SCAN=new sign, with
+current theoretical speed on the next scheduled update. No waveform DPOS or feedback drift correction is used.
 Initial and final center positioning use finite DPOS moves. Final arrival accepts
 the tracked Position Reached confirmation or two fresh encoder publications within
 one count of center, with fresh closed-loop/non-scanning/non-indexing status after
@@ -194,3 +195,16 @@ The existing 4096-byte JSON line limit accommodates these headers. Older clients
 can still decode the sample payload but need updating to retain the new
 diagnostics. See [REVERSALS.md](../REVERSALS.md) for fields, timestamp semantics,
 partial-run behavior and the hardware comparison procedure.
+
+## Adaptive scheduler diagnostics
+
+`data_meta.scheduler` reports the selected `mode` (`adaptive` or `fixed100hz`),
+interval/tolerance configuration, attempted/accepted waveform command counts,
+SSPD rate and interval statistics, scheduling/reversal lateness, scheduled-to-queue
+and USB completion latency statistics, held-command error, and TX queue statistics.
+See [ADAPTIVE_SCHEDULING.md](../ADAPTIVE_SCHEDULING.md) for field definitions and
+measurement limitations. Groups with no timing observations are null; missing
+completions remain explicitly counted. These diagnostics are returned only after
+RUNNING, retained by the desktop receiver, and exported in CSV metadata. Legacy
+`trajectory_ms=10` is the fixed baseline/max evaluation interval; it no longer
+describes every default-mode control interval. The sample format is unchanged.

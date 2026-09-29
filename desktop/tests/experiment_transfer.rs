@@ -210,6 +210,15 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     assert_eq!(dataset.metadata["reversals"][0]["commands"][3][1], 0);
     assert_eq!(dataset.metadata["reversals"][0]["commands"][4][1], -1);
     assert!(dataset.csv().contains("reversals"));
+    assert_eq!(dataset.metadata["scheduler"]["mode"], "adaptive");
+    assert!(dataset.metadata["scheduler"]["sspd_sent"].as_u64().unwrap() > 0);
+    assert!(
+        dataset.metadata["scheduler"]["held_error_um_s"]
+            .as_f64()
+            .unwrap()
+            >= 0.0
+    );
+    assert!(dataset.csv().contains("queue_to_complete_ms"));
     assert_eq!(dataset.metadata["sine_control"], "velocity_scan");
     assert_eq!(dataset.metadata["record_bytes"], RECORD_BYTES);
     assert_eq!(dataset.metadata["sample_ms"], 20);

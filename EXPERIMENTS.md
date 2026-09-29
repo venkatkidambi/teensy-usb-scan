@@ -88,7 +88,10 @@ by fresh arrival feedback. The run finishes immediately on confirmed center arri
 there is no center hold. The return is bounded by 10 s.
 All terminal paths request STOP; metadata says whether it could be queued.
 
-## Xeryon waveform strategy: 100 Hz velocity/direction control
+## Xeryon waveform strategy: adaptive velocity/direction control
+
+See [ADAPTIVE_SCHEDULING.md](ADAPTIVE_SCHEDULING.md) for the error budget,
+mandatory crossing deadlines, diagnostics and engineering fixed-100-Hz comparison.
 
 After confirmed initial positioning, the Teensy evaluates the desired position
 `x(t) = center + A * sin(2π f t)` and commands its derivative
@@ -100,13 +103,13 @@ The existing allocation-free sine polynomial also evaluates cosine by a quarter
 cycle shift. No waveform DPOS, position-feedback correction or drift correction
 is used. Desired position remains rounded to 0.078 µm counts for logging.
 
-Every 10 ms, SSPD is `floor(abs(v) + 0.5)` in integer µm/s, with ties up.
+At each adaptive evaluation, SSPD is `floor(abs(v) + 0.5)` in integer µm/s, with ties up.
 At t=0 the sequence is `SSPD=<rounded vmax>`, `SCAN=1`. During a direction's
 half-cycle, only changed SSPD values are transmitted. The outgoing direction is
 computed from integer phase: negative in [1/4, 3/4), positive otherwise. Thus
 rounding the magnitude to zero does not decide when to reverse.
 
-At the first scheduled tick on or after either extremum, send `SSPD=0`, then
+At the first representable millisecond of either extremum, send `SSPD=0`, then
 `SCAN=<new sign>` in separate ordered USB transfers. Hold zero for that update;
 the next scheduled tick sends the newly calculated speed, if it changed. There
 is no `SCAN=0` or STOP during waveform reversals. A quantized zero before the
@@ -126,7 +129,7 @@ Controller travel limits, acceleration/deceleration, and fault protections remai
 configured as before; firmware does not query or change those settings.
 
 At `ceil(cycles * 1_000_000 / frequency_millihz)` elapsed milliseconds, scanning
-ends with priority `STOP`, independently of the 10 ms schedule. This is the first
+ends with priority `STOP`, independently of the control schedule. This is the first
 representable millisecond at or after the exact requested cycle count. A late
 foreground poll uses actual time; lateness of 10 ms or more faults and stops.
 Firmware waits for STOP's transport to drain, sets SSPD to rounded vmax if it
@@ -168,7 +171,7 @@ and remain in effect for Dashboard operation after the run.
 | Clock | Existing monotonic Teensy SysTick, 1 ms resolution, wrapping u32 |
 | Acquisition schedule | 20 ms / 50 Hz, latest cached raw values |
 | Pressure acquisition | LPS22HHTR 200 Hz output; 1 ms readiness polling; burst read at 400 kHz |
-| Sinusoidal velocity updates | 10 ms / 100 Hz, 0.100–2.000 Hz wave frequency |
+| Sinusoidal velocity updates | Adaptive 4–10 ms plus priority crossings; optional fixed 100 Hz, 0.100–2.000 Hz wave frequency |
 | Record | 48 bytes, twelve explicit little-endian 32-bit words (dataset v2) |
 | Capacity | 4,096 records |
 | Sample-buffer RAM | 196,608 bytes / 192 KiB, zero-initialized DTCM `.bss` |

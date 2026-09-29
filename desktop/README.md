@@ -19,7 +19,7 @@ slower travel. Holds still begin after confirmed arrival. Speed is saved in CSV
 metadata and remains the controller's current speed afterward. Rebuild the app
 and flash matching firmware; older firmware cannot run this mode from the new UI.
 
-Sinusoidal motion uses **100 Hz SSPD/SCAN velocity and direction control** and
+Sinusoidal motion uses **adaptive SSPD/SCAN velocity and direction control (4–10 ms)** and
 records at 50 Hz. Firmware advertises `sine_velocity: true` and retains the legacy
 `sine_position` UI gate. Actual elapsed Teensy time determines waveform phase;
 theoretical position is logged at 0.078 µm resolution. Initial and final center
