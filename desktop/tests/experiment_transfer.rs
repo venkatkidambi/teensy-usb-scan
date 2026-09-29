@@ -69,7 +69,62 @@ fn pressure(now: u32) -> pressure::Reading {
     }
 }
 fn meta(run: u32, bytes: &[u8]) -> Value {
-    json!({"type":"data_meta","id":receiver::DOWNLOAD_ID,"version":1,"run":run,"record_bytes":RECORD_BYTES,"count":bytes.len()/RECORD_BYTES,"bytes":bytes.len(),"crc":!crc32(!0,bytes),"sample_ms":SAMPLE_MS,"outcome":"completed","reason":"none","config":{"kind":"sinusoidal"}})
+    json!({"type":"data_meta","id":receiver::DOWNLOAD_ID,"version":DATA_VERSION,"run":run,"record_bytes":RECORD_BYTES,"count":bytes.len()/RECORD_BYTES,"bytes":bytes.len(),"crc":!crc32(!0,bytes),"sample_ms":SAMPLE_MS,"outcome":"completed","reason":"none","config":{"kind":"sinusoidal"}})
+}
+#[test]
+fn independent_signal_times_and_identities_round_trip_into_csv() {
+    let records = [
+        Record {
+            elapsed_ms: 0,
+            epos: 10,
+            pressure_raw: 100,
+            epos_age_ms: 17,
+            pressure_age_ms: 3,
+            epos_generation: u32::MAX,
+            pressure_generation: 1,
+            ..Record::EMPTY
+        },
+        Record {
+            elapsed_ms: 50,
+            epos: 10,
+            pressure_raw: 100,
+            epos_age_ms: 67,
+            pressure_age_ms: 2,
+            epos_generation: u32::MAX,
+            pressure_generation: 2,
+            ..Record::EMPTY
+        },
+        Record {
+            elapsed_ms: 100,
+            epos: 10,
+            pressure_raw: 100,
+            epos_age_ms: 5,
+            pressure_age_ms: 1,
+            epos_generation: 0,
+            pressure_generation: 3,
+            ..Record::EMPTY
+        },
+    ];
+    let bytes: Vec<_> = records.iter().flat_map(|r| r.encode()).collect();
+    let mut d = receiver::Download::default();
+    d.begin(8);
+    d.metadata(meta(8, &bytes)).unwrap();
+    d.chunk(
+        json!({"id":receiver::DOWNLOAD_ID,"run":8,"offset":0,"bytes":bytes.len()}),
+        &bytes,
+    )
+    .unwrap();
+    let dataset = d.next().unwrap().1.unwrap();
+    assert_eq!(dataset.samples[0][10], i64::from(u32::MAX));
+    let csv = dataset.csv();
+    let lines: Vec<_> = csv.lines().collect();
+    assert!(lines[1].contains("epos_host_receipt_s,pressure_i2c_completion_s"));
+    assert!(lines[2].ends_with(",-0.017,-0.003,4294967295,1,1,1"));
+    assert!(lines[3].ends_with(",-0.017,0.048,4294967295,2,0,1"));
+    assert!(lines[4].ends_with(",0.095,0.099,0,3,1,1"));
+    let mut legacy = meta(8, &bytes);
+    legacy["version"] = json!(1);
+    assert!(d.metadata(legacy).is_err());
 }
 #[test]
 fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
@@ -139,7 +194,7 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     assert!(dataset.csv().contains("-9.594,1193046"));
     assert_eq!(dataset.metadata["outcome"], "aborted");
     assert_eq!(dataset.metadata["sine_control"], "velocity_scan");
-    assert_eq!(dataset.metadata["record_bytes"], 40);
+    assert_eq!(dataset.metadata["record_bytes"], RECORD_BYTES);
     assert!(!e.owns_hardware());
 }
 #[test]
@@ -155,12 +210,13 @@ fn corruption_and_wrong_count_offset_or_run_never_produce_ack() {
         d.begin(2);
         let mut metadata = meta(2, &bytes);
         if bad == 0 {
-            metadata["bytes"] = json!(41);
+            metadata["bytes"] = json!(RECORD_BYTES + 1);
             assert!(d.metadata(metadata).is_err());
             continue;
         }
         d.metadata(metadata).unwrap();
-        let mut header = json!({"id":receiver::DOWNLOAD_ID,"run":2,"offset":0,"bytes":40});
+        let mut header =
+            json!({"id":receiver::DOWNLOAD_ID,"run":2,"offset":0,"bytes":RECORD_BYTES});
         if bad == 1 {
             header["offset"] = json!(1);
         }
@@ -172,7 +228,7 @@ fn corruption_and_wrong_count_offset_or_run_never_produce_ack() {
             corrupt[3] ^= 1;
         }
         if bad == 4 {
-            header["bytes"] = json!(39);
+            header["bytes"] = json!(RECORD_BYTES - 1);
         }
         if bad == 3 {
             d.chunk(header, &corrupt).unwrap();
@@ -211,8 +267,8 @@ fn empty_fault_dataset_and_maximum_payload_transfer() {
 #[test]
 fn truncated_binary_can_only_recover_with_a_fresh_decoder_and_download() {
     let mut decoder = receiver::Decoder::default();
-    let header = json!({"type":"data_chunk","bytes":40});
-    for b in format!("{header}\n").bytes().chain([0; 39]) {
+    let header = json!({"type":"data_chunk","bytes":RECORD_BYTES});
+    for b in format!("{header}\n").bytes().chain([0; RECORD_BYTES - 1]) {
         assert!(decoder.push(b).unwrap().is_none());
     }
     let mut fresh = receiver::Decoder::default();
@@ -221,7 +277,12 @@ fn truncated_binary_can_only_recover_with_a_fresh_decoder_and_download() {
         .filter_map(|&b| fresh.push(b).unwrap())
         .collect();
     assert_eq!(events.len(), 1);
-    for bytes in [0, 39, 641, 1_000_000] {
+    for bytes in [
+        0,
+        RECORD_BYTES - 1,
+        RECORD_BYTES * CHUNK_RECORDS + 1,
+        1_000_000,
+    ] {
         let mut decoder = receiver::Decoder::default();
         let mut error = false;
         for b in format!("{{\"type\":\"data_chunk\",\"bytes\":{bytes}}}\n").bytes() {
@@ -302,3 +363,5 @@ fn native_configuration_is_validated_in_rust() {
         );
     }
 }
+#[path = "../../src/xeryon.rs"]
+mod xeryon;

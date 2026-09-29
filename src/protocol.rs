@@ -16,8 +16,66 @@ pub struct Sample {
     pub valid: bool,
 }
 
+/// All parsed publications, including identical values and same-tick bursts.
+/// Times are wrapping SysTick milliseconds, never artificially advanced.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct ArrivalStats {
+    pub count: u32,
+    pub first_ms: u32,
+    pub last_ms: u32,
+    pub sum_ms: u64,
+    pub min_ms: u32,
+    pub max_ms: u32,
+}
+impl ArrivalStats {
+    pub fn observe(&mut self, ms: u32) {
+        if self.count == 0 {
+            self.first_ms = ms;
+        } else {
+            let dt = ms.wrapping_sub(self.last_ms);
+            self.sum_ms += u64::from(dt);
+            self.min_ms = if self.count == 1 {
+                dt
+            } else {
+                self.min_ms.min(dt)
+            };
+            self.max_ms = self.max_ms.max(dt);
+        }
+        self.last_ms = ms;
+        self.count += 1;
+    }
+    pub fn write_json(&self, out: &mut impl Write, elapsed: u32) -> fmt::Result {
+        write!(
+            out,
+            "{{\"updates\":{},\"rate_millihz\":{},\"intervals\":{},\"interval_sum_ms\":{},\"min_ms\":{},\"mean_us\":{},\"max_ms\":{}}}",
+            self.count,
+            u64::from(self.count) * 1_000_000 / u64::from(elapsed.max(1)),
+            self.count.saturating_sub(1),
+            self.sum_ms,
+            self.min_ms,
+            self.sum_ms * 1000 / u64::from(self.count.saturating_sub(1).max(1)),
+            self.max_ms
+        )
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct TransportStats {
+    pub rx_peak: u32,
+    pub rx_backlog_polls: u32,
+    pub max_service_gap_ms: u32,
+    pub max_tx_busy_ms: u32,
+}
+
 #[derive(Clone, Copy)]
 pub struct Telemetry {
+    pub epos_generation: u32,
+    pub settings: [Sample; 2], // INFO, POLI
+    pub setting_updates: [u32; 2],
+    pub feedback_before: [Option<i64>; 2],
+    pub timing_active: bool,
+    pub epos_arrivals: ArrivalStats,
+    pub transport: TransportStats,
     pub epoch: u32,
     pub vid: u16,
     pub pid: u16,
@@ -39,6 +97,29 @@ pub struct Telemetry {
 impl Telemetry {
     pub const fn new() -> Self {
         Self {
+            epos_generation: 0,
+            settings: [Sample {
+                value: 0,
+                ms: 0,
+                valid: false,
+            }; 2],
+            setting_updates: [0; 2],
+            feedback_before: [None; 2],
+            timing_active: false,
+            epos_arrivals: ArrivalStats {
+                count: 0,
+                first_ms: 0,
+                last_ms: 0,
+                sum_ms: 0,
+                min_ms: 0,
+                max_ms: 0,
+            },
+            transport: TransportStats {
+                rx_peak: 0,
+                rx_backlog_polls: 0,
+                max_service_gap_ms: 0,
+                max_tx_busy_ms: 0,
+            },
             speed: Sample {
                 value: 0,
                 ms: 0,
@@ -79,6 +160,21 @@ impl Telemetry {
 
     pub fn record(&mut self, tag: &[u8], value: i64, now: u32) {
         self.records = self.records.wrapping_add(1);
+        if tag == b"EPOS" {
+            // A publication's identity is independent of its encoder value.
+            self.epos_generation = self.epos_generation.wrapping_add(1);
+            if self.timing_active {
+                self.epos_arrivals.observe(now);
+            }
+        }
+        if let Some(i) = [b"INFO", b"POLI"].iter().position(|s| *s == tag) {
+            self.settings[i] = Sample {
+                value,
+                ms: now,
+                valid: true,
+            };
+            self.setting_updates[i] = self.setting_updates[i].wrapping_add(1);
+        }
         if tag == b"SSPD" {
             self.speed = Sample {
                 value,
@@ -254,6 +350,28 @@ impl Write for Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn epos_identity_receipt_time_and_all_arrivals_survive_bursts_and_wrap() {
+        let mut t = Telemetry::new();
+        t.timing_active = true;
+        t.epos_generation = u32::MAX - 1;
+        for now in [u32::MAX - 9, u32::MAX - 9, 10, 30] {
+            t.record(b"EPOS", 7, now); // equal encoder values are still new
+            assert_eq!(t.samples[0].ms, now);
+        }
+        assert_eq!(t.epos_generation, 2);
+        let s = t.epos_arrivals;
+        assert_eq!((s.count, s.min_ms, s.max_ms, s.sum_ms), (4, 0, 20, 40));
+        assert_eq!(t.samples[0].ms.wrapping_sub(s.first_ms), 40);
+        let copy = t; // reads do not publish samples
+        assert_eq!(copy.epos_generation, t.epos_generation);
+        t.record(b"STAT", 0, 40);
+        assert_eq!(t.epos_generation, 2);
+        t.reset();
+        assert_eq!(t.epos_generation, 0);
+        assert!(!t.samples[0].valid);
+        assert_eq!(t.epos_arrivals.count, 0);
+    }
     #[test]
     fn commands_reject_motion_and_recover() {
         let mut parser = Commands::new();

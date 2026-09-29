@@ -20,11 +20,23 @@ static TELEMETRY: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::Decoder>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::Decoder::new()));
 static CACHE: cortex_m::interrupt::Mutex<RefCell<crate::protocol::Telemetry>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::protocol::Telemetry::new()));
+static FEEDBACK_SETUP: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::FeedbackSetup>> =
+    cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::FeedbackSetup::new()));
 
 pub fn telemetry() -> crate::protocol::Telemetry {
     cortex_m::interrupt::free(|cs| {
         let mut t = *CACHE.borrow(cs).borrow();
         t.xeryon_motion = Some(*MOTION.borrow(cs).borrow());
+        t.feedback_before = FEEDBACK_SETUP.borrow(cs).borrow().before;
+        // Foreground-only bounded diagnostic snapshot through the C boundary.
+        unsafe {
+            usb_serial_stats(
+                &mut t.transport.rx_peak,
+                &mut t.transport.rx_backlog_polls,
+                &mut t.transport.max_service_gap_ms,
+                &mut t.transport.max_tx_busy_ms,
+            );
+        }
         t
     })
 }
@@ -93,6 +105,9 @@ fn reset_telemetry() {
 }
 
 unsafe extern "C" {
+    fn usb_serial_rx_pending() -> bool;
+    fn usb_serial_timing(on: bool);
+    fn usb_serial_stats(peak: *mut u32, backlog: *mut u32, gap: *mut u32, tx_ms: *mut u32);
     fn usb_serial_tx_idle() -> bool;
     fn usb_serial_send(data: *const u8, len: u32, stop: bool) -> bool;
     fn scanner_init() -> bool;
@@ -203,10 +218,50 @@ pub fn poll() {
 
 pub fn autonomous(on: bool) {
     AUTONOMOUS.store(on, Ordering::Relaxed);
+    if on {
+        cortex_m::interrupt::free(|cs| {
+            *FEEDBACK_SETUP.borrow(cs).borrow_mut() = crate::xeryon::FeedbackSetup::new()
+        });
+    }
+}
+
+pub fn rx_pending() -> bool {
+    // SAFETY: foreground-only RX occupancy query.
+    unsafe { usb_serial_rx_pending() }
 }
 
 pub struct ExperimentActuator;
 impl crate::experiment::Actuator for ExperimentActuator {
+    fn prepare_feedback(&mut self, now: u32) -> Result<bool, &'static str> {
+        let t = telemetry();
+        let idle = self.tx_idle();
+        cortex_m::interrupt::free(|cs| {
+            FEEDBACK_SETUP
+                .borrow(cs)
+                .borrow_mut()
+                .poll(now, &t, idle, |bytes| {
+                    // SAFETY: main context, bounded complete line copied by C.
+                    if unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, false) } {
+                        Ok(())
+                    } else {
+                        Err("Xeryon feedback setup transmit unavailable")
+                    }
+                })
+        })
+    }
+    fn start_timing(&mut self) {
+        cortex_m::interrupt::free(|cs| {
+            let mut t = CACHE.borrow(cs).borrow_mut();
+            t.epos_arrivals = Default::default();
+            t.timing_active = true;
+        });
+        // SAFETY: reset only foreground diagnostic counters, no USB state change.
+        unsafe { usb_serial_timing(true) };
+    }
+    fn end_timing(&mut self) {
+        cortex_m::interrupt::free(|cs| CACHE.borrow(cs).borrow_mut().timing_active = false);
+        unsafe { usb_serial_timing(false) };
+    }
     fn scan(&mut self, commands: &[crate::xeryon_motion::ScanCommand]) -> Result<(), &'static str> {
         if !self.tx_idle() {
             return Err("Xeryon previous transmit incomplete");
@@ -448,13 +503,12 @@ unsafe extern "C" fn scanner_serial_rx(data: *const u8, len: u32) {
     if XD_C.load(Ordering::Relaxed) {
         // One bounded critical section per received chunk, no string formatting
         // or USB IO inside it. Foreground USB1 serializes a copy at 10 Hz.
-        let now = millis();
         cortex_m::interrupt::free(|cs| {
             let mut decoder = TELEMETRY.borrow(cs).borrow_mut();
             let mut cache = CACHE.borrow(cs).borrow_mut();
             for &byte in bytes {
                 match decoder.push(byte) {
-                    Some(Ok(record)) => cache.record(record.tag(), record.value(), now),
+                    Some(Ok(record)) => cache.record(record.tag(), record.value(), millis()),
                     Some(Err(_)) => cache.malformed = cache.malformed.wrapping_add(1),
                     None => {}
                 }

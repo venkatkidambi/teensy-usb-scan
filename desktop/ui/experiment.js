@@ -69,25 +69,43 @@ export function experimentMessage(message) {
     $('experiment-results').hidden=false;
     $('experiment-result-summary').textContent=`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.reason} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s · CRC verified · missed samples ${m.missed_samples} · max logging lateness ${m.max_lateness_ms} ms${m.stop_queued?'':' · STOP could not be queued'}`;
     if(m.fault_stat!==undefined)$('experiment-result-summary').textContent+=` · Fault STAT ${m.fault_stat}`;
+    if(m.timing){const t=m.timing;
+      $('experiment-result-summary').textContent+=` · EPOS ${(t.epos.rate_millihz/1000).toFixed(1)} Hz (${t.epos.updates} updates), max gap ${t.epos.max_ms} ms, max receipt age ${t.max_epos_age_ms} ms, ${t.epos_repeated_records} repeated records · pressure ${(t.pressure.rate_millihz/1000).toFixed(1)} Hz · USB max service gap ${t.max_usb_service_gap_ms} ms, RX peak ${t.rx_peak_bytes} B · feedback settings ${t.feedback_verified?'verified':'unverified'}`;
+    }
     draw();
   }
   experimentControls();
+}
+// Retain equal-valued NEW samples; suppress repeat reads by identity, never value.
+// Negative times describe the cached sample preceding acquisition start.
+export function signalPoints(samples, field, scale=1) {
+  const age=field===1?4:5, generation=field===1?10:11;
+  let previous;
+  return samples.filter(s=>{const fresh=s[generation]!==previous;previous=s[generation];return fresh;})
+    .map(s=>[s[0]-s[age],s[field]*scale]);
 }
 function drawPlot(id,field,scale) {
   const canvas=$(id),rect=canvas.getBoundingClientRect();if(!rect.width||!dataset)return;
   const ctx=canvas.getContext('2d'),dpr=Math.min(devicePixelRatio||1,2);
   canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;ctx.scale(dpr,dpr);
   const samples=dataset.samples,l=65,r=rect.width-16,t=15,b=rect.height-30;
-  let lo=Infinity,hi=-Infinity;for(const s of samples){lo=Math.min(lo,s[field]*scale);hi=Math.max(hi,s[field]*scale);}
+  const points=signalPoints(samples,field,scale);
+  const command=field===1?samples.map(s=>[s[0],s[7]*scale]):[];
+  let lo=Infinity,hi=-Infinity;for(const [,value] of [...points,...command]){lo=Math.min(lo,value);hi=Math.max(hi,value);}
   if(!samples.length){ctx.fillText('No samples acquired',l,40);return;}
   const pad=Math.max((hi-lo)*.1,scale);lo-=pad;hi+=pad;const end=Math.max(dataset.metadata.elapsed_ms,1);
+  const start=Math.min(0,...signalPoints(samples,1).map(p=>p[0]),...signalPoints(samples,2).map(p=>p[0]));
+  const x=ms=>l+(ms-start)/(end-start)*(r-l),y=value=>b-(value-lo)/(hi-lo)*(b-t);
   ctx.font='10px system-ui';ctx.fillStyle='#646b65';
   for(let i=0;i<=4;i++){
     const y=t+(b-t)*i/4;ctx.strokeStyle='#e0e3e0';ctx.beginPath();ctx.moveTo(l,y);ctx.lineTo(r,y);ctx.stroke();ctx.textAlign='right';ctx.fillText((hi-(hi-lo)*i/4).toFixed(field===1?3:0),l-6,y+3);
-    ctx.textAlign='center';ctx.fillText((end*i/4000).toFixed(2),l+(r-l)*i/4,rect.height-8);
+    ctx.textAlign='center';ctx.fillText(((start+(end-start)*i/4)/1000).toFixed(2),l+(r-l)*i/4,rect.height-8);
   }
-  ctx.strokeStyle='#32684d';ctx.lineWidth=1.5;ctx.beginPath();
-  samples.forEach((s,i)=>{const x=l+s[0]/end*(r-l),y=b-(s[field]*scale-lo)/(hi-lo)*(b-t);if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);});ctx.stroke();
+  ctx.strokeStyle='#919b96';ctx.lineWidth=1;ctx.beginPath();
+  command.forEach(([ms,value],i)=>{if(i)ctx.lineTo(x(ms),y(value));else ctx.moveTo(x(ms),y(value));});ctx.stroke();
+  // Measurement points only: no interpolation across missing/deduplicated data.
+  ctx.fillStyle='#32684d';
+  for(const [ms,value] of points){ctx.beginPath();ctx.arc(x(ms),y(value),2,0,2*Math.PI);ctx.fill();}
 }
 function draw(){drawPlot('experiment-position-plot',1,.078);drawPlot('experiment-pressure-plot',2,1);}
 export function setupExperiments(api) {

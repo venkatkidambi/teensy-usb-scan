@@ -151,11 +151,12 @@ impl Dataset {
             "metadata,\"{}\"",
             self.metadata.to_string().replace('"', "\"\"")
         );
-        csv.push_str("time_s,position_um,pressure_raw,stat,epos_age_ms,pressure_age_ms,stat_age_ms,target_um,controller_ticks,controller_age_ms,epos_counts,target_counts\n");
+        csv.push_str("time_s,position_um,pressure_raw,stat,epos_age_ms,pressure_age_ms,stat_age_ms,target_um,controller_ticks,controller_age_ms,epos_counts,target_counts,epos_host_receipt_s,pressure_i2c_completion_s,epos_generation,pressure_generation,epos_new,pressure_new\n");
+        let mut previous: Option<&[i64; RECORD_FIELDS]> = None;
         for s in &self.samples {
             let _ = writeln!(
                 csv,
-                "{:.3},{:.3},{},{},{},{},{},{:.3},{},{},{},{}",
+                "{:.3},{:.3},{},{},{},{},{},{:.3},{},{},{},{},{:.3},{:.3},{},{},{},{}",
                 s[0] as f64 / 1000.0,
                 s[1] as f64 * 0.078,
                 s[2],
@@ -167,8 +168,15 @@ impl Dataset {
                 s[8],
                 s[9],
                 s[1],
-                s[7]
+                s[7],
+                (s[0] - s[4]) as f64 / 1000.0,
+                (s[0] - s[5]) as f64 / 1000.0,
+                s[10],
+                s[11],
+                u8::from(previous.is_none_or(|p| p[10] != s[10])),
+                u8::from(previous.is_none_or(|p| p[11] != s[11])),
             );
+            previous = Some(s);
         }
         csv
     }
@@ -189,7 +197,7 @@ impl Download {
     pub fn metadata(&mut self, metadata: Value) -> Result<(), String> {
         if uint(&metadata, "id")? != DOWNLOAD_ID
             || Some(uint(&metadata, "run")?) != self.run
-            || uint(&metadata, "version")? != 1
+            || uint(&metadata, "version")? != data::DATA_VERSION
             || uint(&metadata, "record_bytes")? as usize != RECORD_BYTES
             || uint(&metadata, "count")? as usize > data::CAPACITY
             || uint(&metadata, "bytes")? != uint(&metadata, "count")? * RECORD_BYTES as u32

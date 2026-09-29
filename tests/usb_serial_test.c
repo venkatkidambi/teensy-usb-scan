@@ -10,6 +10,8 @@ static uintptr_t token;
 static uint32_t available = 512, writes, flushes, clears;
 static char transmitted[33];
 static bool in_flight;
+static bool burst;
+static uint32_t rx_bytes;
 uint32_t tuh_cdc_write_available(uint8_t idx) { assert(idx == 0); return available; }
 uint32_t tuh_cdc_write(uint8_t idx, const void *data, uint32_t len) {
   assert(idx == 0 && len <= 32 && len <= available);
@@ -60,8 +62,16 @@ bool tuh_cdc_set_control_line_state(uint8_t idx, uint16_t lines,
   assert(idx == 0 && lines == CDC_CONTROL_LINE_STATE_DTR);
   return submit(cb, user);
 }
+uint32_t tuh_cdc_read_available(uint8_t idx) { assert(idx == 0); return rx_bytes; }
 uint32_t tuh_cdc_read(uint8_t idx, void *buf, uint32_t size) {
   assert(idx == 0 && size == 64);
+  if (burst) {
+    uint32_t n = rx_bytes < size ? rx_bytes : size;
+    rx_bytes -= n;
+    memset(buf, 'a', n);
+    if (n) ++reads;
+    return n;
+  }
   memcpy(buf, "SOFT=20103\n", 11);
   ++reads;
   return 11;
@@ -71,6 +81,7 @@ void scanner_serial_event(uint8_t event, uint8_t addr, uint8_t itf) {
   ++events[event];
 }
 void scanner_serial_rx(const uint8_t *data, uint32_t size) {
+  if (burst) { assert(size == 64); return; }
   assert(size == 11 && memcmp(data, "SOFT=20103\n", 11) == 0);
 }
 static void complete(tusb_xfer_result_t result) {
@@ -177,5 +188,24 @@ int main(void) {
   usb_serial_task();
   complete(XFER_RESULT_SUCCESS);
   assert(events[1] == 2);
+  burst = true;
+  rx_bytes = 576;
+  now = UINT32_MAX - 4;
+  usb_serial_timing(true);
+  now = 2;
+  const uint32_t baseline_reads = reads;
+  usb_serial_task();
+  assert(reads == baseline_reads + 4 && rx_bytes == 320 && usb_serial_rx_pending());
+  usb_serial_task();
+  assert(reads == baseline_reads + 8 && rx_bytes == 64);
+  usb_serial_task();
+  assert(reads == baseline_reads + 9 && !usb_serial_rx_pending());
+  assert(usb_serial_send(speed, sizeof(speed)-1, false));
+  now = 12;
+  complete_tx();
+  uint32_t peak, backlog, gap, tx;
+  usb_serial_stats(&peak, &backlog, &gap, &tx);
+  assert(peak == 576 && backlog == 2 && gap == 7 && tx == 10);
+  usb_serial_timing(false);
   puts("USB serial transport tests passed");
 }

@@ -145,15 +145,22 @@ tracking and drift still require physical validation under the intended load.
 
 ## Timing, sample layout and memory
 
+Before initial motion, cooperative setup reads inherited INFO/POLI where possible,
+sets INFO=2 and POLI=20 ms, and requires fresh matching parameter readbacks. Each
+step has a 1.5 s deadline. Unknown original settings are reported as null; failed
+configuration faults before motion. These runtime settings are not saved to NVM
+and remain in effect for Dashboard operation after the run.
+
+
 | Quantity | Value |
 | --- | --- |
 | Clock | Existing monotonic Teensy SysTick, 1 ms resolution, wrapping u32 |
 | Acquisition schedule | 50 ms / 20 Hz, latest cached raw values |
 | Pressure acquisition | LPS22HHTR 200 Hz output; 1 ms readiness polling; burst read at 400 kHz |
 | Sinusoidal velocity updates | 10 ms / 100 Hz, 0.100–2.000 Hz wave frequency |
-| Record | 40 bytes, ten explicit little-endian 32-bit words |
+| Record | 48 bytes, twelve explicit little-endian 32-bit words (dataset v2) |
 | Capacity | 4,096 records |
-| Sample-buffer RAM | 163,840 bytes / 160 KiB, zero-initialized DTCM `.bss` |
+| Sample-buffer RAM | 196,608 bytes / 192 KiB, zero-initialized DTCM `.bss` |
 | Maximum acquisition bound | 204,750 ms (204.75 s), including final settling |
 | Maximum sinusoidal waveform duration | 194,750 ms, plus reserved 10 s settling |
 | Initial positioning | Before acquisition: speed-based budget for quasi-static (at most 204.75 s); 10 s for sinusoidal |
@@ -175,13 +182,22 @@ never silently shortened. A 204.75 s bound reserves all 4,096 records.
 | 28 | target | i32, theoretical sine position at actual logging time (center after waveform); last DPOS target for quasi-static |
 | 32 | controller_ticks | u32, latest raw XD-C TIME, 0.1 ms units |
 | 36 | controller_age_ms | u32, TIME reception age; UINT32_MAX means unavailable |
+| 40 | epos_generation | u32, increments for each parsed EPOS publication, even if value is unchanged |
+| 44 | pressure_generation | u32, sensor publication counter |
 
 EPOS/STAT/TIME are asynchronous feedback, not a simultaneous measurement. The
 pressure publication timestamp occurs after the combined pressure/temperature burst
 completes. Only a fresh conversion advances that timestamp. Ages retain the available latency information; neither a
 software timestamp nor TIME establishes sensor conversion time or clock alignment.
-Pressure/position samples can repeat between sensor updates. The frontend plots
-the paired logging times; CSV also exports all ages and raw encoder/target values.
+Pressure/position samples can repeat between sensor updates. Dataset v2 retains
+identities to distinguish new publications from repeated cache reads. The frontend
+plots each unique identity as a point at `elapsed_ms - signal_age_ms`, using signed
+arithmetic (pre-start samples can have negative times). Commanded trajectory stays
+on experiment elapsed time. There is no interpolation between measured points.
+CSV exposes these independent times, both identities, and per-signal new flags.
+The 20 Hz logger still selects the latest sample; it does not retain every 50 Hz
+EPOS or 200 Hz pressure publication. See [EPOS_TIMING.md](EPOS_TIMING.md) for setup,
+receipt-time limitations, decimation statistics and physical acceptance.
 
 The foreground performs at most one logging operation per poll. Late logging
 skips expired slots rather than fabricating samples, recording missed-slot count
@@ -229,12 +245,11 @@ version, run, requested integer-unit configuration, count, record size, payload
 length, CRC, outcome, reason, STOP queue result, clock origin, elapsed time,
 duration bound, reserved sample count, intervals, missed samples and lateness.
 Sinusoidal metadata adds `sine_control: "velocity_scan"` to distinguish these runs
-from earlier 0.2.0 position-streamed datasets. All ten record words are occupied;
-signed velocity is not added, preserving the 40-byte format and full timing/age
-fields. The theoretical velocity is derivable from saved configuration and time
+from earlier 0.2.0 position-streamed datasets. Dataset version 2 appends two
+identity words to the original ten fields; signed velocity is not added. The theoretical velocity is derivable from saved configuration and time
 during the waveform; final centering is a separate tracked positioning phase.
 
-GET_CHUNK requests **16 records maximum** (640 binary bytes). Firmware sends one
+GET_CHUNK requests **16 records maximum** (768 binary bytes). Firmware sends one
 JSON `data_chunk` header with id/run/record-offset/byte-length followed immediately
 by exactly that many binary bytes. There is no newline or escaping after the
 binary payload. The native decoder handles arbitrary fragmentation and embedded

@@ -1,6 +1,7 @@
 //! Shared, allocation-free experiment units, validation and wire record format.
 pub const CAPACITY: usize = 4096;
-pub const RECORD_FIELDS: usize = 10;
+pub const RECORD_FIELDS: usize = 12;
+pub const DATA_VERSION: u32 = 2;
 pub const RECORD_BYTES: usize = RECORD_FIELDS * 4;
 pub const CHUNK_RECORDS: usize = 16;
 pub const SAMPLE_MS: u32 = 50;
@@ -219,6 +220,8 @@ pub struct Record {
     pub target: i32,
     pub controller_ticks: u32,
     pub controller_age_ms: u32,
+    pub epos_generation: u32,
+    pub pressure_generation: u32,
 }
 impl Record {
     pub const EMPTY: Self = Self {
@@ -232,6 +235,8 @@ impl Record {
         target: 0,
         controller_ticks: 0,
         controller_age_ms: 0,
+        epos_generation: 0,
+        pressure_generation: 0,
     };
     pub fn encode(self) -> [u8; RECORD_BYTES] {
         let words = [
@@ -245,6 +250,8 @@ impl Record {
             self.target as u32,
             self.controller_ticks,
             self.controller_age_ms,
+            self.epos_generation,
+            self.pressure_generation,
         ];
         let mut bytes = [0; RECORD_BYTES];
         for (chunk, word) in bytes.chunks_exact_mut(4).zip(words) {

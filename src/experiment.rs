@@ -17,6 +17,12 @@ pub enum State {
     Transferring,
 }
 pub trait Actuator {
+    /// Preparation completes before any experiment motion command.
+    fn prepare_feedback(&mut self, _now: u32) -> Result<bool, &'static str> {
+        Ok(true)
+    }
+    fn start_timing(&mut self) {}
+    fn end_timing(&mut self) {}
     /// One or two ordered, separately flushed SSPD/SCAN lines; no readback.
     fn scan(&mut self, commands: &[xeryon_motion::ScanCommand]) -> Result<(), &'static str>;
     /// Set and request SSPD in separate, ordered USB transfers.
@@ -67,6 +73,23 @@ pub struct Engine<'a> {
     scan: xeryon_motion::ScanState,
     motion_changed_ms: u32,
     fault_stat: Option<u32>,
+    feedback_pending: bool,
+    epos_arrivals: crate::protocol::ArrivalStats,
+    pressure_arrivals: crate::protocol::ArrivalStats,
+    transport: crate::protocol::TransportStats,
+    last_pressure: u32,
+    logged_epos: Option<u32>,
+    logged_pressure: Option<u32>,
+    repeated_epos: u32,
+    repeated_pressure: u32,
+    max_epos_age: u32,
+    max_pressure_age: u32,
+    malformed_start: u32,
+    malformed: u32,
+    feedback_before: [Option<i64>; 2],
+    feedback_verified: bool,
+    epos_start_generation: u32,
+    epos_logged_updates: u32,
 }
 impl<'a> Engine<'a> {
     pub fn new(samples: &'a mut [Record]) -> Self {
@@ -103,6 +126,23 @@ impl<'a> Engine<'a> {
             scan: xeryon_motion::ScanState::default(),
             motion_changed_ms: 0,
             fault_stat: None,
+            feedback_pending: false,
+            epos_arrivals: Default::default(),
+            pressure_arrivals: Default::default(),
+            transport: Default::default(),
+            last_pressure: 0,
+            logged_epos: None,
+            logged_pressure: None,
+            repeated_epos: 0,
+            repeated_pressure: 0,
+            max_epos_age: 0,
+            max_pressure_age: 0,
+            malformed_start: 0,
+            malformed: 0,
+            feedback_before: [None; 2],
+            feedback_verified: false,
+            epos_start_generation: 0,
+            epos_logged_updates: 0,
         }
     }
     pub fn active(&self) -> bool {
@@ -217,12 +257,38 @@ impl<'a> Engine<'a> {
         self.center_move = CenterMove::None;
         self.scan = xeryon_motion::ScanState::default();
         self.fault_stat = None;
+        self.feedback_pending = true;
+        self.epos_arrivals = Default::default();
+        self.pressure_arrivals = Default::default();
+        self.transport = Default::default();
+        self.logged_epos = None;
+        self.logged_pressure = None;
+        self.repeated_epos = 0;
+        self.repeated_pressure = 0;
+        self.max_epos_age = 0;
+        self.max_pressure_age = 0;
+        self.malformed = 0;
+        self.feedback_before = [None; 2];
+        self.feedback_verified = false;
+        self.epos_logged_updates = 0;
         self.hold_started = None;
         self.state = State::MoveToStart;
         // First target is sent by begin(), only after all validation succeeds.
         Ok(())
     }
     pub fn begin(&mut self, now: u32, io: &mut impl Actuator) {
+        match io.prepare_feedback(now) {
+            Ok(false) => return,
+            Err(e) => {
+                self.finish(State::Fault, e, io);
+                return;
+            }
+            Ok(true) => {
+                self.feedback_pending = false;
+                self.feedback_verified = true;
+            }
+        }
+        self.move_started = now;
         let result = match self.config.and_then(ExperimentConfig::speed) {
             Some(speed) => io.speed(speed),
             None => io.target(self.target, now, true),
@@ -232,6 +298,7 @@ impl<'a> Engine<'a> {
         }
     }
     fn finish(&mut self, state: State, reason: &'static str, io: &mut impl Actuator) {
+        io.end_timing();
         #[cfg(not(test))]
         crate::fault::mark(5);
         self.state = state;
@@ -259,6 +326,15 @@ impl<'a> Engine<'a> {
         }
         if self.state == State::Running {
             self.elapsed_ms = now.wrapping_sub(self.started_ms);
+            self.epos_arrivals = t.epos_arrivals;
+            self.transport = t.transport;
+            self.malformed = t.malformed.wrapping_sub(self.malformed_start);
+            if p.valid && p.samples != self.last_pressure {
+                self.pressure_arrivals.observe(p.ms);
+                self.last_pressure = p.samples;
+            }
+            self.max_epos_age = self.max_epos_age.max(now.wrapping_sub(t.samples[0].ms));
+            self.max_pressure_age = self.max_pressure_age.max(now.wrapping_sub(p.ms));
         }
         // Initial positioning can still see pre-DPOS status. Its existing
         // deadline and echo/reached checks bound this transition; require
@@ -289,7 +365,12 @@ impl<'a> Engine<'a> {
             t.xeryon_motion
                 // During setup this tracker still describes the previous
                 // manual move. The first DPOS starts a new tracked move.
-                .filter(|m| m.state == 4 && !self.speed_pending && !self.timeout_pending)
+                .filter(|m| {
+                    m.state == 4
+                        && !self.feedback_pending
+                        && !self.speed_pending
+                        && !self.timeout_pending
+                })
                 .map(|m| m.interruption_reason.unwrap_or("Xeryon motion failed"))
         });
         if let Some(e) = fault {
@@ -302,6 +383,15 @@ impl<'a> Engine<'a> {
             return;
         }
         if self.state == State::MoveToStart {
+            if self.feedback_pending {
+                self.feedback_before = t.feedback_before;
+                // Preparation can take seconds while old requested-parameter
+                // broadcasts continue. Only SSPD replies after begin's write
+                // may satisfy the existing speed verification.
+                self.speed_updates = t.speed_updates;
+                self.begin(now, io);
+                return;
+            }
             if self.speed_pending {
                 if now.wrapping_sub(self.move_started) >= 3000 {
                     self.finish(State::Fault, "Xeryon speed readback timeout", io);
@@ -367,6 +457,13 @@ impl<'a> Engine<'a> {
             return;
         }
         if self.state == State::Armed {
+            io.start_timing();
+            self.last_pressure = p.samples;
+            self.malformed_start = t.malformed;
+            self.feedback_before = t.feedback_before;
+            self.epos_start_generation = t.epos_generation;
+            self.max_epos_age = now.wrapping_sub(t.samples[0].ms);
+            self.max_pressure_age = now.wrapping_sub(p.ms);
             self.started_ms = now;
             self.next_sample = 0;
             self.next_target = 0;
@@ -406,7 +503,18 @@ impl<'a> Engine<'a> {
             self.missed_samples += late / SAMPLE_MS;
             self.next_sample = (elapsed / SAMPLE_MS + 1) * SAMPLE_MS;
             let time = t.samples[6];
+            if self.logged_epos != Some(t.epos_generation)
+                && t.epos_generation != self.epos_start_generation
+            {
+                self.epos_logged_updates += 1;
+            }
+            self.repeated_epos += u32::from(self.logged_epos == Some(t.epos_generation));
+            self.repeated_pressure += u32::from(self.logged_pressure == Some(p.samples));
+            self.logged_epos = Some(t.epos_generation);
+            self.logged_pressure = Some(p.samples);
             let record = Record {
+                epos_generation: t.epos_generation,
+                pressure_generation: p.samples,
                 elapsed_ms: elapsed,
                 epos: t.samples[0].value as i32,
                 pressure_raw: p.raw,
@@ -549,7 +657,7 @@ impl<'a> Engine<'a> {
     pub fn metadata(&self, out: &mut impl core::fmt::Write, id: u32) -> core::fmt::Result {
         write!(
             out,
-            "{{\"type\":\"data_meta\",\"id\":{id},\"version\":1,\"run\":{},\"config\":",
+            "{{\"type\":\"data_meta\",\"id\":{id},\"version\":{DATA_VERSION},\"run\":{},\"config\":",
             self.run
         )?;
         self.config.unwrap().write_json(out)?;
@@ -559,6 +667,43 @@ impl<'a> Engine<'a> {
         if let Some(stat) = self.fault_stat {
             write!(out, ",\"fault_stat\":{stat}")?;
         }
+        write!(out, ",\"timing\":{{\"epos\":")?;
+        self.epos_arrivals.write_json(out, self.elapsed_ms)?;
+        write!(out, ",\"pressure\":")?;
+        self.pressure_arrivals.write_json(out, self.elapsed_ms)?;
+        write!(
+            out,
+            ",\"feedback_verified\":{},\"epos_unlogged_updates\":{},\"epos_source_drops\":null",
+            self.feedback_verified,
+            self.epos_arrivals
+                .count
+                .saturating_sub(self.epos_logged_updates)
+        )?;
+        write!(
+            out,
+            ",\"epos_repeated_records\":{},\"pressure_repeated_records\":{},\"max_epos_age_ms\":{},\"max_pressure_age_ms\":{},\"malformed_lines\":{},\"rx_peak_bytes\":{},\"rx_backlog_polls\":{},\"max_usb_service_gap_ms\":{},\"max_tx_busy_ms\":{},\"rx_overflow\":null,\"epos_rtt\":null,\"epos_timestamp\":\"host_receipt_ms\",\"pressure_timestamp\":\"i2c_completion_ms\",\"info\":{},\"poli_ms\":{},\"before\":[",
+            self.repeated_epos,
+            self.repeated_pressure,
+            self.max_epos_age,
+            self.max_pressure_age,
+            self.malformed,
+            self.transport.rx_peak,
+            self.transport.rx_backlog_polls,
+            self.transport.max_service_gap_ms,
+            self.transport.max_tx_busy_ms,
+            crate::xeryon::EXPERIMENT_INFO,
+            crate::xeryon::EXPERIMENT_POLI_MS
+        )?;
+        for (i, value) in self.feedback_before.iter().enumerate() {
+            if i != 0 {
+                write!(out, ",")?;
+            }
+            match value {
+                Some(v) => write!(out, "{v}")?,
+                None => write!(out, "null")?,
+            }
+        }
+        write!(out, "]}}")?;
         writeln!(
             out,
             ",\"count\":{},\"record_bytes\":{RECORD_BYTES},\"bytes\":{},\"crc\":{},\"outcome\":\"{}\",\"reason\":\"{}\",\"stop_queued\":{},\"sample_ms\":{SAMPLE_MS},\"trajectory_ms\":{TRAJECTORY_MS},\"move_timeout_ms\":{MOVE_TIMEOUT_MS},\"started_ms\":{},\"elapsed_ms\":{},\"duration_bound_ms\":{},\"required_samples\":{},\"missed_samples\":{},\"max_lateness_ms\":{}}}",
@@ -662,8 +807,12 @@ mod tests {
         speeds: Vec<u32>,
         scans: Vec<xeryon_motion::ScanCommand>,
         events: Vec<String>,
+        preparing: bool,
     }
     impl Actuator for Io {
+        fn prepare_feedback(&mut self, _now: u32) -> Result<bool, &'static str> {
+            Ok(!self.preparing)
+        }
         fn scan(&mut self, commands: &[xeryon_motion::ScanCommand]) -> Result<(), &'static str> {
             if self.fail || self.busy {
                 return Err("scan transmit failure");
@@ -742,6 +891,116 @@ mod tests {
             frequency_mhz: 1000,
             cycles: 1,
         }
+    }
+    #[test]
+    fn records_distinguish_fresh_stationary_epos_from_reused_cache_and_keep_ages() {
+        let mut records = [Record::EMPTY; 256];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        start(&mut e, sinusoidal(), 0, &mut io);
+        let (mut t, mut p) = feedback(2, 0, true);
+        t.timing_active = true;
+        for now in 3..=152 {
+            if now == 3 || now == 53 {
+                t.record(b"EPOS", 0, now);
+            }
+            if now == 4 {
+                p.ms = now;
+                p.samples += 1;
+            }
+            t.record(b"STAT", 1344, now);
+            e.poll(now, &t, p, &mut io);
+        }
+        assert_eq!(e.len, 4);
+        assert_eq!(e.samples[1].epos_generation, 2);
+        assert_eq!(e.samples[2].epos_generation, 3);
+        assert_eq!(e.samples[3].epos_generation, 3);
+        assert_eq!(e.samples[1].epos_age_ms, 49);
+        assert_eq!(e.samples[1].pressure_age_ms, 48);
+        assert_eq!(
+            i64::from(e.samples[1].elapsed_ms) - i64::from(e.samples[1].epos_age_ms),
+            1
+        );
+        assert_eq!(e.repeated_epos, 1);
+        assert_eq!(e.repeated_pressure, 2);
+        assert_eq!(e.epos_arrivals.count, 2);
+        assert_eq!(e.pressure_arrivals.count, 1);
+        assert_eq!(e.max_epos_age, 99);
+        e.abort(&mut io);
+        let frozen = e.epos_arrivals.count;
+        t.record(b"EPOS", 999, 153);
+        e.poll(153, &t, p, &mut io);
+        assert_eq!(e.epos_arrivals.count, frozen);
+    }
+
+    #[test]
+    fn feedback_preparation_blocks_motion_and_old_speed_replies() {
+        let mut records = [Record::EMPTY; 256];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io {
+            preparing: true,
+            ..Io::default()
+        };
+        let (mut t, p) = feedback(0, 0, true);
+        let config = ExperimentConfig::QuasiStatic {
+            start_nm: 0,
+            step_nm: 78,
+            hold_ms: 100,
+            steps: 1,
+            speed_um_s: 10,
+        };
+        e.accept(config, &t, p, false, 0).unwrap();
+        e.begin(0, &mut io);
+        t.record(b"SSPD", 99, 1); // old requested slot during feedback setup
+        e.poll(1, &t, p, &mut io);
+        assert!(io.speeds.is_empty() && io.targets.is_empty());
+        io.preparing = false;
+        e.poll(2, &t, p, &mut io);
+        assert_eq!(io.speeds, [10]);
+        e.poll(3, &t, p, &mut io);
+        assert!(e.speed_pending && io.targets.is_empty());
+        t.record(b"SSPD", 10, 4);
+        e.poll(4, &t, p, &mut io);
+        assert!(!e.speed_pending && e.timeout_pending);
+        assert!(io.targets.is_empty());
+        e.abort(&mut io);
+        assert_eq!(e.state, State::DataReady);
+        assert_eq!(io.stops, 1);
+    }
+
+    #[test]
+    fn metadata_with_worst_case_timing_counters_fits_fixed_frame() {
+        let mut records = [Record::EMPTY; 256];
+        let mut e = Engine::new(&mut records);
+        start(&mut e, sinusoidal(), 0, &mut Io::default());
+        e.epos_arrivals = crate::protocol::ArrivalStats {
+            count: u32::MAX,
+            first_ms: 0,
+            last_ms: u32::MAX,
+            sum_ms: u64::from(u32::MAX),
+            min_ms: u32::MAX,
+            max_ms: u32::MAX,
+        };
+        e.pressure_arrivals = e.epos_arrivals;
+        e.transport = crate::protocol::TransportStats {
+            rx_peak: u32::MAX,
+            rx_backlog_polls: u32::MAX,
+            max_service_gap_ms: u32::MAX,
+            max_tx_busy_ms: u32::MAX,
+        };
+        e.repeated_epos = u32::MAX;
+        e.repeated_pressure = u32::MAX;
+        e.max_epos_age = u32::MAX;
+        e.max_pressure_age = u32::MAX;
+        e.feedback_before = [Some(i64::MAX), Some(i64::MAX)];
+        e.run = u32::MAX;
+        e.started_ms = u32::MAX;
+        e.elapsed_ms = u32::MAX;
+        e.missed_samples = u32::MAX;
+        e.max_lateness_ms = u32::MAX;
+        let mut frame = crate::protocol::Frame::new();
+        e.metadata(&mut frame, u32::MAX).unwrap();
+        assert!(frame.len < 2048);
     }
     fn start(e: &mut Engine<'_>, config: ExperimentConfig, now: u32, io: &mut Io) {
         let (t, p) = feedback(now, 0, true);

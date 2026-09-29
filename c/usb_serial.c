@@ -13,6 +13,24 @@ static bool busy;
 static bool tx_pending;
 static uint32_t started;
 static uintptr_t generation;
+static bool timing;
+static uint32_t rx_peak, rx_backlog, service_gap, tx_max, last_service, tx_started;
+
+bool usb_serial_rx_pending(void) {
+  return state == READY && tuh_cdc_read_available(cdc_index) != 0;
+}
+void usb_serial_timing(bool on) {
+  timing = on;
+  rx_peak = rx_backlog = service_gap = tx_max = 0;
+  last_service = tx_started = tusb_time_millis_api();
+}
+void usb_serial_stats(uint32_t *peak, uint32_t *backlog, uint32_t *gap, uint32_t *tx_ms) {
+  *peak = rx_peak; *backlog = rx_backlog; *gap = service_gap; *tx_ms = tx_max;
+}
+static void observe_tx(uint32_t now) {
+  if (timing && tx_pending && (uint32_t)(now - tx_started) > tx_max)
+    tx_max = now - tx_started;
+}
 
 // FIFO space alone does not establish completion: flush removes bytes from the
 // FIFO before the USB transfer finishes. Experiments require both to be idle.
@@ -23,6 +41,7 @@ bool usb_serial_tx_idle(void) {
 
 void tuh_cdc_tx_complete_cb(uint8_t idx) {
   if (state != READY || idx != cdc_index) return;
+  observe_tx(tusb_time_millis_api());
   // TinyUSB calls this BEFORE flushing the next queued packet. Manual SSPD/DPOS
   // and STOP can queue behind an in-flight command, so retain pending until the
   // final packet completes. A failed/stalled transfer never marks TX idle.
@@ -35,6 +54,7 @@ bool usb_serial_send(const uint8_t *data, uint32_t len, bool stop) {
   if (state != READY || !data || !len || len > 32) return false;
   if (stop) tuh_cdc_write_clear(cdc_index);
   if (tuh_cdc_write_available(cdc_index) < len) return false;
+  if (!tx_pending) tx_started = tusb_time_millis_api();
   tx_pending = true;
   if (tuh_cdc_write(cdc_index, data, len) != len) {
     tuh_cdc_write_clear(cdc_index);
@@ -87,6 +107,11 @@ static void control_complete(tuh_xfer_t *xfer) {
 void usb_serial_task(void) {
   if (state == OFF || state == FAILED) return;
   const uint32_t now = tusb_time_millis_api();
+  if (timing) {
+    if ((uint32_t)(now - last_service) > service_gap) service_gap = now - last_service;
+    last_service = now;
+    observe_tx(now);
+  }
   if (state != READY && (uint32_t)(now - started) >= 3000) {
     // Do not recycle a possibly live EP0 request; unplug to retry.
     state = FAILED;
@@ -112,9 +137,17 @@ void usb_serial_task(void) {
                                        control_complete, generation)) busy = false;
   } else if (state == READY) {
     tuh_cdc_write_flush(cdc_index);
-    // Bound work per loop so USB1 logging and the LED keep getting serviced.
+    // Drain a bounded burst, then yield to pressure, motion and USB1/ABORT.
+    // Never spin waiting for bytes; the foreground avoids WFI with RX pending.
     uint8_t data[64];
-    const uint32_t count = tuh_cdc_read(cdc_index, data, sizeof(data));
-    if (count) scanner_serial_rx(data, count);
+    const uint32_t available = tuh_cdc_read_available(cdc_index);
+    if (timing && available > rx_peak) rx_peak = available;
+    for (unsigned i = 0; i < 4; ++i) {
+      const uint32_t count = tuh_cdc_read(cdc_index, data, sizeof(data));
+      if (!count) break;
+      scanner_serial_rx(data, count);
+      if (count < sizeof(data)) break;
+    }
+    if (timing && usb_serial_rx_pending()) ++rx_backlog;
   }
 }

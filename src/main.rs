@@ -125,7 +125,7 @@ fn main() -> ! {
         fault::heartbeat(usb_host::millis());
         // Drain/refill I2C FIFOs at bus speed, with USB and motion still serviced
         // on every iteration. Sleep only between sensor transactions.
-        if !pressure.busy() {
+        if !pressure.busy() && !usb_host::rx_pending() {
             cortex_m::asm::wfi();
         }
     }

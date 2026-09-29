@@ -153,7 +153,13 @@ Initial and final center positioning use confirmed finite DPOS moves. The wavefo
 ends with STOP before the final center move. ABORT/fault paths request STOP and
 retain samples. SSPD is changed during the waveform and remains at the last setting.
 
-The 40-byte record layout is unchanged. During the sine waveform, `target` is the
+Dataset version 2 uses 48-byte records: the original ten words followed by
+`epos_generation` and `pressure_generation` (u32). The desktop rejects version 1
+datasets instead of misdecoding them. Dashboard protocol remains version 1.
+Each signal uses signed `elapsed_ms - signal_age_ms` for its own relative time;
+EPOS time is host receipt, pressure time is I²C completion. Repeated identities
+are suppressed in plots and marked in CSV, including equal-valued fresh samples.
+No measurement interpolation is applied. During the sine waveform, `target` is the
 theoretical position at actual logging time; after the waveform it is center.
 Quasi-static retains its last commanded DPOS target. Metadata adds
 `sine_control: "velocity_scan"` for sinusoidal runs and retains `trajectory_ms: 10`
@@ -165,3 +171,8 @@ this word because the live Dashboard may show a later, cleared status.
 Positioning and acquisition report `running`; results remain owned until the
 verified dataset acknowledgement. USB dispatch timing does not establish physical
 tracking accuracy or feedback sampling rate.
+
+Post-run `timing` metadata reports arrival statistics, cache reuse, unlogged EPOS
+updates, receipt ages, parse errors and USB service/backlog/TX occupancy.
+`epos_rtt`, `epos_source_drops` and `rx_overflow` are null (unavailable), not zero.
+See [EPOS_TIMING.md](../EPOS_TIMING.md) for exact counter and timestamp semantics.

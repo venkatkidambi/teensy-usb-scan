@@ -89,10 +89,13 @@ fn record_layout_preserves_signed_fields_and_unsigned_sentinels() {
         target: i32::MIN,
         controller_ticks: u32::MAX,
         controller_age_ms: u32::MAX,
+        epos_generation: 123,
+        pressure_generation: 456,
     };
     let bytes = [
         50, 0, 0, 0, 255, 255, 255, 255, 254, 255, 255, 255, 0, 0, 0, 128, 1, 0, 0, 0, 2, 0, 0, 0,
-        3, 0, 0, 0, 0, 0, 0, 128, 255, 255, 255, 255, 255, 255, 255, 255,
+        3, 0, 0, 0, 0, 0, 0, 128, 255, 255, 255, 255, 255, 255, 255, 255, 123, 0, 0, 0, 200, 1, 0,
+        0,
     ];
     assert_eq!(record.encode(), bytes);
     assert_eq!(
@@ -107,7 +110,9 @@ fn record_layout_preserves_signed_fields_and_unsigned_sentinels() {
             3,
             -2147483648,
             4294967295,
-            4294967295
+            4294967295,
+            123,
+            456
         ]
     );
 }

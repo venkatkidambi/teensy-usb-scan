@@ -252,7 +252,7 @@ mod tests {
         let backend = Backend::default();
         *backend.archive.lock().unwrap() = Some(experiment::Dataset {
             metadata: serde_json::json!({"run": 7}),
-            samples: vec![[0, -10, 123, 0, 1, 2, 3, -20, 42, 4]],
+            samples: vec![[0, -10, 123, 0, 1, 2, 3, -20, 42, 4, 1, 2]],
         });
         backend
     }

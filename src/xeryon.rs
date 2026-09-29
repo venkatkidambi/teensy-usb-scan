@@ -2,6 +2,100 @@
 //! Fixed storage, no allocation, and no actuator commands.
 use crate::line::LineBuffer;
 
+// Conservative starting point. Verify actual EPOS cadence on the connected XD-C;
+// POLI describes data updates, not a guaranteed per-tag acquisition rate.
+pub const EXPERIMENT_POLI_MS: u32 = 20;
+pub const EXPERIMENT_INFO: u32 = 2; // preserves DPOS, Dashboard and requested replies
+
+/// Sequential, bounded setup before motion. Never SAVE controller settings.
+pub struct FeedbackSetup {
+    pub before: [Option<i64>; 2],
+    step: u8,
+    pending: bool,
+    started: u32,
+    generation: u32,
+}
+impl FeedbackSetup {
+    pub const fn new() -> Self {
+        Self {
+            before: [None; 2],
+            step: 0,
+            pending: false,
+            started: 0,
+            generation: 0,
+        }
+    }
+    pub fn poll(
+        &mut self,
+        now: u32,
+        t: &crate::protocol::Telemetry,
+        idle: bool,
+        mut send: impl FnMut(&[u8]) -> Result<(), &'static str>,
+    ) -> Result<bool, &'static str> {
+        use core::fmt::Write;
+        if self.step == 6 {
+            return Ok(true);
+        }
+        let index = usize::from(self.step % 2);
+        let query = self.step < 2 || self.step >= 4;
+        if self.pending {
+            let fresh = t.setting_updates[index] != self.generation && t.settings[index].valid;
+            if idle && (!query || fresh) {
+                if query {
+                    let value = t.settings[index].value;
+                    if self.step < 2 {
+                        self.before[index] = Some(value);
+                    } else if value
+                        != i64::from(if index == 0 {
+                            EXPERIMENT_INFO
+                        } else {
+                            EXPERIMENT_POLI_MS
+                        })
+                    {
+                        return Err("Xeryon INFO/POLI readback mismatch");
+                    }
+                }
+                self.step += 1;
+                self.pending = false;
+            } else if now.wrapping_sub(self.started) >= 1500 {
+                // Inherited INFO modes may omit requested parameters. Report
+                // unknown originals, then explicitly establish a known mode.
+                if self.step < 2 && idle {
+                    self.step += 1;
+                    self.pending = false;
+                } else {
+                    return Err("Xeryon feedback setup timeout");
+                }
+            }
+            return Ok(self.step == 6);
+        }
+        if !idle {
+            return Err("Xeryon previous transmit incomplete");
+        }
+        let mut frame = crate::protocol::Frame::new();
+        let tag = if index == 0 { "INFO" } else { "POLI" };
+        if query {
+            writeln!(frame, "{tag}=?").unwrap();
+        } else {
+            writeln!(
+                frame,
+                "{tag}={}",
+                if index == 0 {
+                    EXPERIMENT_INFO
+                } else {
+                    EXPERIMENT_POLI_MS
+                }
+            )
+            .unwrap();
+        }
+        send(frame.pending())?;
+        self.started = now;
+        self.generation = t.setting_updates[index];
+        self.pending = true;
+        Ok(false)
+    }
+}
+
 pub struct Decoder(LineBuffer<64>);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -80,6 +174,98 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feedback_setup_serializes_queries_settings_and_requires_fresh_readback() {
+        let mut setup = FeedbackSetup::new();
+        let mut t = crate::protocol::Telemetry::new();
+        let mut commands = Vec::new();
+        let expected = [
+            "INFO=?\n",
+            "POLI=?\n",
+            "INFO=2\n",
+            "POLI=20\n",
+            "INFO=?\n",
+            "POLI=?\n",
+        ];
+        for (step, command) in expected.iter().enumerate() {
+            let now = step as u32 * 20;
+            assert!(
+                !setup
+                    .poll(now, &t, true, |b| {
+                        commands.push(String::from_utf8(b.to_vec()).unwrap());
+                        Ok(())
+                    })
+                    .unwrap()
+            );
+            assert_eq!(commands.last().unwrap(), command);
+            // Neither a busy transfer nor cached parameter values advances it.
+            assert!(
+                !setup
+                    .poll(now + 1, &t, false, |_| panic!("overlapping send"))
+                    .unwrap()
+            );
+            if step < 2 || step >= 4 {
+                assert!(
+                    !setup
+                        .poll(now + 2, &t, true, |_| panic!("overlapping query"))
+                        .unwrap()
+                );
+                let i = step % 2;
+                let value = if i == 0 {
+                    2
+                } else if step == 1 {
+                    97
+                } else {
+                    20
+                };
+                t.record(if i == 0 { b"INFO" } else { b"POLI" }, value, now + 3);
+            }
+            assert_eq!(
+                setup
+                    .poll(now + 4, &t, true, |_| panic!("send before drain"))
+                    .unwrap(),
+                step == 5
+            );
+        }
+        assert_eq!(setup.before, [Some(2), Some(97)]);
+        assert!(
+            setup
+                .poll(999, &t, true, |_| panic!("already ready"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn feedback_setup_unknown_originals_timeout_mismatch_and_send_failure() {
+        let t = crate::protocol::Telemetry::new();
+        let mut s = FeedbackSetup::new();
+        s.poll(u32::MAX - 100, &t, true, |_| Ok(())).unwrap();
+        assert!(!s.poll(1399, &t, true, |_| panic!()).unwrap());
+        assert_eq!(s.step, 1);
+        assert_eq!(s.before[0], None);
+        s.step = 4;
+        s.poll(1400, &t, true, |_| Ok(())).unwrap();
+        let mut t = t;
+        t.record(b"INFO", 7, 1401);
+        assert_eq!(
+            s.poll(1401, &t, true, |_| panic!()),
+            Err("Xeryon INFO/POLI readback mismatch")
+        );
+        t.setting_updates[0] = 0;
+        assert_eq!(
+            s.poll(2900, &t, true, |_| panic!()),
+            Err("Xeryon feedback setup timeout")
+        );
+        assert_eq!(
+            FeedbackSetup::new().poll(0, &t, true, |_| Err("TX failed")),
+            Err("TX failed")
+        );
+        assert_eq!(
+            FeedbackSetup::new().poll(0, &t, false, |_| panic!()),
+            Err("Xeryon previous transmit incomplete")
+        );
+    }
 
     fn decode(bytes: &[u8]) -> Vec<Result<Record, Error>> {
         let mut decoder = Decoder::new();

@@ -2,7 +2,7 @@
 
 Firmware/desktop **0.2.0** add autonomous Quasi-static and Sinusoidal experiment
 modes alongside the existing Dashboard. The Teensy owns timing, motion and a
-fixed 160 KiB dataset buffer; native desktop Rust downloads/verifies results and
+fixed 192 KiB dataset buffer; native desktop Rust downloads/verifies results and
 builds optional CSV exports. See [EXPERIMENTS.md](EXPERIMENTS.md) for the state
 machine, limits, waveform strategy, safety policy, protocol, and hardware acceptance
 procedure. PC disconnect does not stop an autonomous run if the Teensy stays powered.
