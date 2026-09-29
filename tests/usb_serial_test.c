@@ -206,6 +206,30 @@ int main(void) {
   uint32_t peak, backlog, gap, tx;
   usb_serial_stats(&peak, &backlog, &gap, &tx);
   assert(peak == 576 && backlog == 2 && gap == 7 && tx == 10);
+  uint32_t progress[6];
+  usb_serial_progress(progress);
+  assert(progress[0] == 1 && progress[1] == 1);
+  assert(progress[3] == 2 && progress[5] == 12);
+  // Ordered zero/direction packets have distinct completion observations.
+  now = UINT32_MAX;
+  assert(usb_serial_send((const uint8_t *)"SSPD=0\n", 7, false));
+  assert(usb_serial_send((const uint8_t *)"SCAN=-1\n", 8, false));
+  usb_serial_progress(progress);
+  assert(progress[0] == 3 && progress[1] == 1);
+  assert(progress[2] == UINT32_MAX && progress[3] == UINT32_MAX);
+  now = 0;
+  complete_tx();
+  assert(!usb_serial_tx_idle());
+  now = 1;
+  complete_tx();
+  usb_serial_progress(progress);
+  assert(progress[1] == 3 && progress[4] == 0 && progress[5] == 1);
+  assert(usb_serial_tx_idle());
   usb_serial_timing(false);
+  assert(usb_serial_send((const uint8_t *)"STOP\n", 5, true));
+  now = 2;
+  complete_tx();
+  usb_serial_progress(progress);
+  assert(progress[0] == 3 && progress[1] == 3 && progress[5] == 1);
   puts("USB serial transport tests passed");
 }

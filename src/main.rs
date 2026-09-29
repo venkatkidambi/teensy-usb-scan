@@ -76,7 +76,11 @@ fn main() -> ! {
     static mut EXPERIMENT_SAMPLES: [experiment_data::Record; experiment_data::CAPACITY] =
         [experiment_data::Record::EMPTY; experiment_data::CAPACITY];
     let samples = unsafe { &mut *core::ptr::addr_of_mut!(EXPERIMENT_SAMPLES) };
-    let mut experiment = experiment::Engine::new(samples);
+    static mut REVERSALS: [experiment::reversal::Reversal; experiment::reversal::CAPACITY] =
+        [experiment::reversal::Reversal::EMPTY; experiment::reversal::CAPACITY];
+    // SAFETY: same exclusive foreground ownership as the experiment records.
+    let reversals = unsafe { &mut *core::ptr::addr_of_mut!(REVERSALS) };
+    let mut experiment = experiment::Engine::new(samples).with_reversals(reversals);
     let mut console = console::Console::new(usb);
     usb_host::init(&mut ccm, &mut ccm_analog, &mut gpio3, &mut iomuxc_gpr);
     log::info!("Teensy USB2 host scanner ready; connect one device to the host header");

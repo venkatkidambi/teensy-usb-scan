@@ -105,6 +105,7 @@ fn reset_telemetry() {
 }
 
 unsafe extern "C" {
+    fn usb_serial_progress(values: *mut u32);
     fn usb_serial_rx_pending() -> bool;
     fn usb_serial_timing(on: bool);
     fn usb_serial_stats(peak: *mut u32, backlog: *mut u32, gap: *mut u32, tx_ms: *mut u32);
@@ -261,6 +262,12 @@ impl crate::experiment::Actuator for ExperimentActuator {
     fn end_timing(&mut self) {
         cortex_m::interrupt::free(|cs| CACHE.borrow(cs).borrow_mut().timing_active = false);
         unsafe { usb_serial_timing(false) };
+    }
+    fn tx_progress(&self) -> crate::experiment::reversal::TxProgress {
+        let mut values = [0; 6];
+        // SAFETY: foreground-only snapshot into six u32 values.
+        unsafe { usb_serial_progress(values.as_mut_ptr()) };
+        crate::experiment::reversal::TxProgress(values)
     }
     fn scan(&mut self, commands: &[crate::xeryon_motion::ScanCommand]) -> Result<(), &'static str> {
         if !self.tx_idle() {

@@ -47,7 +47,7 @@ pub struct Console {
     rx: [u8; 512],
     rx_len: usize,
     rx_pos: usize,
-    tx: Frame,
+    tx: crate::protocol::FixedFrame<4096>,
     announce: bool,
     notified: bool,
     urgent: Option<(u32, bool)>,
@@ -96,7 +96,7 @@ impl Console {
             rx: [0; 512],
             rx_len: 0,
             rx_pos: 0,
-            tx: Frame::new(),
+            tx: crate::protocol::FixedFrame::new(),
             announce: true,
             notified: false,
             urgent: None,
@@ -313,18 +313,32 @@ impl Console {
                     Ok(Command::GetChunk(id, run, offset)) => {
                         match experiment.chunk(run, offset as usize) {
                             Ok(records) => {
+                                // Copy the existing binary payload before borrowing the
+                                // engine again for its bounded diagnostic header.
+                                let mut payload = [0u8; crate::experiment_data::CHUNK_RECORDS
+                                    * crate::experiment_data::RECORD_BYTES];
                                 let bytes = records.len() * crate::experiment_data::RECORD_BYTES;
-                                let header = writeln!(
-                                    self.tx,
-                                    "{{\"type\":\"data_chunk\",\"id\":{id},\"run\":{run},\"offset\":{offset},\"bytes\":{bytes}}}"
-                                );
-                                for record in records {
-                                    let bytes = record.encode();
-                                    let end = self.tx.len + bytes.len();
-                                    self.tx.bytes[self.tx.len..end].copy_from_slice(&bytes);
-                                    self.tx.len = end;
+                                for (record, dest) in records.iter().zip(
+                                    payload.chunks_exact_mut(crate::experiment_data::RECORD_BYTES),
+                                ) {
+                                    dest.copy_from_slice(&record.encode());
                                 }
-                                header
+                                let header = experiment.chunk_header(
+                                    &mut self.tx,
+                                    id,
+                                    run,
+                                    offset as usize,
+                                    bytes,
+                                );
+                                if header.is_ok() && self.tx.len + bytes <= self.tx.bytes.len() {
+                                    let end = self.tx.len + bytes;
+                                    self.tx.bytes[self.tx.len..end]
+                                        .copy_from_slice(&payload[..bytes]);
+                                    self.tx.len = end;
+                                    Ok(())
+                                } else {
+                                    Err(core::fmt::Error)
+                                }
                             }
                             Err(message) => self.tx.error(id, message),
                         }
@@ -402,7 +416,12 @@ impl Console {
             }
         } else if !experiment.owns_hardware() {
             interrupt::free(|cs| {
-                core::mem::swap(&mut self.tx, &mut *DIAGNOSTIC.borrow(cs).borrow_mut())
+                let mut diagnostic = DIAGNOSTIC.borrow(cs).borrow_mut();
+                let bytes = diagnostic.pending();
+                self.tx.bytes[..bytes.len()].copy_from_slice(bytes);
+                self.tx.len = bytes.len();
+                self.tx.sent = 0;
+                diagnostic.clear();
             });
         }
     }

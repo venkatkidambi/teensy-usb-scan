@@ -130,7 +130,8 @@ fn independent_signal_times_and_identities_round_trip_into_csv() {
 #[test]
 fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     let mut records = [Record::EMPTY; 1024];
-    let mut e = engine::Engine::new(&mut records);
+    let mut diagnostics = [engine::reversal::Reversal::EMPTY; engine::reversal::CAPACITY];
+    let mut e = engine::Engine::new(&mut records).with_reversals(&mut diagnostics);
     let config = ExperimentConfig::Sinusoidal {
         center_nm: 0,
         amplitude_nm: 780,
@@ -166,7 +167,16 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
             .unwrap();
         let chunk = e.chunk(e.run, offset).unwrap();
         let payload: Vec<_> = chunk.iter().flat_map(|r| r.encode()).collect();
-        let header = json!({"type":"data_chunk","id":receiver::DOWNLOAD_ID,"run":e.run,"offset":offset,"bytes":payload.len()});
+        let mut text = String::new();
+        e.chunk_header(
+            &mut text,
+            receiver::DOWNLOAD_ID,
+            e.run,
+            offset,
+            payload.len(),
+        )
+        .unwrap();
+        let header: Value = serde_json::from_str(&text).unwrap();
         let wire: Vec<_> = format!("{header}\n").bytes().chain(payload).collect();
         // Every split including arbitrary LF, CR, NUL and non-UTF8 in binary is opaque.
         for fragment in wire.chunks(7) {
@@ -194,6 +204,12 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     assert_eq!(dataset.samples[25][7], 0); // center at half-cycle, still scanning
     assert!(dataset.csv().contains("-9.594,1193046"));
     assert_eq!(dataset.metadata["outcome"], "aborted");
+    assert_eq!(dataset.metadata["reversal_count"], 1);
+    assert_eq!(dataset.metadata["reversals"][0]["crossing_ms"], 250);
+    assert_eq!(dataset.metadata["reversals"][0]["commands"][3][0], 1);
+    assert_eq!(dataset.metadata["reversals"][0]["commands"][3][1], 0);
+    assert_eq!(dataset.metadata["reversals"][0]["commands"][4][1], -1);
+    assert!(dataset.csv().contains("reversals"));
     assert_eq!(dataset.metadata["sine_control"], "velocity_scan");
     assert_eq!(dataset.metadata["record_bytes"], RECORD_BYTES);
     assert_eq!(dataset.metadata["sample_ms"], 20);
@@ -251,6 +267,54 @@ fn corruption_and_wrong_count_offset_or_run_never_produce_ack() {
         } else {
             assert!(d.chunk(header, &bytes).is_err());
         }
+    }
+}
+#[test]
+fn reversal_diagnostics_must_complete_before_ack_and_retry_starts_empty() {
+    let bytes = Record::EMPTY.encode();
+    for failure in ["missing", "offset", "too_many", "incomplete", "ok"] {
+        let mut metadata = meta(8, &bytes);
+        metadata["reversal_count"] = json!(1);
+        metadata["reversals"] = json!([]);
+        let mut d = receiver::Download::default();
+        d.begin(8);
+        d.metadata(metadata.clone()).unwrap();
+        let mut header = json!({"id":receiver::DOWNLOAD_ID,"run":8,"offset":0,"bytes":bytes.len(),"reversal_offset":0,"reversals":[{"direction":-1}]});
+        match failure {
+            "missing" => {
+                header.as_object_mut().unwrap().remove("reversals");
+            }
+            "offset" => {
+                header["reversal_offset"] = json!(1);
+            }
+            "too_many" => {
+                header["reversals"] = json!([{}, {}, {}]);
+            }
+            "incomplete" => {
+                header["reversals"] = json!([]);
+            }
+            _ => {}
+        }
+        let result = d.chunk(header, &bytes);
+        if failure == "ok" {
+            result.unwrap();
+            assert_eq!(
+                d.next().unwrap().1.unwrap().metadata["reversals"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        } else if failure == "incomplete" {
+            result.unwrap();
+            assert!(d.next().is_err());
+        } else {
+            assert!(result.is_err());
+            assert!(d.next().unwrap().1.is_none());
+        }
+        d.begin(8);
+        d.metadata(metadata).unwrap();
+        assert!(d.next().unwrap().1.is_none());
     }
 }
 #[test]

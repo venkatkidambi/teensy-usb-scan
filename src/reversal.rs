@@ -1,0 +1,459 @@
+//! Bounded post-run diagnostics. No additional commands, sampling or allocation.
+use crate::{experiment_data::*, protocol::Telemetry, xeryon_motion::ScanCommand};
+
+// At most 286 extrema for the validated 71.9 s waveform / 2 Hz limits.
+pub const CAPACITY: usize = 288;
+pub const WINDOW_MS: u32 = 40;
+
+#[derive(Clone, Copy, Default)]
+pub struct TxProgress(pub [u32; 6]); // queued, completed, last two queue/done times
+
+#[derive(Clone, Copy, Default)]
+pub struct Event {
+    kind: i32, // 0 absent, 1 SSPD, 2 SCAN
+    value: i32,
+    queued: u32,
+    done: u32, // relative completion + 1; zero means unobserved
+    sequence: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn window_metrics_use_raw_feedback_receipt_time_and_bounded_storage() {
+        let mut records = [Reversal::EMPTY; 1];
+        let mut d = Diagnostics::new(&mut records);
+        let config = ExperimentConfig::Sinusoidal {
+            center_nm: 0,
+            amplitude_nm: 1_000_000,
+            frequency_mhz: 1000,
+            cycles: 2,
+        };
+        let mut t = Telemetry::new();
+        for ms in 200..=300 {
+            if ms % 20 == 0 {
+                t.record(
+                    b"EPOS",
+                    i64::from(super::super::sine_target(0, 1_000_000, 1000, ms)) + 9,
+                    ms,
+                );
+                t.record(b"STAT", 8256, ms);
+            }
+            if ms == 240 {
+                t.transport.rx_backlog_polls += 1;
+            }
+            d.observe(config, ms, ms, &t, ms == 252);
+            if ms % 10 == 0 {
+                d.tick(ms, ms, &t, if ms < 250 { 1 } else { -1 }, ms == 250);
+            }
+        }
+        assert_eq!(d.records[0].max_error_counts, 9);
+        assert_eq!(d.records[0].backlog_polls, 1);
+        assert_eq!(d.records[0].busy_polls, 1);
+        assert_eq!(d.records[0].stat_or, 8256);
+        let mut before = String::new();
+        d.records[0].write(&mut before).unwrap();
+        d.tick(750, 750, &t, 1, true);
+        d.sent(
+            &[ScanCommand::Speed(0), ScanCommand::Direction(1)],
+            TxProgress::default(),
+            0,
+            750,
+            true,
+        );
+        let mut after = String::new();
+        d.records[0].write(&mut after).unwrap();
+        assert_eq!(before, after); // truncation cannot overwrite a retained reversal
+        assert_eq!((d.len, d.total), (1, 2));
+        d.reset();
+        assert_eq!((d.len, d.total), (0, 0));
+    }
+    #[test]
+    fn ordered_command_completion_times_and_partial_reversals_survive_wrap() {
+        let mut records = [Reversal::EMPTY; 2];
+        let mut d = Diagnostics::new(&mut records);
+        let start = u32::MAX - 260;
+        let mut t = Telemetry::new();
+        t.record(b"EPOS", 42, start.wrapping_add(240));
+        t.record(b"STAT", 8256, start.wrapping_add(240));
+        for (i, ms, speed) in [(1, 220, 3), (2, 230, 2), (3, 240, 1)] {
+            let now = start.wrapping_add(ms);
+            d.tick(ms, now, &t, 1, false);
+            d.sent(
+                &[ScanCommand::Speed(speed)],
+                TxProgress([i, i - 1, 0, now, 0, 0]),
+                start,
+                ms,
+                false,
+            );
+            d.refresh(TxProgress([i, i, 0, now, 0, now.wrapping_add(1)]), start);
+        }
+        d.tick(250, start.wrapping_add(250), &t, -1, true);
+        d.sent(
+            &[ScanCommand::Speed(0), ScanCommand::Direction(-1)],
+            TxProgress([5, 3, start.wrapping_add(250), start.wrapping_add(250), 0, 0]),
+            start,
+            250,
+            true,
+        );
+        d.refresh(
+            TxProgress([5, 4, 0, 0, start.wrapping_add(241), start.wrapping_add(251)]),
+            start,
+        );
+        assert_eq!(d.records[0].events[3].done, 252);
+        assert_eq!(d.records[0].events[4].done, 0);
+        d.refresh(
+            TxProgress([5, 5, 0, 0, start.wrapping_add(251), start.wrapping_add(253)]),
+            start,
+        );
+        d.tick(260, start.wrapping_add(260), &t, -1, false);
+        d.sent(
+            &[ScanCommand::Speed(1)],
+            TxProgress([6, 5, 0, start.wrapping_add(260), 0, 0]),
+            start,
+            260,
+            false,
+        );
+        d.refresh(
+            TxProgress([6, 6, 0, 0, start.wrapping_add(253), start.wrapping_add(262)]),
+            start,
+        );
+        let mut text = String::new();
+        d.records[0].write(&mut text).unwrap();
+        assert!(text.contains(
+            "[1,3,220,221],[1,2,230,231],[1,1,240,241],[1,0,250,251],[2,-1,250,253],[1,1,260,262]"
+        ));
+        assert!(text.contains("[240,42,8256,0,0],[250,42,8256,10,10],[260,42,8256,20,20]"));
+        // Abort after zero was queued but before direction acceptance/completion.
+        d.tick(750, start.wrapping_add(750), &t, 1, true);
+        d.sent(
+            &[ScanCommand::Speed(0)],
+            TxProgress([7, 6, 0, start.wrapping_add(750), 0, 0]),
+            start,
+            750,
+            true,
+        );
+        let mut text = String::new();
+        d.records[1].write(&mut text).unwrap();
+        assert!(text.contains("[1,0,750,null],null,null"));
+        assert_eq!(d.total, 2);
+        assert!(core::mem::size_of::<Reversal>() * CAPACITY <= 61_000);
+    }
+
+    #[test]
+    fn worst_case_two_reversals_and_binary_payload_fit_console_and_desktop_frames() {
+        let r = Reversal {
+            direction: -1,
+            crossing_ms: u32::MAX,
+            events: [Event {
+                kind: 2,
+                value: i32::MIN,
+                queued: u32::MAX,
+                done: u32::MAX,
+                sequence: u32::MAX,
+            }; 6],
+            feedback: [Snapshot([u32::MAX; 5]); 3],
+            max_error_counts: u32::MAX,
+            backlog_polls: u32::MAX,
+            busy_polls: u32::MAX,
+            stat_or: u32::MAX,
+        };
+        let mut samples = [Record::EMPTY; 1];
+        let mut records = [r; 2];
+        let mut engine = super::super::Engine::new(&mut samples).with_reversals(&mut records);
+        engine.reversals.len = 2;
+        let mut frame = crate::protocol::FixedFrame::<4096>::new();
+        engine
+            .chunk_header(
+                &mut frame,
+                u32::MAX,
+                u32::MAX,
+                0,
+                CHUNK_RECORDS * RECORD_BYTES,
+            )
+            .unwrap();
+        assert!(frame.len + CHUNK_RECORDS * RECORD_BYTES <= 4096);
+    }
+}
+impl Event {
+    fn refresh(&mut self, progress: TxProgress, start: u32) {
+        let p = progress.0;
+        if self.kind != 0 && self.sequence != 0 && self.done == 0 {
+            for i in 0..2 {
+                if p[1] >= 2 - i as u32 && self.sequence == p[1] - 1 + i as u32 {
+                    self.done = p[4 + i].wrapping_sub(start) + 1;
+                }
+            }
+        }
+    }
+    fn write(&self, out: &mut impl core::fmt::Write) -> core::fmt::Result {
+        if self.kind == 0 {
+            return write!(out, "null");
+        }
+        write!(out, "[{},{},{},", self.kind, self.value, self.queued)?;
+        if self.done == 0 {
+            write!(out, "null")?;
+        } else {
+            write!(out, "{}", self.done - 1)?;
+        }
+        write!(out, "]")
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Snapshot([u32; 5]); // elapsed, raw EPOS, raw STAT, EPOS/STAT ages
+impl Snapshot {
+    fn new(elapsed: u32, now: u32, t: &Telemetry) -> Self {
+        Self([
+            elapsed,
+            t.samples[0].value as u32,
+            t.samples[2].value as u32,
+            now.wrapping_sub(t.samples[0].ms),
+            now.wrapping_sub(t.samples[2].ms),
+        ])
+    }
+    fn write(&self, out: &mut impl core::fmt::Write) -> core::fmt::Result {
+        let [a, b, c, d, e] = self.0;
+        write!(out, "[{a},{},{c},{d},{e}]", b as i32)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Reversal {
+    pub direction: i8,
+    pub crossing_ms: u32,
+    events: [Event; 6], // last 3 speed commands, explicit zero, direction, first nonzero
+    feedback: [Snapshot; 3], // preceding scheduler tick, crossing, first nonzero
+    pub max_error_counts: u32,
+    pub backlog_polls: u32,
+    pub busy_polls: u32,
+    pub stat_or: u32,
+}
+impl Reversal {
+    pub const EMPTY: Self = Self {
+        direction: 0,
+        crossing_ms: 0,
+        events: [Event {
+            kind: 0,
+            value: 0,
+            queued: 0,
+            done: 0,
+            sequence: 0,
+        }; 6],
+        feedback: [Snapshot([0; 5]); 3],
+        max_error_counts: 0,
+        backlog_polls: 0,
+        busy_polls: 0,
+        stat_or: 0,
+    };
+    pub fn write(&self, out: &mut impl core::fmt::Write) -> core::fmt::Result {
+        write!(
+            out,
+            "{{\"direction\":{},\"crossing_ms\":{},\"commands\":[",
+            self.direction, self.crossing_ms
+        )?;
+        for (i, event) in self.events.iter().enumerate() {
+            if i != 0 {
+                write!(out, ",")?;
+            }
+            event.write(out)?;
+        }
+        write!(out, "],\"feedback\":[")?;
+        for (i, snapshot) in self.feedback.iter().enumerate() {
+            if i != 0 {
+                write!(out, ",")?;
+            }
+            if i == 2 && self.events[5].kind == 0 {
+                write!(out, "null")?;
+            } else {
+                snapshot.write(out)?;
+            }
+        }
+        write!(
+            out,
+            "],\"max_error_counts\":{},\"rx_backlog_polls\":{},\"tx_busy_polls\":{},\"stat_or\":{}}}",
+            self.max_error_counts, self.backlog_polls, self.busy_polls, self.stat_or
+        )
+    }
+}
+
+pub struct Diagnostics<'a> {
+    pub records: &'a mut [Reversal],
+    pub len: usize,
+    pub total: u32,
+    history: [Event; 3],
+    previous: Snapshot,
+    window: u64,
+    error: u32,
+    backlog: u32,
+    busy: u32,
+    stat: u32,
+    last_backlog: u32,
+    recording: bool,
+    error_generation: Option<u32>,
+}
+impl<'a> Diagnostics<'a> {
+    pub fn new(records: &'a mut [Reversal]) -> Self {
+        Self {
+            records,
+            len: 0,
+            total: 0,
+            history: [Event::default(); 3],
+            previous: Snapshot::default(),
+            window: u64::MAX,
+            error: 0,
+            backlog: 0,
+            busy: 0,
+            stat: 0,
+            last_backlog: 0,
+            recording: false,
+            error_generation: None,
+        }
+    }
+    pub fn reset(&mut self) {
+        self.len = 0;
+        self.total = 0;
+        self.history = [Event::default(); 3];
+        self.previous = Snapshot::default();
+        self.window = u64::MAX;
+        self.last_backlog = 0;
+        self.recording = false;
+    }
+    pub fn refresh(&mut self, progress: TxProgress, start: u32) {
+        for event in &mut self.history {
+            event.refresh(progress, start);
+        }
+        if let Some(record) = self
+            .records
+            .get_mut(self.len.wrapping_sub(1))
+            .filter(|_| self.recording)
+        {
+            for event in &mut record.events {
+                event.refresh(progress, start);
+            }
+        }
+    }
+    pub fn observe(
+        &mut self,
+        config: ExperimentConfig,
+        elapsed: u32,
+        now: u32,
+        t: &Telemetry,
+        busy: bool,
+    ) {
+        let delta = t.transport.rx_backlog_polls.wrapping_sub(self.last_backlog);
+        self.last_backlog = t.transport.rx_backlog_polls;
+        let ExperimentConfig::Sinusoidal {
+            center_nm,
+            amplitude_nm,
+            frequency_mhz,
+            ..
+        } = config
+        else {
+            return;
+        };
+        let phase = u64::from(elapsed) * u64::from(frequency_mhz);
+        let window = phase / 500_000;
+        let peak = window * 500_000 + 250_000;
+        if phase.abs_diff(peak) > u64::from(WINDOW_MS * frequency_mhz) {
+            return;
+        }
+        if self.window != window {
+            self.window = window;
+            self.error_generation = None;
+            self.error = 0;
+            self.backlog = 0;
+            self.busy = 0;
+            self.stat = 0;
+        }
+        // Compare raw EPOS with theoretical position at its HOST receipt time.
+        // Transit/mechanical delay is not corrected or known.
+        if self.error_generation != Some(t.epos_generation)
+            && let Some(receipt) = elapsed.checked_sub(now.wrapping_sub(t.samples[0].ms))
+        {
+            self.error_generation = Some(t.epos_generation);
+            let target = super::sine_target(center_nm, amplitude_nm, frequency_mhz, receipt);
+            self.error = self
+                .error
+                .max(t.samples[0].value.abs_diff(i64::from(target)) as u32);
+        }
+        self.backlog = self.backlog.saturating_add(delta);
+        self.busy = self.busy.saturating_add(u32::from(busy));
+        self.stat |= t.samples[2].value as u32;
+        if let Some(record) = self
+            .records
+            .get_mut(window as usize)
+            .filter(|_| (window as usize) < self.len)
+        {
+            record.max_error_counts = self.error;
+            record.backlog_polls = self.backlog;
+            record.busy_polls = self.busy;
+            record.stat_or = self.stat;
+        }
+    }
+    pub fn tick(&mut self, elapsed: u32, now: u32, t: &Telemetry, direction: i8, crossing: bool) {
+        if crossing {
+            self.total += 1;
+            self.recording = false;
+            if let Some(record) = self.records.get_mut(self.len) {
+                *record = Reversal::EMPTY;
+                record.direction = direction;
+                record.crossing_ms = elapsed;
+                record.events[..3].copy_from_slice(&self.history);
+                record.feedback[0] = self.previous;
+                record.feedback[1] = Snapshot::new(elapsed, now, t);
+                record.max_error_counts = self.error;
+                record.backlog_polls = self.backlog;
+                record.busy_polls = self.busy;
+                record.stat_or = self.stat;
+                self.len += 1;
+                self.recording = true;
+            }
+        }
+        self.previous = Snapshot::new(elapsed, now, t);
+    }
+    pub fn sent(
+        &mut self,
+        commands: &[ScanCommand],
+        progress: TxProgress,
+        start: u32,
+        elapsed: u32,
+        crossing: bool,
+    ) {
+        for (i, &command) in commands.iter().enumerate() {
+            let (kind, value) = match command {
+                ScanCommand::Speed(v) => (1, v as i32),
+                ScanCommand::Direction(v) => (2, i32::from(v)),
+            };
+            let index = 2 - commands.len() + i;
+            let event = Event {
+                kind,
+                value,
+                queued: if progress.0[0] == 0 {
+                    elapsed
+                } else {
+                    progress.0[2 + index].wrapping_sub(start)
+                },
+                done: 0,
+                sequence: progress.0[0].saturating_sub(commands.len() as u32 - 1 - i as u32),
+            };
+            if let Some(record) = self
+                .records
+                .get_mut(self.len.wrapping_sub(1))
+                .filter(|_| self.recording)
+            {
+                if crossing {
+                    record.events[3 + i] = event;
+                } else if kind == 1 && value > 0 && record.events[5].kind == 0 {
+                    record.events[5] = event;
+                    record.feedback[2] = self.previous;
+                }
+            }
+            if kind == 1 {
+                self.history.rotate_left(1);
+                self.history[2] = event;
+            }
+        }
+    }
+}

@@ -18,6 +18,17 @@ pub fn sine_max_velocity(amplitude_nm: u32, frequency_mhz: u32) -> f64 {
     core::f64::consts::TAU * f64::from(frequency_mhz) * f64::from(amplitude_nm) / 1_000_000.0
 }
 
+/// Exact phase direction, with the outgoing sign at both extrema. Integer
+/// phase avoids cosine approximation/rounding deciding which tick reverses.
+pub fn sine_direction(frequency_mhz: u32, elapsed_ms: u32) -> i8 {
+    let phase = u64::from(frequency_mhz) * u64::from(elapsed_ms) % 1_000_000;
+    if (250_000..750_000).contains(&phase) {
+        -1
+    } else {
+        1
+    }
+}
+
 /// SSPD is an unsigned 24-bit integer; round magnitude to nearest, ties up.
 pub fn velocity_speed(velocity: f64) -> u32 {
     (velocity.abs() + 0.5) as u32

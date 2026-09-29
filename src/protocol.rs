@@ -303,15 +303,16 @@ impl Commands {
 
 // One complete frame at a time. WouldBlock retains the unsent suffix; we never
 // overwrite an in-flight line, so backpressure cannot splice JSON messages.
-pub struct Frame {
-    pub bytes: [u8; 2048],
+pub type Frame = FixedFrame<2048>;
+pub struct FixedFrame<const N: usize> {
+    pub bytes: [u8; N],
     pub len: usize,
     pub sent: usize,
 }
-impl Frame {
+impl<const N: usize> FixedFrame<N> {
     pub const fn new() -> Self {
         Self {
-            bytes: [0; 2048],
+            bytes: [0; N],
             len: 0,
             sent: 0,
         }
@@ -336,7 +337,7 @@ impl Frame {
         }
     }
 }
-impl Write for Frame {
+impl<const N: usize> Write for FixedFrame<N> {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         if text.len() > self.bytes.len() - self.len {
             return Err(fmt::Error);

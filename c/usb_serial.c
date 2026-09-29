@@ -14,6 +14,13 @@ static bool tx_pending;
 static uint32_t started;
 static uintptr_t generation;
 static bool timing;
+// RUNNING-only ordered command timestamps, not controller acknowledgements.
+static uint32_t tx_queued, tx_completed, queued_ms[2], completed_ms[2];
+void usb_serial_progress(uint32_t *values) {
+  values[0] = tx_queued; values[1] = tx_completed;
+  values[2] = queued_ms[0]; values[3] = queued_ms[1];
+  values[4] = completed_ms[0]; values[5] = completed_ms[1];
+}
 static uint32_t rx_peak, rx_backlog, service_gap, tx_max, last_service, tx_started;
 
 bool usb_serial_rx_pending(void) {
@@ -21,6 +28,10 @@ bool usb_serial_rx_pending(void) {
 }
 void usb_serial_timing(bool on) {
   timing = on;
+  if (on) {
+    tx_queued = tx_completed = 0;
+    queued_ms[0] = queued_ms[1] = completed_ms[0] = completed_ms[1] = 0;
+  }
   rx_peak = rx_backlog = service_gap = tx_max = 0;
   last_service = tx_started = tusb_time_millis_api();
 }
@@ -42,6 +53,11 @@ bool usb_serial_tx_idle(void) {
 void tuh_cdc_tx_complete_cb(uint8_t idx) {
   if (state != READY || idx != cdc_index) return;
   observe_tx(tusb_time_millis_api());
+  if (timing) {
+    ++tx_completed;
+    completed_ms[0] = completed_ms[1];
+    completed_ms[1] = tusb_time_millis_api();
+  }
   // TinyUSB calls this BEFORE flushing the next queued packet. Manual SSPD/DPOS
   // and STOP can queue behind an in-flight command, so retain pending until the
   // final packet completes. A failed/stalled transfer never marks TX idle.
@@ -59,6 +75,11 @@ bool usb_serial_send(const uint8_t *data, uint32_t len, bool stop) {
   if (tuh_cdc_write(cdc_index, data, len) != len) {
     tuh_cdc_write_clear(cdc_index);
     return false;
+  }
+  if (timing) {
+    ++tx_queued;
+    queued_ms[0] = queued_ms[1];
+    queued_ms[1] = tusb_time_millis_api();
   }
   tuh_cdc_write_flush(cdc_index);
   return true;

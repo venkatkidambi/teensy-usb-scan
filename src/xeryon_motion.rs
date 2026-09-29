@@ -21,8 +21,9 @@ impl ScanCommand {
     }
 }
 
-/// Per-run command cache. Every reversal includes a complete stopped update;
-/// the following scheduled update resumes using its newly calculated velocity.
+/// Per-run cache and nonblocking reversal state. A phase-direction change sends
+/// zero then the new SCAN sign in ordered transfers. That tick stays at zero;
+/// the next scheduled update uses the current waveform velocity, never paused time.
 #[derive(Default)]
 pub struct ScanState {
     speed: Option<u32>,
@@ -46,43 +47,37 @@ impl ScanState {
     pub fn update(
         &mut self,
         velocity: f64,
+        direction: i8,
         mut send: impl FnMut(&[ScanCommand]) -> Result<(), &'static str>,
     ) -> Result<(), &'static str> {
-        let mut speed = crate::experiment_data::velocity_speed(velocity);
-        let mut direction = if speed == 0 {
-            0
-        } else if velocity < 0.0 {
-            -1
-        } else {
-            1
-        };
-        if self
-            .direction
-            .is_some_and(|last| last != 0 && direction != last)
-        {
-            speed = 0;
-            direction = 0;
+        if !matches!(direction, -1 | 1) || !velocity.is_finite() {
+            return Err("Invalid scan velocity/direction");
         }
-        let mut commands = [ScanCommand::Speed(0); 2];
-        let mut len = 0;
-        // After a stopped update, select direction at zero speed, then ramp up.
-        let resume = self.direction == Some(0) && direction != 0;
-        if resume {
-            commands[len] = ScanCommand::Direction(direction);
-            len += 1;
+        let speed = crate::experiment_data::velocity_speed(velocity);
+        if speed > MAX_SPEED {
+            return Err("Invalid scan speed");
         }
-        if self.speed != Some(speed) {
-            commands[len] = ScanCommand::Speed(speed);
-            len += 1;
-        }
-        if !resume && self.direction != Some(direction) {
-            commands[len] = ScanCommand::Direction(direction);
-            len += 1;
-        }
-        if len != 0 {
-            send(&commands[..len])?;
-            self.speed = Some(speed);
+        if self.direction.is_some_and(|last| last != direction) {
+            // Explicit zero even if rounding already selected zero. No SCAN=0:
+            // XD-C manual 4.2 defines it as stop, not a reversal prerequisite.
+            send(&[ScanCommand::Speed(0), ScanCommand::Direction(direction)])?;
+            self.speed = Some(0);
             self.direction = Some(direction);
+        } else {
+            let mut commands = [ScanCommand::Speed(speed); 2];
+            let mut len = 0;
+            if self.speed != Some(speed) {
+                len += 1;
+            }
+            if self.direction != Some(direction) {
+                commands[len] = ScanCommand::Direction(direction);
+                len += 1;
+            }
+            if len != 0 {
+                send(&commands[..len])?;
+                self.speed = Some(speed);
+                self.direction = Some(direction);
+            }
         }
         Ok(())
     }
@@ -129,12 +124,108 @@ pub fn ready(t: &Telemetry) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn phase_crossings_are_symmetric_once_per_half_cycle_and_zero_before_direction() {
+        use crate::experiment_data::{sine_direction, velocity_speed};
+        // Exact extrema, between-tick extrema, and fractional-Hz phase drift.
+        for frequency in [100, 1000, 1300, 2000] {
+            for peak in [0.5, 1.0, 10.0, 6283.0] {
+                let mut state = ScanState::default();
+                let mut actual_speed = 0;
+                let mut actual_direction = 0;
+                let mut reversals = 0;
+                let mut zero_ms = None;
+                let end = 3_000_000 / frequency;
+                for ms in (0..end).step_by(10) {
+                    let direction = sine_direction(frequency, ms);
+                    let velocity = peak
+                        * (core::f64::consts::TAU * f64::from(frequency) * f64::from(ms)
+                            / 1_000_000.0)
+                            .cos();
+                    let crossing = state.direction.is_some_and(|last| last != direction);
+                    let mut commands_this_tick = Vec::new();
+                    state
+                        .update(velocity, direction, |commands| {
+                            commands_this_tick.extend_from_slice(commands);
+                            for &command in commands {
+                                match command {
+                                    ScanCommand::Speed(speed) => {
+                                        if speed == 0 {
+                                            zero_ms = Some(ms);
+                                        }
+                                        actual_speed = speed;
+                                    }
+                                    ScanCommand::Direction(sign) => {
+                                        assert_ne!(sign, 0);
+                                        assert_ne!(sign, actual_direction);
+                                        if actual_direction != 0 {
+                                            assert_eq!(actual_speed, 0);
+                                            assert_eq!(zero_ms, Some(ms));
+                                            reversals += 1;
+                                        }
+                                        actual_direction = sign;
+                                    }
+                                }
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                    if crossing {
+                        assert_eq!(
+                            commands_this_tick,
+                            [ScanCommand::Speed(0), ScanCommand::Direction(direction)]
+                        );
+                        assert_eq!(actual_speed, 0);
+                    } else {
+                        assert_eq!(actual_speed, velocity_speed(velocity));
+                    }
+                }
+                assert_eq!(reversals, 6, "frequency={frequency}, peak={peak}");
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_zero_plateau_does_not_change_direction_or_chatter() {
+        let mut state = ScanState::default();
+        let mut lines = String::new();
+        for (v, direction) in [
+            (1.0, 1),
+            (0.51, 1),
+            (0.49, 1),
+            (0.1, 1),
+            (0.0, -1),
+            (-0.1, -1),
+            (-0.49, -1),
+            (-0.51, -1),
+            (-1.0, -1),
+        ] {
+            state
+                .update(v, direction, |commands| {
+                    for command in commands {
+                        command.write(&mut lines)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert_eq!(lines, "SSPD=1\nSCAN=1\nSSPD=0\nSSPD=0\nSCAN=-1\nSSPD=1\n");
+        // One forced zero at the crossing is intentional, even after rounded zero.
+        assert!(state.update(1.0, 1, |_| Err("partial send")).is_err());
+        assert_eq!(state.direction, Some(-1));
+        state
+            .update(1.0, 1, |commands| {
+                assert_eq!(commands, [ScanCommand::Speed(0), ScanCommand::Direction(1)]);
+                Ok(())
+            })
+            .unwrap();
+    }
+    #[test]
     fn scan_commands_round_deduplicate_and_stop_before_reversing() {
         let mut state = ScanState::default();
         let mut lines = String::new();
         let mut update = |state: &mut ScanState, velocity| {
             state
-                .update(velocity, |commands| {
+                .update(velocity, if velocity < 0.0 { -1 } else { 1 }, |commands| {
                     for command in commands {
                         command.write(&mut lines)?;
                     }
@@ -152,7 +243,7 @@ mod tests {
         update(&mut state, 3.0);
         assert_eq!(
             lines,
-            "SSPD=11\nSCAN=1\nSSPD=1\nSSPD=0\nSCAN=0\nSCAN=-1\nSSPD=2\nSSPD=0\nSCAN=0\nSCAN=1\nSSPD=3\n"
+            "SSPD=11\nSCAN=1\nSSPD=1\nSSPD=0\nSCAN=-1\nSSPD=2\nSSPD=0\nSCAN=1\nSSPD=3\n"
         );
         for command in [ScanCommand::Speed(MAX_SPEED + 1), ScanCommand::Direction(2)] {
             assert!(command.write(&mut String::new()).is_err());
@@ -165,10 +256,10 @@ mod tests {
     #[test]
     fn scan_cache_commits_only_after_success_and_preserves_speed_after_stop() {
         let mut state = ScanState::default();
-        assert!(state.update(10.0, |_| Err("transmit")).is_err());
+        assert!(state.update(10.0, 1, |_| Err("transmit")).is_err());
         assert_eq!(state.direction, None);
         state
-            .update(10.0, |commands| {
+            .update(10.0, 1, |commands| {
                 assert_eq!(
                     commands,
                     [ScanCommand::Speed(10), ScanCommand::Direction(1)]

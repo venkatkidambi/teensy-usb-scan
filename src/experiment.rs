@@ -1,6 +1,9 @@
 //! Foreground-only autonomous controller. Hardware IO stays behind a Rust trait.
 use crate::{experiment_data::*, pressure::Reading, protocol::Telemetry, xeryon_motion};
 
+#[path = "reversal.rs"]
+pub mod reversal;
+
 const MODE_FEEDBACK_GRACE_MS: u32 = 100;
 const CENTER_TOLERANCE_COUNTS: u64 = 1; // 0.078 um encoder resolution
 
@@ -24,6 +27,9 @@ pub trait Actuator {
     }
     fn start_timing(&mut self) {}
     fn end_timing(&mut self) {}
+    fn tx_progress(&self) -> reversal::TxProgress {
+        reversal::TxProgress::default()
+    }
     /// One or two ordered, separately flushed SSPD/SCAN lines; no readback.
     fn scan(&mut self, commands: &[xeryon_motion::ScanCommand]) -> Result<(), &'static str>;
     /// Set and request SSPD in separate, ordered USB transfers.
@@ -74,6 +80,7 @@ pub struct Engine<'a> {
     center_epos_generation: u32,
     center_confirmations: u8,
     scan: xeryon_motion::ScanState,
+    pub reversals: reversal::Diagnostics<'a>,
     motion_changed_ms: u32,
     fault_stat: Option<u32>,
     feedback_pending: bool,
@@ -129,6 +136,7 @@ impl<'a> Engine<'a> {
             center_epos_generation: 0,
             center_confirmations: 0,
             scan: xeryon_motion::ScanState::default(),
+            reversals: reversal::Diagnostics::new(&mut []),
             motion_changed_ms: 0,
             fault_stat: None,
             feedback_pending: false,
@@ -149,6 +157,10 @@ impl<'a> Engine<'a> {
             epos_start_generation: 0,
             epos_logged_updates: 0,
         }
+    }
+    pub fn with_reversals(mut self, records: &'a mut [reversal::Reversal]) -> Self {
+        self.reversals = reversal::Diagnostics::new(records);
+        self
     }
     pub fn active(&self) -> bool {
         matches!(
@@ -243,6 +255,7 @@ impl<'a> Engine<'a> {
         self.duration_ms = duration;
         self.required_samples = required;
         self.len = 0;
+        self.reversals.reset();
         self.crc = !0;
         self.elapsed_ms = 0;
         self.started_ms = 0;
@@ -305,6 +318,7 @@ impl<'a> Engine<'a> {
         }
     }
     fn finish(&mut self, state: State, reason: &'static str, io: &mut impl Actuator) {
+        self.reversals.refresh(io.tx_progress(), self.started_ms);
         io.end_timing();
         #[cfg(not(test))]
         crate::fault::mark(5);
@@ -333,6 +347,16 @@ impl<'a> Engine<'a> {
         }
         if self.state == State::Running {
             self.elapsed_ms = now.wrapping_sub(self.started_ms);
+            self.reversals.refresh(io.tx_progress(), self.started_ms);
+            if self.center_move == CenterMove::None {
+                self.reversals.observe(
+                    self.config.unwrap(),
+                    self.elapsed_ms,
+                    now,
+                    t,
+                    !io.tx_idle(),
+                );
+            }
             self.epos_arrivals = t.epos_arrivals;
             self.transport = t.transport;
             self.malformed = t.malformed.wrapping_sub(self.malformed_start);
@@ -348,7 +372,7 @@ impl<'a> Engine<'a> {
         // closed loop once armed, before starting acquisition or the waveform.
         let sine_running = self.state == State::Running
             && matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. }));
-        // SCAN=0 / STOP may clear closed-loop status. Allow the deliberately
+        // STOP may clear closed-loop status. Allow the deliberately
         // stopped phases and a bounded 100 ms mode-change feedback grace after
         // restarting SCAN or DPOS. All other health checks stay in force.
         let stopped_transition = sine_running
@@ -637,17 +661,39 @@ impl<'a> Engine<'a> {
                     } else {
                         self.next_target = (elapsed / TRAJECTORY_MS + 1) * TRAJECTORY_MS;
                         // Phase comes from the run clock; never integrate or replay missed ticks.
+                        let direction = sine_direction(frequency_mhz, elapsed);
+                        let crossing = self.scan.direction.is_some_and(|last| last != direction);
+                        self.reversals.tick(elapsed, now, t, direction, crossing);
                         if !io.tx_idle() {
                             Err("Xeryon previous transmit incomplete")
                         } else {
-                            let direction = self.scan.direction;
                             let result = self.scan.update(
                                 sine_velocity(amplitude_nm, frequency_mhz, elapsed),
-                                |commands| io.scan(commands),
+                                direction,
+                                |commands| {
+                                    let before = io.tx_progress().0[0];
+                                    let result = io.scan(commands);
+                                    let progress = io.tx_progress();
+                                    let accepted = if result.is_ok() {
+                                        commands.len()
+                                    } else {
+                                        progress.0[0]
+                                            .wrapping_sub(before)
+                                            .min(commands.len() as u32)
+                                            as usize
+                                    };
+                                    self.reversals.sent(
+                                        &commands[..accepted],
+                                        progress,
+                                        self.started_ms,
+                                        elapsed,
+                                        crossing,
+                                    );
+                                    result
+                                },
                             );
-                            if direction != self.scan.direction {
-                                self.motion_changed_ms = now;
-                            }
+                            // Direction flips stay in scanning mode; only initial SCAN
+                            // entry and final DPOS need the mode feedback grace.
                             result.map(|_| false)
                         }
                     }
@@ -700,7 +746,13 @@ impl<'a> Engine<'a> {
         )?;
         self.config.unwrap().write_json(out)?;
         if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) {
-            write!(out, ",\"sine_control\":\"velocity_scan\"")?;
+            write!(
+                out,
+                ",\"sine_control\":\"velocity_scan\",\"reversal_count\":{},\"reversal_total\":{},\"reversal_window_ms\":{},\"reversals\":[]",
+                self.reversals.len,
+                self.reversals.total,
+                reversal::WINDOW_MS
+            )?;
         }
         if let Some(stat) = self.fault_stat {
             write!(out, ",\"fault_stat\":{stat}")?;
@@ -766,6 +818,30 @@ impl<'a> Engine<'a> {
         self.state = State::Transferring;
         self.transfer_next = 0;
         Ok(())
+    }
+    /// Two bounded diagnostics per existing 16-record chunk. Kept out of RUNNING
+    /// traffic; the desktop collects them in metadata for raw CSV export.
+    pub fn chunk_header(
+        &self,
+        out: &mut impl core::fmt::Write,
+        id: u32,
+        run: u32,
+        offset: usize,
+        bytes: usize,
+    ) -> core::fmt::Result {
+        write!(
+            out,
+            "{{\"type\":\"data_chunk\",\"id\":{id},\"run\":{run},\"offset\":{offset},\"bytes\":{bytes},\"reversal_offset\":{},\"reversals\":[",
+            (offset / CHUNK_RECORDS * 2).min(self.reversals.len)
+        )?;
+        let first = offset / CHUNK_RECORDS * 2;
+        for i in first..(first + 2).min(self.reversals.len) {
+            if i != first {
+                write!(out, ",")?;
+            }
+            self.reversals.records[i].write(out)?;
+        }
+        writeln!(out, "]}}")
     }
     pub fn chunk(&mut self, run: u32, offset: usize) -> Result<&[Record], &'static str> {
         if self.state != State::Transferring
@@ -1039,6 +1115,54 @@ mod tests {
         let mut frame = crate::protocol::Frame::new();
         e.metadata(&mut frame, u32::MAX).unwrap();
         assert!(frame.len < 2048);
+    }
+    #[test]
+    fn every_reversal_is_retained_at_maximum_frequency_and_duration() {
+        let mut records = [Record::EMPTY; CAPACITY];
+        let mut turns = [reversal::Reversal::EMPTY; reversal::CAPACITY];
+        let mut e = Engine::new(&mut records).with_reversals(&mut turns);
+        let mut io = Io::default();
+        let config = ExperimentConfig::Sinusoidal {
+            center_nm: 0,
+            amplitude_nm: 1_000_000,
+            frequency_mhz: 2000,
+            cycles: 143,
+        };
+        start(&mut e, config, u32::MAX - 500, &mut io);
+        for elapsed in 1..=71_503 {
+            let now = e.started_ms.wrapping_add(elapsed);
+            let (mut t, p) = feedback(
+                now,
+                if elapsed < 71_500 {
+                    sine_target(0, 1_000_000, 2000, elapsed) + 7
+                } else {
+                    e.target
+                },
+                true,
+            );
+            t.epos_generation = elapsed / 20;
+            e.poll(now, &t, p, &mut io);
+        }
+        // Final center tracker can confirm independently of the injected EPOS error.
+        assert_eq!(e.outcome, "completed");
+        assert_eq!(e.reversals.total, 286);
+        assert_eq!(e.reversals.len, 286);
+        assert!(e.len.div_ceil(CHUNK_RECORDS) * 2 >= e.reversals.len);
+        for (i, turn) in e.reversals.records[..e.reversals.len].iter().enumerate() {
+            let theoretical_peak_ms = 125 + i as u32 * 250;
+            assert_eq!(turn.crossing_ms, theoretical_peak_ms + 5);
+            assert_eq!(turn.direction, if i % 2 == 0 { -1 } else { 1 });
+            assert_eq!(turn.max_error_counts, 7);
+        }
+        assert_eq!(
+            io.scans
+                .iter()
+                .filter(|c| matches!(c, xeryon_motion::ScanCommand::Direction(_)))
+                .count(),
+            287
+        );
+        assert!(!io.scans.contains(&xeryon_motion::ScanCommand::Direction(0)));
+        assert_eq!(io.stops, 2);
     }
     fn start(e: &mut Engine<'_>, config: ExperimentConfig, now: u32, io: &mut Io) {
         let (t, p) = feedback(now, 0, true);
@@ -1647,11 +1771,11 @@ mod tests {
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         start(&mut e, sinusoidal(), 0, &mut io);
-        for elapsed in 1..=360 {
+        for elapsed in 1..=251 {
             let now = e.started_ms + elapsed;
             let (mut t, p) = feedback(now, e.target, true);
-            // Stopped feedback can persist during reversal and shortly after
-            // restarting; it cannot suppress closed-loop safety indefinitely.
+            // A zero-speed reversal stays in SCAN: it must not renew the
+            // initial mode-entry grace or suppress closed-loop safety.
             let stat = if elapsed >= 251 {
                 0
             } else {
@@ -1659,7 +1783,7 @@ mod tests {
             };
             t.record(b"STAT", stat, now);
             e.poll(now, &t, p, &mut io);
-            if elapsed < 360 {
+            if elapsed < 251 {
                 assert_eq!(e.state, State::Running);
             }
         }

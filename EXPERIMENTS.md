@@ -102,17 +102,20 @@ is used. Desired position remains rounded to 0.078 µm counts for logging.
 
 Every 10 ms, SSPD is `floor(abs(v) + 0.5)` in integer µm/s, with ties up.
 At t=0 the sequence is `SSPD=<rounded vmax>`, `SCAN=1`. During a direction's
-half-cycle, only changed SSPD values are transmitted. Last SSPD and SCAN values
-are cached per run; unchanged values produce no ASCII command. The first
-scheduled zero-speed or opposite-sign update sends `SSPD=0`, then `SCAN=0`.
-This includes a crossing between ticks: it never jumps directly between nonzero
-opposite directions. The next scheduled nonzero update sends `SCAN=<new sign>`
-at zero speed, then `SSPD=<newly calculated magnitude>`. Quantized zero speed can
-last multiple ticks without redundant commands. Direction changes therefore
-include at least one stopped update; no measured stop confirmation is assumed.
-Each line uses the existing Rust hardware layer and separate ordered USB
-transfers, at most two per update. Backlog at a scheduled update faults even if
-its rounded speed would be unchanged.
+half-cycle, only changed SSPD values are transmitted. The outgoing direction is
+computed from integer phase: negative in [1/4, 3/4), positive otherwise. Thus
+rounding the magnitude to zero does not decide when to reverse.
+
+At the first scheduled tick on or after either extremum, send `SSPD=0`, then
+`SCAN=<new sign>` in separate ordered USB transfers. Hold zero for that update;
+the next scheduled tick sends the newly calculated speed, if it changed. There
+is no `SCAN=0` or STOP during waveform reversals. A quantized zero before the
+crossing retains direction; one explicit zero at the crossing is intentional.
+No subsequent identical zero or SCAN command is repeated. This cached two-stage
+policy runs in the existing scheduler, with no sleep, extra tick or phase pause.
+An unfinished preceding command at a scheduler tick still faults and stops.
+See [REVERSALS.md](REVERSALS.md) for the old sequence, evidence, diagnostic format
+and hardware acceptance procedure.
 
 Before any motion, the peak must be finite, positive, no greater than the existing
 24-bit `MAX_SPEED_UM_S` (16,777,215 µm/s), and round to a positive representable
@@ -140,14 +143,15 @@ Terminal cleanup requests STOP again and retains the dataset. The last selected
 SSPD remains configured afterward; there is no SAVE or speed restoration.
 
 The Scanning STAT bit is allowed only for sinusoidal Running, including the
-bounded transition out of scanning. Intentional zero-speed/stopped phases may
-clear closed loop; a restart or final DPOS has a 100 ms closed-loop feedback grace.
+bounded transition out of scanning. Initial SCAN entry and final DPOS have a
+100 ms closed-loop feedback grace; STOP/return preparation can be inactive.
+A waveform reversal stays in scanning mode and does not renew that grace.
 After that grace, closed-loop loss faults normally, and scanning during final
 positioning is rejected. Controller errors, end stops, disconnects, feedback
 freshness, pressure faults, and all deadlines remain checked throughout.
 
 Acquisition continues at 50 Hz through final settling. USB dispatch, mechanical
-response at SSPD=0/SCAN=0, reversal timing, peak-speed capability, mode feedback,
+response at SSPD=0 and direction changes, reversal timing, peak-speed capability, mode feedback,
 tracking and drift still require physical validation under the intended load.
 
 ## Timing, sample layout and memory

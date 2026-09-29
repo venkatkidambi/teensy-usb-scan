@@ -74,6 +74,17 @@ export function experimentMessage(message) {
     if(m.timing){const t=m.timing;
       $('experiment-result-summary').textContent+=` · EPOS ${(t.epos.rate_millihz/1000).toFixed(1)} Hz (${t.epos.updates} updates), max gap ${t.epos.max_ms} ms, max receipt age ${t.max_epos_age_ms} ms, ${t.epos_repeated_records} repeated records · pressure ${(t.pressure.rate_millihz/1000).toFixed(1)} Hz · USB max service gap ${t.max_usb_service_gap_ms} ms, RX peak ${t.rx_peak_bytes} B · feedback settings ${t.feedback_verified?'verified':'unverified'}`;
     }
+    if(m.reversals?.length){
+      const summary=[[-1,'positive'],[1,'negative']].map(([direction,label])=>{
+        const turns=m.reversals.filter(r=>r.direction===direction);
+        if(!turns.length)return `${label} peak: no reversal captured`;
+        const durations=turns.filter(r=>r.commands[3]&&r.commands[5]).map(r=>r.commands[5][2]-r.commands[3][2]);
+        const duration=durations.length?`${Math.min(...durations)}–${Math.max(...durations)} ms zero→nonzero`:'resume not captured';
+        const error=Math.max(...turns.map(r=>r.max_error_counts))*.078;
+        return `${label} peak: ${turns.length} reversals, ${duration}, max receipt-time error ${error.toFixed(3)} µm`;
+      });
+      $('experiment-result-summary').textContent+=` · ${summary.join(' · ')} · reversal command/feedback details in CSV metadata`;
+    }
     draw();
   }
   experimentControls();

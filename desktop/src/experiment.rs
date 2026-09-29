@@ -231,6 +231,25 @@ impl Download {
         {
             return Err("Dataset offset, run or length mismatch; reconnect to retry".into());
         }
+        if let Some(expected) = meta.get("reversal_count").and_then(Value::as_u64) {
+            let received = meta["reversals"]
+                .as_array()
+                .ok_or("Missing reversal diagnostics")?
+                .len();
+            let diagnostics = header["reversals"]
+                .as_array()
+                .ok_or("Missing chunk diagnostics")?;
+            if uint(&header, "reversal_offset")? as usize != received
+                || diagnostics.len() > 2
+                || received + diagnostics.len() > expected as usize
+            {
+                return Err("Invalid reversal diagnostic offset or count".into());
+            }
+            self.metadata.as_mut().unwrap()["reversals"]
+                .as_array_mut()
+                .unwrap()
+                .extend(diagnostics.iter().cloned());
+        }
         self.bytes.extend_from_slice(bytes);
         Ok(())
     }
@@ -246,6 +265,11 @@ impl Download {
                 ),
                 None,
             ));
+        }
+        if let Some(expected) = meta.get("reversal_count").and_then(Value::as_u64) {
+            if meta["reversals"].as_array().map(Vec::len) != Some(expected as usize) {
+                return Err("Incomplete reversal diagnostics; data retained on Teensy".into());
+            }
         }
         if !data::crc32(!0, &self.bytes) != uint(meta, "crc")? {
             return Err("Dataset CRC mismatch; data retained on Teensy, reconnect to retry".into());

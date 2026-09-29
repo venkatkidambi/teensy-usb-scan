@@ -180,3 +180,17 @@ Post-run `timing` metadata reports arrival statistics, cache reuse, unlogged EPO
 updates, receipt ages, parse errors and USB service/backlog/TX occupancy.
 `epos_rtt`, `epos_source_drops` and `rx_overflow` are null (unavailable), not zero.
 See [EPOS_TIMING.md](../EPOS_TIMING.md) for exact counter and timestamp semantics.
+# Sinusoidal reversal diagnostics
+
+For the velocity-reversal firmware, `data_meta` additionally declares
+`reversal_count`, `reversal_total`, `reversal_window_ms` and an initially empty
+`reversals` array. Each `data_chunk` JSON header supplies `reversal_offset` and
+at most two reversal objects; its binary payload and CRC remain dataset v2.
+The native receiver appends these objects in order to retained metadata and
+requires the declared count before ACK. Restarting GET_DATA resets both payload
+and diagnostic accumulation. Nothing is streamed during RUNNING.
+
+The existing 4096-byte JSON line limit accommodates these headers. Older clients
+can still decode the sample payload but need updating to retain the new
+diagnostics. See [REVERSALS.md](../REVERSALS.md) for fields, timestamp semantics,
+partial-run behavior and the hardware comparison procedure.

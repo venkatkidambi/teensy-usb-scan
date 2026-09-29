@@ -130,6 +130,16 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
         max_lateness_ms: 0, stop_queued: true },
       samples: [[0, 1, 2, 0, 0, 0, 0, 1, 0, 0]],
     } });
+    experimentMessage({ type: 'experiment_dataset', dataset: {
+      metadata: { run: 8, config: { kind: 'sinusoidal' }, outcome: 'completed',
+        reason: 'none', count: 1, elapsed_ms: 1000, missed_samples: 0,
+        max_lateness_ms: 0, stop_queued: true, reversals: [
+          {direction:-1,max_error_counts:2,commands:[null,null,null,[1,0,250,251],[2,-1,250,253],[1,1,260,261]]},
+          {direction:1,max_error_counts:3,commands:[null,null,null,[1,0,750,751],[2,1,750,753],[1,1,760,761]]},
+        ] }, samples: [],
+    } });
+    assert.match(node('experiment-result-summary').textContent, /positive peak: 1 reversals, 10–10 ms zero→nonzero, max receipt-time error 0.156 µm/);
+    assert.match(node('experiment-result-summary').textContent, /negative peak: 1 reversals, 10–10 ms zero→nonzero, max receipt-time error 0.234 µm/);
     assert.equal(node('experiment-save').disabled, false);
     const saving = node('experiment-save').onclick();
     assert.equal(node('experiment-save').disabled, true);
