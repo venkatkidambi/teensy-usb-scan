@@ -19,11 +19,13 @@ slower travel. Holds still begin after confirmed arrival. Speed is saved in CSV
 metadata and remains the controller's current speed afterward. Rebuild the app
 and flash matching firmware; older firmware cannot run this mode from the new UI.
 
-Sinusoidal motion sends **100 Hz DPOS position commands** and records at 20 Hz.
-It requires firmware advertising `sine_position: true`. Targets use elapsed Teensy
-time and 0.078 µm position resolution. The run starts and finishes at center;
-controller speed and travel limits remain as configured. Hardware tracking still
-needs verification under the intended load.
+Sinusoidal motion uses **100 Hz SSPD/SCAN velocity and direction control** and
+records at 20 Hz. Firmware advertises `sine_velocity: true` and retains the legacy
+`sine_position` UI gate. Actual elapsed Teensy time determines waveform phase;
+theoretical position is logged at 0.078 µm resolution. Initial and final center
+positioning use tracked DPOS moves. Speed is changed by the waveform and remains
+at its final setting afterward; travel limits remain configured as before.
+Hardware tracking and drift still need verification under the intended load.
 
 Tauri 2 + plain HTML/CSS/JavaScript, with serial IO in Rust. The release app
 embeds its UI and needs no Python, Node, browser tab, or HTTP server.

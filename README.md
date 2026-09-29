@@ -7,11 +7,13 @@ builds optional CSV exports. See [EXPERIMENTS.md](EXPERIMENTS.md) for the state
 machine, limits, waveform strategy, safety policy, protocol, and hardware acceptance
 procedure. PC disconnect does not stop an autonomous run if the Teensy stays powered.
 
-Sinusoidal mode sends **100 Hz DPOS position commands**, advertised by the
-`sine_position` firmware capability. Each 10 ms target follows the configured
-sine wave using elapsed Teensy time, rounded to the nearest 0.078 µm encoder count.
-Recording remains 20 Hz. The run starts and finishes at center; controller speed,
-telemetry and travel-limit settings are left as configured.
+Sinusoidal mode uses **100 Hz SSPD/SCAN velocity and direction control**, advertised
+by `sine_velocity` while retaining the legacy `sine_position` UI capability.
+Velocity is the derivative of the configured sine position, calculated from actual
+elapsed Teensy time. Recording remains 20 Hz and stores theoretical position.
+The run starts at center, stops scanning after the requested cycles, and confirms
+a tracked DPOS return to center. Reversals include a zero-speed stopped update;
+there is no waveform DPOS streaming or drift correction.
 
 If **Start** makes USB disappear, flash the current firmware and watch the orange
 pin-13 LED. Fatal diagnostics repeat **one long pulse**, a group of short pulses

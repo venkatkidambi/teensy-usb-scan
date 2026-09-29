@@ -1,7 +1,92 @@
-//! Finite Xeryon positioning, in the existing 78 nm encoder calibration.
+//! Rust Xeryon command generation and finite positioning (78 nm encoder counts).
 use crate::protocol::Telemetry;
 
 pub use crate::experiment_data::MAX_SPEED_UM_S as MAX_SPEED;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanCommand {
+    Speed(u32),
+    Direction(i8),
+}
+impl ScanCommand {
+    pub fn write(self, out: &mut impl core::fmt::Write) -> Result<(), &'static str> {
+        match self {
+            Self::Speed(speed) if speed <= MAX_SPEED => writeln!(out, "SSPD={speed}"),
+            Self::Direction(direction) if (-1..=1).contains(&direction) => {
+                writeln!(out, "SCAN={direction}")
+            }
+            _ => return Err("Invalid Xeryon scan command"),
+        }
+        .map_err(|_| "Xeryon command too long")
+    }
+}
+
+/// Per-run command cache. Every reversal includes a complete stopped update;
+/// the following scheduled update resumes using its newly calculated velocity.
+#[derive(Default)]
+pub struct ScanState {
+    speed: Option<u32>,
+    pub direction: Option<i8>,
+}
+impl ScanState {
+    pub fn stopped(&mut self) {
+        self.direction = Some(0);
+    }
+    pub fn set_speed(
+        &mut self,
+        speed: u32,
+        mut send: impl FnMut(&[ScanCommand]) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        if self.speed != Some(speed) {
+            send(&[ScanCommand::Speed(speed)])?;
+            self.speed = Some(speed);
+        }
+        Ok(())
+    }
+    pub fn update(
+        &mut self,
+        velocity: f64,
+        mut send: impl FnMut(&[ScanCommand]) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let mut speed = crate::experiment_data::velocity_speed(velocity);
+        let mut direction = if speed == 0 {
+            0
+        } else if velocity < 0.0 {
+            -1
+        } else {
+            1
+        };
+        if self
+            .direction
+            .is_some_and(|last| last != 0 && direction != last)
+        {
+            speed = 0;
+            direction = 0;
+        }
+        let mut commands = [ScanCommand::Speed(0); 2];
+        let mut len = 0;
+        // After a stopped update, select direction at zero speed, then ramp up.
+        let resume = self.direction == Some(0) && direction != 0;
+        if resume {
+            commands[len] = ScanCommand::Direction(direction);
+            len += 1;
+        }
+        if self.speed != Some(speed) {
+            commands[len] = ScanCommand::Speed(speed);
+            len += 1;
+        }
+        if !resume && self.direction != Some(direction) {
+            commands[len] = ScanCommand::Direction(direction);
+            len += 1;
+        }
+        if len != 0 {
+            send(&commands[..len])?;
+            self.speed = Some(speed);
+            self.direction = Some(direction);
+        }
+        Ok(())
+    }
+}
 
 pub fn write_speed(out: &mut impl core::fmt::Write, speed: u32) -> Result<(), &'static str> {
     if !(1..=MAX_SPEED).contains(&speed) {
@@ -43,6 +128,63 @@ pub fn ready(t: &Telemetry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scan_commands_round_deduplicate_and_stop_before_reversing() {
+        let mut state = ScanState::default();
+        let mut lines = String::new();
+        let mut update = |state: &mut ScanState, velocity| {
+            state
+                .update(velocity, |commands| {
+                    for command in commands {
+                        command.write(&mut lines)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        };
+        update(&mut state, 10.5);
+        update(&mut state, 10.51); // same rounded SSPD and direction
+        update(&mut state, 1.0);
+        update(&mut state, -1.0); // zero crossing between scheduled updates
+        update(&mut state, -2.0); // select direction at zero, then increase speed
+        update(&mut state, 0.1); // quantized zero
+        update(&mut state, 0.0); // no redundant zero commands
+        update(&mut state, 3.0);
+        assert_eq!(
+            lines,
+            "SSPD=11\nSCAN=1\nSSPD=1\nSSPD=0\nSCAN=0\nSCAN=-1\nSSPD=2\nSSPD=0\nSCAN=0\nSCAN=1\nSSPD=3\n"
+        );
+        for command in [ScanCommand::Speed(MAX_SPEED + 1), ScanCommand::Direction(2)] {
+            assert!(command.write(&mut String::new()).is_err());
+        }
+        let mut frame = String::new();
+        ScanCommand::Speed(MAX_SPEED).write(&mut frame).unwrap();
+        assert_eq!(frame, "SSPD=16777215\n");
+        assert!(frame.len() <= 17);
+    }
+    #[test]
+    fn scan_cache_commits_only_after_success_and_preserves_speed_after_stop() {
+        let mut state = ScanState::default();
+        assert!(state.update(10.0, |_| Err("transmit")).is_err());
+        assert_eq!(state.direction, None);
+        state
+            .update(10.0, |commands| {
+                assert_eq!(
+                    commands,
+                    [ScanCommand::Speed(10), ScanCommand::Direction(1)]
+                );
+                Ok(())
+            })
+            .unwrap();
+        state.stopped();
+        state.set_speed(10, |_| panic!("redundant speed")).unwrap();
+        state
+            .set_speed(11, |commands| {
+                assert_eq!(commands, [ScanCommand::Speed(11)]);
+                Ok(())
+            })
+            .unwrap();
+    }
     fn telemetry(now: u32) -> Telemetry {
         let mut t = Telemetry::new();
         t.mounted = true;

@@ -207,6 +207,24 @@ pub fn autonomous(on: bool) {
 
 pub struct ExperimentActuator;
 impl crate::experiment::Actuator for ExperimentActuator {
+    fn scan(&mut self, commands: &[crate::xeryon_motion::ScanCommand]) -> Result<(), &'static str> {
+        if !self.tx_idle() {
+            return Err("Xeryon previous transmit incomplete");
+        }
+        // At most two lines per update: the existing transport sends the first
+        // immediately and flushes the second after its completion. No readbacks
+        // or trajectory logic in C. Any partial failure goes through STOP.
+        for &command in commands {
+            let mut frame = crate::protocol::Frame::new();
+            command.write(&mut frame)?;
+            let bytes = frame.pending();
+            // SAFETY: foreground-only bounded copy of one complete ASCII line.
+            if !unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, false) } {
+                return Err("Xeryon scan transmit unavailable");
+            }
+        }
+        Ok(())
+    }
     fn speed(&mut self, speed_um_s: u32) -> Result<(), &'static str> {
         if !self.tx_idle() {
             return Err("Xeryon previous transmit incomplete");
@@ -240,7 +258,7 @@ impl crate::experiment::Actuator for ExperimentActuator {
         if !unsafe { usb_serial_tx_idle() } {
             return Err("Xeryon previous transmit incomplete");
         }
-        // Bounded integer encoding avoids core::fmt in the waveform path.
+        // Bounded integer encoding for the existing finite-position path.
         let mut bytes = [0u8; 20];
         bytes[..5].copy_from_slice(b"DPOS=");
         let mut end = 5;

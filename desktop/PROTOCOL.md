@@ -142,16 +142,23 @@ Update firmware and desktop together for this sensor-specific pressure schema.
 
 Firmware with `plunger_limits: true` in HELLO enforces potentiometer bounds and reports `plunger.limits: {"min":30,"max":75}` in snapshots. Bounds reset to 30–75% at boot, survive serial reconnects, and reject outward moves while allowing inward recovery. Up increases the reading. Missing/stale potentiometer feedback prevents motion. Drive is disabled at a bound; sampling latency and mechanical coast can cause overshoot.
 
-## 100 Hz sinusoidal positioning
+## 100 Hz sinusoidal velocity control
 
-HELLO includes `sine_position: true`. START S keeps the same parameters and
-sends a sine-derived `DPOS` target every 10 ms, using elapsed Teensy time.
-The wave frequency remains 0.1–2 Hz; 100 Hz is the command update rate.
-Initial and final center positioning use confirmed finite moves. Controller
-settings are left unchanged. ABORT and faults request STOP and retain samples.
+HELLO adds `sine_velocity: true` and retains `sine_position: true` as the legacy UI
+gate for desired sinusoidal position. START S keeps the same parameters; velocity
+is `2π f A cos(2π f t)` using actual elapsed Teensy time. Changed integer SSPD
+magnitudes and SCAN directions are sent at 10 ms updates. Reversals include a
+zero-speed stopped update. No waveform DPOS or feedback drift correction is used.
+Initial and final center positioning use confirmed finite DPOS moves. The waveform
+ends with STOP before the final center move. ABORT/fault paths request STOP and
+retain samples. SSPD is changed during the waveform and remains at the last setting.
 
-The 40-byte record layout is unchanged. `target` is the last commanded position
-at the logging instant. Metadata reports `trajectory_ms: 10` and `sample_ms: 50`.
+The 40-byte record layout is unchanged. During the sine waveform, `target` is the
+theoretical position at actual logging time; after the waveform it is center.
+Quasi-static retains its last commanded DPOS target. Metadata adds
+`sine_control: "velocity_scan"` for sinusoidal runs and retains `trajectory_ms: 10`
+and `sample_ms: 50`. Signed theoretical velocity can be calculated from saved
+configuration and elapsed time during the waveform; no age field is replaced.
 Controller faults include a specific `reason` and, when observed by the engine,
 `fault_stat`: the triggering STAT word retained before STOP. The results display
 this word because the live Dashboard may show a later, cleared status.

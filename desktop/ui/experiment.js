@@ -33,7 +33,7 @@ export function experimentControls() {
   $('experiment-start-button').title=blocked;
   $('experiment-start-reason').textContent=blocked;
   $('experiment-start-reason').hidden=!blocked;
-  $('experiment-motion-detail').textContent=mode==='sinusoidal'?'100 Hz sine position commands. Starts and finishes at the center position.':'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.';
+  $('experiment-motion-detail').textContent=mode==='sinusoidal'?`100 Hz sine ${hello?.sine_velocity?'velocity/direction control':'position commands'}. Starts and finishes at the center position.`:'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.';
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
   $('experiment-save').disabled=saving||owned||!dataset;

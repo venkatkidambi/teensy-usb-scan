@@ -25,6 +25,9 @@ use serde_json::{Value, json};
 
 struct Io;
 impl engine::Actuator for Io {
+    fn scan(&mut self, _: &[xeryon_motion::ScanCommand]) -> Result<(), &'static str> {
+        Ok(())
+    }
     fn speed(&mut self, _: u32) -> Result<(), &'static str> {
         Ok(())
     }
@@ -131,8 +134,12 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     let dataset = dataset.unwrap();
     assert_eq!(dataset.samples.len(), 11);
     assert_eq!(dataset.samples[0][1], -123);
+    assert_eq!(dataset.samples[5][7], 10); // theoretical +amplitude at t=250 ms
+    assert_eq!(dataset.samples[10][7], 0); // center at half-cycle, still scanning
     assert!(dataset.csv().contains("-9.594,1193046"));
     assert_eq!(dataset.metadata["outcome"], "aborted");
+    assert_eq!(dataset.metadata["sine_control"], "velocity_scan");
+    assert_eq!(dataset.metadata["record_bytes"], 40);
     assert!(!e.owns_hardware());
 }
 #[test]

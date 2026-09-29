@@ -4,13 +4,23 @@ pub const RECORD_FIELDS: usize = 10;
 pub const RECORD_BYTES: usize = RECORD_FIELDS * 4;
 pub const CHUNK_RECORDS: usize = 16;
 pub const SAMPLE_MS: u32 = 50;
-pub const TRAJECTORY_MS: u32 = 10; // 100 Hz sine position commands
+pub const TRAJECTORY_MS: u32 = 10; // 100 Hz sine velocity updates
 pub const MOVE_TIMEOUT_MS: u32 = 10_000;
 pub const MAX_SPEED_UM_S: u32 = 0x00ff_ffff;
 pub const MAX_DURATION_MS: u32 = (CAPACITY as u32 - 1) * SAMPLE_MS;
 pub const MIN_POSITION: i32 = -(1 << 25);
 pub const MAX_POSITION: i32 = (1 << 25) - 1;
 pub const MAX_TRAVEL_NM: u32 = MAX_POSITION as u32 * 78;
+
+/// nm and millihertz -> micrometers/second. Also used by desktop validation.
+pub fn sine_max_velocity(amplitude_nm: u32, frequency_mhz: u32) -> f64 {
+    core::f64::consts::TAU * f64::from(frequency_mhz) * f64::from(amplitude_nm) / 1_000_000.0
+}
+
+/// SSPD is an unsigned 24-bit integer; round magnitude to nearest, ties up.
+pub fn velocity_speed(velocity: f64) -> u32 {
+    (velocity.abs() + 0.5) as u32
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExperimentConfig {
@@ -153,6 +163,14 @@ impl ExperimentConfig {
                         .checked_add(i64::from(amplitude_nm))
                         .ok_or("Trajectory overflow")?,
                 )?;
+                let vmax = sine_max_velocity(amplitude_nm, frequency_mhz);
+                if !vmax.is_finite()
+                    || vmax <= 0.0
+                    || vmax > f64::from(MAX_SPEED_UM_S)
+                    || !(1..=MAX_SPEED_UM_S).contains(&velocity_speed(vmax))
+                {
+                    return Err("Sinusoidal peak speed is outside representable SSPD range");
+                }
                 (u64::from(cycles) * 1_000_000).div_ceil(u64::from(frequency_mhz))
                     + u64::from(MOVE_TIMEOUT_MS)
             }

@@ -1,6 +1,8 @@
 //! Foreground-only autonomous controller. Hardware IO stays behind a Rust trait.
 use crate::{experiment_data::*, pressure::Reading, protocol::Telemetry, xeryon_motion};
 
+const MODE_FEEDBACK_GRACE_MS: u32 = 100;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Dashboard,
@@ -15,6 +17,8 @@ pub enum State {
     Transferring,
 }
 pub trait Actuator {
+    /// One or two ordered, separately flushed SSPD/SCAN lines; no readback.
+    fn scan(&mut self, commands: &[xeryon_motion::ScanCommand]) -> Result<(), &'static str>;
     /// Set and request SSPD in separate, ordered USB transfers.
     fn speed(&mut self, speed_um_s: u32) -> Result<(), &'static str>;
     fn query_motor_timeout(&mut self) -> Result<(), &'static str>;
@@ -22,6 +26,13 @@ pub trait Actuator {
     fn target(&mut self, counts: i32, now: u32, track_completion: bool)
     -> Result<(), &'static str>;
     fn stop(&mut self) -> Result<(), &'static str>;
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CenterMove {
+    None,
+    Stopping,
+    SettingSpeed,
+    Positioning,
 }
 pub struct Engine<'a> {
     pub state: State,
@@ -52,7 +63,9 @@ pub struct Engine<'a> {
     target: i32,
     epoch: u32,
     transfer_next: usize,
-    settling: bool,
+    center_move: CenterMove,
+    scan: xeryon_motion::ScanState,
+    motion_changed_ms: u32,
     fault_stat: Option<u32>,
 }
 impl<'a> Engine<'a> {
@@ -86,7 +99,9 @@ impl<'a> Engine<'a> {
             target: 0,
             epoch: 0,
             transfer_next: 0,
-            settling: false,
+            center_move: CenterMove::None,
+            scan: xeryon_motion::ScanState::default(),
+            motion_changed_ms: 0,
             fault_stat: None,
         }
     }
@@ -110,6 +125,7 @@ impl<'a> Engine<'a> {
         p: Reading,
         now: u32,
         require_closed_loop: bool,
+        allow_scan: bool,
     ) -> Result<(), &'static str> {
         if !xeryon_motion::ready(t) {
             return Err("USB2 disconnected");
@@ -120,7 +136,9 @@ impl<'a> Engine<'a> {
         if let Some(reason) = xeryon_motion::controller_fault(t.samples[2].value) {
             return Err(reason);
         }
-        if t.samples[2].value & ((1 << 1) | (1 << 14) | (1 << 15) | (1 << 9) | (1 << 13)) != 0 {
+        let incompatible =
+            (1 << 1) | (1 << 14) | (1 << 15) | (1 << 9) | if allow_scan { 0 } else { 1 << 13 };
+        if t.samples[2].value & incompatible != 0 {
             return Err("Xeryon limit or incompatible motion");
         }
         // STAT bit 8 means the index reference is known, not encoder health.
@@ -157,7 +175,7 @@ impl<'a> Engine<'a> {
             }
             // DPOS enters closed-loop positioning; a stopped controller need
             // not already be in that mode before the initial target is sent.
-            Self::healthy(t, p, now, false)?;
+            Self::healthy(t, p, now, false, false)?;
             if plunger_running
                 || t.xeryon_motion.is_some_and(|m| m.state == 1)
                 || (t.samples[2].value & (1 << 5) != 0 && t.samples[2].value & (1 << 10) == 0)
@@ -196,7 +214,8 @@ impl<'a> Engine<'a> {
         self.target = target;
         self.epoch = t.epoch;
         self.step = 0;
-        self.settling = false;
+        self.center_move = CenterMove::None;
+        self.scan = xeryon_motion::ScanState::default();
         self.fault_stat = None;
         self.hold_started = None;
         self.state = State::MoveToStart;
@@ -244,16 +263,35 @@ impl<'a> Engine<'a> {
         // Initial positioning can still see pre-DPOS status. Its existing
         // deadline and echo/reached checks bound this transition; require
         // closed loop once armed, before starting acquisition or the waveform.
-        let fault = Self::healthy(t, p, now, self.state != State::MoveToStart)
-            .err()
-            .or_else(|| (t.epoch != self.epoch).then_some("Xeryon connection changed"))
-            .or_else(|| {
-                t.xeryon_motion
-                    // During setup this tracker still describes the previous
-                    // manual move. The first DPOS starts a new tracked move.
-                    .filter(|m| m.state == 4 && !self.speed_pending && !self.timeout_pending)
-                    .map(|m| m.interruption_reason.unwrap_or("Xeryon motion failed"))
-            });
+        let sine_running = self.state == State::Running
+            && matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. }));
+        // SCAN=0 / STOP may clear closed-loop status. Allow the deliberately
+        // stopped phases and a bounded 100 ms mode-change feedback grace after
+        // restarting SCAN or DPOS. All other health checks stay in force.
+        let stopped_transition = sine_running
+            && (matches!(
+                self.center_move,
+                CenterMove::Stopping | CenterMove::SettingSpeed
+            ) || (self.center_move == CenterMove::None && self.scan.direction == Some(0))
+                || now.wrapping_sub(self.motion_changed_ms) < MODE_FEEDBACK_GRACE_MS);
+        let fault = Self::healthy(
+            t,
+            p,
+            now,
+            self.state != State::MoveToStart && !stopped_transition,
+            sine_running
+                && (self.center_move != CenterMove::Positioning
+                    || now.wrapping_sub(self.motion_changed_ms) < MODE_FEEDBACK_GRACE_MS),
+        )
+        .err()
+        .or_else(|| (t.epoch != self.epoch).then_some("Xeryon connection changed"))
+        .or_else(|| {
+            t.xeryon_motion
+                // During setup this tracker still describes the previous
+                // manual move. The first DPOS starts a new tracked move.
+                .filter(|m| m.state == 4 && !self.speed_pending && !self.timeout_pending)
+                .map(|m| m.interruption_reason.unwrap_or("Xeryon motion failed"))
+        });
         if let Some(e) = fault {
             // Preserve the triggering word before STOP and later publications
             // replace the live Dashboard status, even between logging ticks.
@@ -332,6 +370,8 @@ impl<'a> Engine<'a> {
             self.started_ms = now;
             self.next_sample = 0;
             self.next_target = 0;
+            self.scan = xeryon_motion::ScanState::default();
+            self.motion_changed_ms = now;
             self.state = State::Running;
             #[cfg(not(test))]
             crate::fault::mark(4);
@@ -342,6 +382,23 @@ impl<'a> Engine<'a> {
         if elapsed > self.duration_ms {
             self.finish(State::Fault, "Acquisition deadline missed", io);
             return;
+        }
+        // Log the theoretical position at the actual sample time, including
+        // between control ticks. It is never sent as DPOS during the waveform.
+        if let ExperimentConfig::Sinusoidal {
+            center_nm,
+            amplitude_nm,
+            frequency_mhz,
+            ..
+        } = self.config.unwrap()
+            && (elapsed >= self.next_sample
+                || (self.center_move == CenterMove::None && elapsed >= self.next_target))
+        {
+            self.target = if elapsed >= self.duration_ms - MOVE_TIMEOUT_MS {
+                counts(center_nm).unwrap()
+            } else {
+                sine_target(center_nm, amplitude_nm, frequency_mhz, elapsed)
+            };
         }
         if elapsed >= self.next_sample {
             let late = elapsed - self.next_sample;
@@ -419,21 +476,44 @@ impl<'a> Engine<'a> {
                 ..
             } => {
                 let waveform_ms = self.duration_ms - MOVE_TIMEOUT_MS;
-                if self.settling {
+                if self.center_move != CenterMove::None {
                     if now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS {
                         Err("Final center move deadline")
+                    } else if self.center_move == CenterMove::Stopping && io.tx_idle() {
+                        // Never return at the last (possibly zero) waveform speed.
+                        // STOP has drained before changing SSPD; DPOS waits too.
+                        self.scan
+                            .set_speed(
+                                velocity_speed(sine_max_velocity(amplitude_nm, frequency_mhz)),
+                                |commands| io.scan(commands),
+                            )
+                            .map(|_| {
+                                self.center_move = CenterMove::SettingSpeed;
+                                false
+                            })
+                    } else if self.center_move == CenterMove::SettingSpeed && io.tx_idle() {
+                        io.target(self.target, now, true).map(|_| {
+                            self.center_move = CenterMove::Positioning;
+                            self.motion_changed_ms = now;
+                            false
+                        })
                     } else {
-                        Ok(t.xeryon_motion
-                            .is_some_and(|m| m.state == 2 && m.target == Some(self.target)))
+                        Ok(self.center_move == CenterMove::Positioning
+                            && t.samples[2].value & ((1 << 6) | (1 << 13)) == (1 << 6)
+                            && t.xeryon_motion
+                                .is_some_and(|m| m.state == 2 && m.target == Some(self.target)))
                     }
                 } else if elapsed >= waveform_ms {
                     if elapsed - waveform_ms >= TRAJECTORY_MS {
                         Err("Trajectory deadline missed")
                     } else {
                         self.target = counts(center_nm).unwrap();
-                        self.settling = true;
+                        self.center_move = CenterMove::Stopping;
                         self.move_started = now;
-                        io.target(self.target, now, true).map(|_| false)
+                        io.stop().map(|_| {
+                            self.scan.stopped();
+                            false
+                        })
                     }
                 } else if elapsed >= self.next_target {
                     if elapsed - self.next_target >= TRAJECTORY_MS {
@@ -441,8 +521,19 @@ impl<'a> Engine<'a> {
                     } else {
                         self.next_target = (elapsed / TRAJECTORY_MS + 1) * TRAJECTORY_MS;
                         // Phase comes from the run clock; never integrate or replay missed ticks.
-                        self.target = sine_target(center_nm, amplitude_nm, frequency_mhz, elapsed);
-                        io.target(self.target, now, false).map(|_| false)
+                        if !io.tx_idle() {
+                            Err("Xeryon previous transmit incomplete")
+                        } else {
+                            let direction = self.scan.direction;
+                            let result = self.scan.update(
+                                sine_velocity(amplitude_nm, frequency_mhz, elapsed),
+                                |commands| io.scan(commands),
+                            );
+                            if direction != self.scan.direction {
+                                self.motion_changed_ms = now;
+                            }
+                            result.map(|_| false)
+                        }
                     }
                 } else {
                     Ok(false)
@@ -462,6 +553,9 @@ impl<'a> Engine<'a> {
             self.run
         )?;
         self.config.unwrap().write_json(out)?;
+        if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) {
+            write!(out, ",\"sine_control\":\"velocity_scan\"")?;
+        }
         if let Some(stat) = self.fault_stat {
             write!(out, ",\"fault_stat\":{stat}")?;
         }
@@ -526,6 +620,13 @@ fn sine_target(center_nm: i64, amplitude_nm: u32, frequency_mhz: u32, elapsed: u
     (position + if position < 0.0 { -0.5 } else { 0.5 }) as i32
 }
 
+/// v(t) = 2*pi*f*A*cos(2*pi*f*t), in um/s, from actual elapsed milliseconds.
+fn sine_velocity(amplitude_nm: u32, frequency_mhz: u32, elapsed: u32) -> f64 {
+    let phase = (u64::from(elapsed) * u64::from(frequency_mhz) + 250_000) % 1_000_000;
+    sine_max_velocity(amplitude_nm, frequency_mhz)
+        * sine(phase as f64 / 1_000_000.0).clamp(-1.0, 1.0)
+}
+
 /// Range-reduced Taylor polynomial, |error| < 5e-14 over a cycle; no libm/heap.
 pub(crate) fn sine(turns: f64) -> f64 {
     let mut x = turns * core::f64::consts::TAU;
@@ -559,8 +660,22 @@ mod tests {
         fail: bool,
         busy: bool,
         speeds: Vec<u32>,
+        scans: Vec<xeryon_motion::ScanCommand>,
+        events: Vec<String>,
     }
     impl Actuator for Io {
+        fn scan(&mut self, commands: &[xeryon_motion::ScanCommand]) -> Result<(), &'static str> {
+            if self.fail || self.busy {
+                return Err("scan transmit failure");
+            }
+            self.scans.extend_from_slice(commands);
+            for command in commands {
+                let mut line = String::new();
+                command.write(&mut line).unwrap();
+                self.events.push(line);
+            }
+            Ok(())
+        }
         fn query_motor_timeout(&mut self) -> Result<(), &'static str> {
             if self.fail {
                 Err("timeout query transmit failure")
@@ -583,10 +698,12 @@ mod tests {
                 return Err("transmit failure");
             }
             self.targets.push((target, now, track));
+            self.events.push(format!("DPOS={target}\n"));
             Ok(())
         }
         fn stop(&mut self) -> Result<(), &'static str> {
             self.stops += 1;
+            self.events.push("STOP\n".into());
             if self.fail {
                 Err("stop failure")
             } else {
@@ -747,8 +864,8 @@ mod tests {
         e.poll(2, &t, p, &mut io);
         e.poll(3, &t, p, &mut io);
         assert_eq!(e.state, State::Running);
-        t.record(b"STAT", 1, 4);
-        e.poll(4, &t, p, &mut io);
+        t.record(b"STAT", 1, 103);
+        e.poll(103, &t, p, &mut io);
         assert_eq!(e.reason, "Xeryon closed loop inactive");
     }
     #[test]
@@ -951,6 +1068,7 @@ mod tests {
         assert_eq!(e.elapsed_ms, 400);
         assert_eq!(e.len, 9);
         assert!(e.samples[..e.len].iter().any(|r| r.stat & (1 << 10) == 0));
+        assert!(io.scans.is_empty());
     }
     #[test]
     fn sine_uses_absolute_time_wraps_clock_and_finishes_without_pc() {
@@ -959,29 +1077,259 @@ mod tests {
         let mut io = Io::default();
         let begin = u32::MAX - 500;
         start(&mut e, sinusoidal(), begin, &mut io);
-        for elapsed in 1..=1001 {
+        for elapsed in 1..=1003 {
             let now = e.started_ms.wrapping_add(elapsed);
             let (t, p) = feedback(now, e.target, true);
             e.poll(now, &t, p, &mut io);
         }
         assert_eq!(e.outcome, "completed");
         assert_eq!(e.len, 21);
-        assert_eq!(io.targets.len(), 102); // initial, 100 waveform targets, final center
-        for (tick, &(target, now, track)) in io.targets[1..101].iter().enumerate() {
-            let elapsed = tick as u32 * 10;
-            assert_eq!(now.wrapping_sub(e.started_ms), elapsed);
+        assert_eq!(io.targets.len(), 2); // initial and final center only
+        for record in &e.samples[..e.len] {
+            let elapsed = record.elapsed_ms;
             let expected = (100.0 * (f64::from(elapsed) * core::f64::consts::TAU / 1000.0).sin())
                 .round() as i32;
-            assert_eq!(target, expected);
-            assert!(!track);
+            assert_eq!(record.target, expected);
         }
         assert_eq!(io.targets.last().unwrap().0, 0);
         assert!(io.targets.last().unwrap().2);
         assert_eq!(e.samples[20].elapsed_ms, 1000);
-        assert_eq!(io.stops, 1);
+        assert_eq!(io.stops, 2); // waveform boundary, then terminal cleanup
+        assert_eq!(io.events[..3], ["DPOS=0\n", "SSPD=49\n", "SCAN=1\n"]);
         for i in 0..10000 {
             let phase = i as f64 / 10000.0;
             assert!((sine(phase) - (phase * core::f64::consts::TAU).sin()).abs() < 7e-10);
+        }
+    }
+    #[test]
+    fn velocity_equation_cardinal_phases_and_peak_speed_validation() {
+        let vmax = sine_max_velocity(1_000_000, 1000);
+        assert!((vmax - core::f64::consts::TAU * 1000.0).abs() < 1e-9);
+        for (ms, fraction) in [(0, 1.0), (250, 0.0), (500, -1.0), (750, 0.0), (1000, 1.0)] {
+            assert!((sine_velocity(1_000_000, 1000, ms) - vmax * fraction).abs() < 1e-8);
+        }
+        let boundary =
+            (f64::from(MAX_SPEED_UM_S) * 1_000_000.0 / (core::f64::consts::TAU * 2000.0)) as u32;
+        let config = |amplitude_nm| ExperimentConfig::Sinusoidal {
+            center_nm: 0,
+            amplitude_nm,
+            frequency_mhz: 2000,
+            cycles: 1,
+        };
+        assert!(config(boundary).validate().is_ok());
+        // Endpoints still fit: this fails specifically because of peak speed.
+        assert!(counts(i64::from(boundary + 1)).is_ok());
+        assert_eq!(
+            config(boundary + 1).validate(),
+            Err("Sinusoidal peak speed is outside representable SSPD range")
+        );
+        let mut records = [Record::EMPTY; CAPACITY];
+        let mut e = Engine::new(&mut records);
+        let (t, p) = feedback(0, 0, true);
+        assert!(e.accept(config(boundary + 1), &t, p, false, 0).is_err());
+        assert_eq!(e.state, State::Dashboard);
+        assert!(
+            ExperimentConfig::Sinusoidal {
+                center_nm: 0,
+                amplitude_nm: 78,
+                frequency_mhz: 100,
+                cycles: 1,
+            }
+            .validate()
+            .is_err()
+        ); // nonzero peak must round to at least 1 um/s
+    }
+    #[test]
+    fn jitter_uses_actual_velocity_and_logs_current_theoretical_position() {
+        use xeryon_motion::ScanCommand::*;
+        let mut records = [Record::EMPTY; 256];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        let config = ExperimentConfig::Sinusoidal {
+            center_nm: -780,
+            amplitude_nm: 1_000_000,
+            frequency_mhz: 1000,
+            cycles: 1,
+        };
+        start(&mut e, config, 0, &mut io);
+        assert_eq!(io.scans, [Speed(6283), Direction(1)]);
+        for elapsed in [13, 29, 31, 43, 53] {
+            let now = e.started_ms + elapsed;
+            let (mut t, p) = feedback(now, 12345, false); // no EPOS correction
+            t.record(b"STAT", (1 << 6) | (1 << 13), now);
+            e.poll(now, &t, p, &mut io);
+            let expected = (core::f64::consts::TAU
+                * 1000.0
+                * (core::f64::consts::TAU * f64::from(elapsed) / 1000.0).cos())
+            .round() as u32;
+            assert_eq!(io.scans.last(), Some(&Speed(expected)));
+            assert_eq!(e.state, State::Running);
+        }
+        assert_eq!(io.targets.len(), 1);
+        assert_eq!(e.samples[1].elapsed_ms, 53);
+        assert_eq!(e.samples[1].target, sine_target(-780, 1_000_000, 1000, 53));
+        assert_eq!(e.samples[1].epos, 12345);
+        assert_eq!(e.max_lateness_ms, 3);
+    }
+    #[test]
+    fn exact_cycles_stop_then_drain_then_return_and_confirm_center() {
+        let mut records = [Record::EMPTY; CAPACITY];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        start(
+            &mut e,
+            ExperimentConfig::Sinusoidal {
+                center_nm: 780,
+                amplitude_nm: 1_000_000,
+                frequency_mhz: 1300,
+                cycles: 2,
+            },
+            0,
+            &mut io,
+        );
+        let boundary = 1539; // ceil(2 / 1.3 seconds), first representable ms
+        for elapsed in 1..boundary {
+            let now = e.started_ms + elapsed;
+            let (t, p) = feedback(now, 10, true);
+            e.poll(now, &t, p, &mut io);
+            assert_eq!(io.stops, 0);
+            assert_eq!(io.targets.len(), 1);
+        }
+        let now = e.started_ms + boundary;
+        let (mut t, mut p) = feedback(now, 10, true);
+        e.poll(now, &t, p, &mut io);
+        assert_eq!(io.stops, 1);
+        assert_eq!(io.events.last().unwrap(), "STOP\n");
+        assert_eq!(e.state, State::Running);
+        io.busy = true;
+        t.record(b"STAT", 0, now); // STOP may leave closed loop inactive
+        e.poll(now + 1, &t, p, &mut io);
+        assert_eq!(io.targets.len(), 1);
+        io.busy = false;
+        e.poll(now + 2, &t, p, &mut io);
+        assert_eq!(
+            io.scans.last(),
+            Some(&xeryon_motion::ScanCommand::Speed(8168))
+        );
+        io.busy = true;
+        e.poll(now + 3, &t, p, &mut io);
+        assert_eq!(io.targets.len(), 1);
+        io.busy = false;
+        e.poll(now + 4, &t, p, &mut io);
+        assert_eq!(io.targets.last(), Some(&(10, now + 4, true)));
+        t.xeryon_motion.as_mut().unwrap().state = 1;
+        t.record(b"STAT", 1 << 6, now + 5);
+        e.poll(now + 5, &t, p, &mut io);
+        assert!(!e.data_ready());
+        t.xeryon_motion.as_mut().unwrap().state = 2;
+        t.xeryon_motion.as_mut().unwrap().target = Some(11);
+        e.poll(now + 6, &t, p, &mut io);
+        assert!(!e.data_ready());
+        t.xeryon_motion.as_mut().unwrap().target = Some(10);
+        t.record(b"STAT", (1 << 6) | (1 << 10), now + 7);
+        p.ms = now + 7;
+        e.poll(now + 7, &t, p, &mut io);
+        assert_eq!(e.outcome, "completed");
+        assert_eq!(io.stops, 2);
+        assert_eq!(io.targets.len(), 2);
+    }
+    #[test]
+    fn reversal_and_return_exits_always_stop_and_keep_partial_data() {
+        for exit_phase in [250, 260, 1000, 1001, 1002] {
+            for abort in [true, false] {
+                let mut records = [Record::EMPTY; 256];
+                let mut e = Engine::new(&mut records);
+                let mut io = Io::default();
+                start(&mut e, sinusoidal(), 0, &mut io);
+                for elapsed in 1..=exit_phase {
+                    let now = e.started_ms + elapsed;
+                    let (t, p) = feedback(now, e.target, true);
+                    e.poll(now, &t, p, &mut io);
+                }
+                let len = e.len;
+                let stops = io.stops;
+                if abort {
+                    e.abort(&mut io);
+                } else {
+                    let now = e.started_ms + exit_phase + 1;
+                    let (mut t, p) = feedback(now, e.target, true);
+                    t.record(b"STAT", 1 << 18, now);
+                    e.poll(now, &t, p, &mut io);
+                }
+                assert_eq!(e.outcome, if abort { "aborted" } else { "faulted" });
+                assert_eq!(io.stops, stops + 1);
+                assert_eq!(io.events.last().unwrap(), "STOP\n");
+                assert_eq!(e.len, len);
+                assert!(e.stop_queued);
+                let events = io.events.len();
+                let (t, p) = feedback(2000, 0, true);
+                e.poll(2000, &t, p, &mut io);
+                assert_eq!(io.events.len(), events);
+            }
+        }
+    }
+    #[test]
+    fn scan_status_is_scoped_and_mode_feedback_grace_is_bounded() {
+        let (mut t, p) = feedback(0, 0, true);
+        t.record(b"STAT", (1 << 6) | (1 << 13), 0);
+        assert!(Engine::healthy(&t, p, 0, true, false).is_err());
+        assert!(Engine::healthy(&t, p, 0, true, true).is_ok());
+        for bit in [1, 2, 3, 9, 12, 14, 15, 16, 18, 21] {
+            t.record(b"STAT", (1 << 6) | (1 << 13) | (1 << bit), 0);
+            assert!(Engine::healthy(&t, p, 0, false, true).is_err());
+        }
+        let mut records = [Record::EMPTY; 256];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        start(&mut e, sinusoidal(), 0, &mut io);
+        for elapsed in 1..=360 {
+            let now = e.started_ms + elapsed;
+            let (mut t, p) = feedback(now, e.target, true);
+            // Stopped feedback can persist during reversal and shortly after
+            // restarting; it cannot suppress closed-loop safety indefinitely.
+            let stat = if elapsed >= 251 {
+                0
+            } else {
+                (1 << 6) | (1 << 13)
+            };
+            t.record(b"STAT", stat, now);
+            e.poll(now, &t, p, &mut io);
+            if elapsed < 360 {
+                assert_eq!(e.state, State::Running);
+            }
+        }
+        assert_eq!(e.reason, "Xeryon closed loop inactive");
+        assert_eq!(io.stops, 1);
+    }
+    #[test]
+    fn waveform_send_failure_and_return_timeout_attempt_stop() {
+        for failure in ["send", "stop", "return"] {
+            let mut records = [Record::EMPTY; 256];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            start(&mut e, sinusoidal(), 0, &mut io);
+            for elapsed in 1..=11000 {
+                let now = e.started_ms + elapsed;
+                let (t, p) = feedback(now, e.target, false);
+                if (failure == "send" && elapsed == 30) || (failure == "stop" && elapsed == 1000) {
+                    io.fail = true;
+                }
+                e.poll(now, &t, p, &mut io);
+                if e.data_ready() {
+                    break;
+                }
+            }
+            assert_eq!(e.outcome, "faulted");
+            assert_eq!(io.events.last().unwrap(), "STOP\n");
+            assert_eq!(e.stop_queued, failure == "return");
+            assert_eq!(
+                e.reason,
+                match failure {
+                    "send" => "scan transmit failure",
+                    "stop" => "stop failure",
+                    _ => "Final center move deadline",
+                }
+            );
         }
     }
     #[test]
@@ -1014,7 +1362,7 @@ mod tests {
                     12
                 }
                 5 => {
-                    io.fail = true;
+                    io.busy = true;
                     12
                 }
                 6 => 42,

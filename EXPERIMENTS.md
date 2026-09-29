@@ -30,7 +30,7 @@ the Teensy. CSV is generated in desktop Rust only when Save CSV is selected.
 
 `ExperimentConfig` has `QuasiStatic` and `Sinusoidal` variants. One `Engine`
 owns validation, state, acquisition, the fixed buffer, CRC, faults and transfer;
-only target generation and completion conditions differ between modes.
+only motion commands and completion conditions differ between modes.
 
 ```text
 Dashboard -> Validate -> MoveToStart -> Armed -> Running
@@ -69,8 +69,8 @@ travel. TOU2=0 is accepted as already disabled; firmware never changes it.
 These commands and units follow the [XD-C manual, sections 4.1–4.2](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.1%20-%20JPL.pdf).
 
 The confirmed speed applies to initial positioning and every step. It remains
-the controller's current setting afterward, including for subsequent manual or
-sinusoidal moves that do not select a speed; no SAVE command is sent. Start
+the controller's current setting afterward, including for subsequent manual moves and sinusoidal initial positioning;
+sinusoidal Running subsequently selects its waveform speed. No SAVE command is sent. Start
 positioning completes first, then acquisition begins.
 Step 1 is `start + increment`; there are exactly `steps` increments, each followed
 by a hold. Holds begin only on confirmed arrival. Samples continue through every
@@ -83,29 +83,65 @@ the speed/readback checks cannot guarantee fault-free motion under every load.
 
 For sinusoidal, initial positioning is to center. Phase is calculated from actual
 elapsed Teensy milliseconds, not from loop counts. After the requested cycles,
-an exact center target is sent and confirmed through the same finite-move feedback
-mechanism. Acquisition continues through final settling, bounded by 10 s.
+continuous scanning is stopped, then an exact center target is sent and confirmed
+through the same finite-move feedback mechanism. Acquisition continues through final settling, bounded by 10 s.
 All terminal paths request STOP; metadata says whether it could be queued.
 
-## Xeryon waveform strategy: 100 Hz position commands
+## Xeryon waveform strategy: 100 Hz velocity/direction control
 
-After confirmed initial positioning, the Teensy sends one bounded
-`DPOS=<signed encoder counts>\n` command every 10 ms. The target is
-`center + amplitude * sin(2π * frequency * elapsed_seconds)`, rounded directly
-to the nearest 0.078 µm encoder count. Phase comes from elapsed Teensy time,
-including clock rollover, so foreground jitter cannot accumulate phase drift.
-The 0.1–2 Hz configured wave frequency is separate from the 100 Hz command rate.
+After confirmed initial positioning, the Teensy evaluates the desired position
+`x(t) = center + A * sin(2π f t)` and commands its derivative
+`v(t) = 2π f A * cos(2π f t)`. A is in µm, f in Hz, and v in µm/s.
+With wire units, `vmax = 2π * frequency_millihz * amplitude_nm / 1_000_000`.
+Phase uses actual elapsed monotonic milliseconds, reduced modulo one cycle using
+integer arithmetic; no loop-count phase integration or catch-up bursts occur.
+The existing allocation-free sine polynomial also evaluates cosine by a quarter
+cycle shift. No waveform DPOS, position-feedback correction or drift correction
+is used. Desired position remains rounded to 0.078 µm counts for logging.
 
-The foreground does not wait for each waveform target to be reached. It sends
-one command per scheduled tick, including repeated quantized targets. Delays of
-an entire 10 ms interval or an unfinished previous USB transfer fault the run;
-there are no queued catch-up bursts. Final center arrival is confirmed before
-completion. Acquisition continues at 20 Hz through final settling.
+Every 10 ms, SSPD is `floor(abs(v) + 0.5)` in integer µm/s, with ties up.
+At t=0 the sequence is `SSPD=<rounded vmax>`, `SCAN=1`. During a direction's
+half-cycle, only changed SSPD values are transmitted. Last SSPD and SCAN values
+are cached per run; unchanged values produce no ASCII command. The first
+scheduled zero-speed or opposite-sign update sends `SSPD=0`, then `SCAN=0`.
+This includes a crossing between ticks: it never jumps directly between nonzero
+opposite directions. The next scheduled nonzero update sends `SCAN=<new sign>`
+at zero speed, then `SSPD=<newly calculated magnitude>`. Quantized zero speed can
+last multiple ticks without redundant commands. Direction changes therefore
+include at least one stopped update; no measured stop confirmation is assumed.
+Each line uses the existing Rust hardware layer and separate ordered USB
+transfers, at most two per update. Backlog at a scheduled update faults even if
+its rounded speed would be unchanged.
 
-No SCAN velocity commands, encoder correction, controller-setting queries or
-temporary setting changes are used. Existing controller speed and travel limits
-apply. USB command timing does not guarantee mechanical tracking or feedback
-cadence; those must be measured on hardware.
+Before any motion, the peak must be finite, positive, no greater than the existing
+24-bit `MAX_SPEED_UM_S` (16,777,215 µm/s), and round to a positive representable
+SSPD. Both travel endpoints retain their existing signed 26-bit position checks.
+There is no additional configured actuator-specific speed ceiling known to this
+firmware. Its numeric SSPD ceiling is not a guarantee of mechanical capability.
+Controller travel limits, acceleration/deceleration, and fault protections remain
+configured as before; firmware does not query or change those settings.
+
+At `ceil(cycles * 1_000_000 / frequency_millihz)` elapsed milliseconds, scanning
+ends with priority `STOP`, independently of the 10 ms schedule. This is the first
+representable millisecond at or after the exact requested cycle count. A late
+foreground poll uses actual time; lateness of 10 ms or more faults and stops.
+Firmware waits for STOP's transport to drain, sets SSPD to rounded vmax if it
+changed, waits for that transfer, then sends a tracked `DPOS=<center>`.
+The 10 s final-move budget includes these drains. Completion requires matching
+DPOS echo followed by Position Reached, closed loop active and scanning clear.
+Terminal cleanup requests STOP again and retains the dataset. The last selected
+SSPD remains configured afterward; there is no SAVE or speed restoration.
+
+The Scanning STAT bit is allowed only for sinusoidal Running, including the
+bounded transition out of scanning. Intentional zero-speed/stopped phases may
+clear closed loop; a restart or final DPOS has a 100 ms closed-loop feedback grace.
+After that grace, closed-loop loss faults normally, and scanning during final
+positioning is rejected. Controller errors, end stops, disconnects, feedback
+freshness, pressure faults, and all deadlines remain checked throughout.
+
+Acquisition continues at 20 Hz through final settling. USB dispatch, mechanical
+response at SSPD=0/SCAN=0, reversal timing, peak-speed capability, mode feedback,
+tracking and drift still require physical validation under the intended load.
 
 ## Timing, sample layout and memory
 
@@ -114,7 +150,7 @@ cadence; those must be measured on hardware.
 | Clock | Existing monotonic Teensy SysTick, 1 ms resolution, wrapping u32 |
 | Acquisition schedule | 50 ms / 20 Hz, latest cached raw values |
 | Pressure acquisition | LPS22HHTR 200 Hz output; 1 ms readiness polling; burst read at 400 kHz |
-| Sinusoidal targets | 10 ms / 100 Hz, 0.100–2.000 Hz wave frequency |
+| Sinusoidal velocity updates | 10 ms / 100 Hz, 0.100–2.000 Hz wave frequency |
 | Record | 40 bytes, ten explicit little-endian 32-bit words |
 | Capacity | 4,096 records |
 | Sample-buffer RAM | 163,840 bytes / 160 KiB, zero-initialized DTCM `.bss` |
@@ -136,7 +172,7 @@ never silently shortened. A 204.75 s bound reserves all 4,096 records.
 | 16 | epos_age_ms | u32, logging time minus EPOS reception time |
 | 20 | pressure_age_ms | u32, logging time minus pressure publication time |
 | 24 | stat_age_ms | u32, logging time minus STAT reception time |
-| 28 | target | i32, last commanded target at this logging instant |
+| 28 | target | i32, theoretical sine position at actual logging time (center after waveform); last DPOS target for quasi-static |
 | 32 | controller_ticks | u32, latest raw XD-C TIME, 0.1 ms units |
 | 36 | controller_age_ms | u32, TIME reception age; UINT32_MAX means unavailable |
 
@@ -149,7 +185,7 @@ the paired logging times; CSV also exports all ages and raw encoder/target value
 
 The foreground performs at most one logging operation per poll. Late logging
 skips expired slots rather than fabricating samples, recording missed-slot count
-and maximum lateness. A sinusoidal dispatch delayed by a whole target interval
+and maximum lateness. A sinusoidal dispatch delayed by a whole control interval
 faults; smaller delays use current phase. Deadline checks and the prevalidated
 sample budget bound storage, with a defensive invariant check before every write.
 This is a bounded cooperative loop, not a measured hard-real-time guarantee.
@@ -162,7 +198,9 @@ See the validation results below for the linked RAM footprint.
 
 ## Dataset protocol
 
-Protocol 1 Dashboard commands remain compatible; HELLO adds `experiments: true` and `sine_position: true`.
+Protocol 1 Dashboard commands remain compatible. HELLO retains `experiments: true`
+and the legacy `sine_position: true` UI gate, and adds `sine_velocity: true` to
+identify the velocity implementation of the desired sinusoidal position waveform.
 Maximum command length increases from 64 to 128 bytes before LF. IDs are nonzero
 u32; the desktop reserves `0xf0000000` for its native transfer requests.
 
@@ -190,6 +228,11 @@ The native receiver responds to data_ready with GET_DATA. `data_meta` JSON inclu
 version, run, requested integer-unit configuration, count, record size, payload
 length, CRC, outcome, reason, STOP queue result, clock origin, elapsed time,
 duration bound, reserved sample count, intervals, missed samples and lateness.
+Sinusoidal metadata adds `sine_control: "velocity_scan"` to distinguish these runs
+from earlier 0.2.0 position-streamed datasets. All ten record words are occupied;
+signed velocity is not added, preserving the 40-byte format and full timing/age
+fields. The theoretical velocity is derivable from saved configuration and time
+during the waveform; final centering is a separate tracked positioning phase.
 
 GET_CHUNK requests **16 records maximum** (640 binary bytes). Firmware sends one
 JSON `data_chunk` header with id/run/record-offset/byte-length followed immediately
@@ -237,8 +280,8 @@ configuration remain disabled after disconnect while ownership is unresolved.
 
 During active states, Xeryon disconnect/epoch change, stale EPOS or STAT (3 s),
 existing controller fault bits (including encoder error), end stops, loss of closed
-loop after initial positioning, index/scan
-operations, move/trajectory/acquisition deadlines, transmit failure/backlog, or
+loop outside the bounded commanded mode transitions, index operations,
+unexpected scanning outside sinusoidal motion, move/trajectory/acquisition deadlines, transmit failure/backlog, or
 pressure invalidity/transfer failure/250 ms staleness request STOP and retain a
 faulted dataset. ABORT retains an aborted dataset. STOP delivery is best effort
 when USB2 fails; queue acceptance is not physical stop confirmation. No software
@@ -246,12 +289,16 @@ path can guarantee actuator stopping after loss of its only communication link.
 
 ## Validation
 
-The focused engine coverage checks 100 position commands per second, absolute
-sine phase across clock rollover, final center completion, faults and ABORT.
-Existing transport, configuration, quasi-static, dataset and desktop tests remain.
-The scan setup/readback/restoration tests and diagnostic fixtures were removed
-with the velocity implementation.
+The focused engine coverage checks the velocity equation, cardinal phases,
+rounding and direction, stopped reversals, redundant-command suppression, actual
+elapsed time and clock rollover, theoretical position logging, cycle completion,
+STOP/drain/SSPD/DPOS ordering, confirmed final center arrival, speed validation,
+and retained partial datasets on ABORT/fault. Existing quasi-static, transport,
+configuration, acquisition and desktop interoperability tests remain.
 
 Run `bash tests/run.sh`, desktop Cargo tests with the native host target,
 `npm test`, the firmware release build and `npm run build:ui` for software checks.
-Physical 100 Hz USB dispatch and stage tracking still require a hardware trial.
+Generate HEX with `cargo objcopy --release --locked -- -O ihex target/firmware/firmware.hex`;
+this command does not flash hardware. Physical 100 Hz USB dispatch, transport
+latency, low-speed quantization, stop behavior, controller mode transitions,
+return-to-center and stage tracking still require a hardware trial.
