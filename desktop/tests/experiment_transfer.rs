@@ -118,10 +118,11 @@ fn independent_signal_times_and_identities_round_trip_into_csv() {
     assert_eq!(dataset.samples[0][10], i64::from(u32::MAX));
     let csv = dataset.csv();
     let lines: Vec<_> = csv.lines().collect();
-    assert!(lines[1].contains("epos_host_receipt_s,pressure_i2c_completion_s"));
-    assert!(lines[2].ends_with(",-0.017,-0.003,4294967295,1,1,1"));
-    assert!(lines[3].ends_with(",-0.017,0.048,4294967295,2,0,1"));
-    assert!(lines[4].ends_with(",0.095,0.099,0,3,1,1"));
+    assert!(lines[1].contains("epos_host_receipt_s,epos_generation"));
+    assert!(!lines[1].contains("pressure_i2c_completion_s"));
+    assert!(lines[2].ends_with(",-0.017,4294967295,1,1,1"));
+    assert!(lines[3].ends_with(",-0.017,4294967295,2,0,1"));
+    assert!(lines[4].ends_with(",0.095,0,3,1,1"));
     let mut legacy = meta(8, &bytes);
     legacy["version"] = json!(1);
     assert!(d.metadata(legacy).is_err());

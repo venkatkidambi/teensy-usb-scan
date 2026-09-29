@@ -91,11 +91,12 @@ ASCII/JSON protocol remains v1. Firmware remains no_std/no_main and allocation-f
 
 Independent relative signal times are `i64(elapsed_ms) - i64(signal_age_ms)`.
 Negative times retain the last publication before run start, including across
-SysTick rollover. CSV appends `epos_host_receipt_s`, `pressure_i2c_completion_s`,
-both generations, and `epos_new`/`pressure_new`. All rows and raw values remain
-available; offline analysis should select new identities. Plots use only those
-identities, as points without connecting/interpolating missing measurements, and
-overlay commanded position at the record's experiment time.
+SysTick rollover. CSV appends `epos_host_receipt_s`, both generations, and
+`epos_new`/`pressure_new`. All rows and raw values remain available. The position
+plot uses unique identities as points without interpolation and overlays commanded
+position at the record's experiment time. Pressure retains every 20 Hz logger
+sample as a continuous line against experiment elapsed time (`time_s` in CSV);
+no pressure I²C completion time column is exported.
 
 Arrival instrumentation starts at RUNNING and freezes on the terminal decision.
 It does not stream to the desktop during the experiment. EPOS statistics are

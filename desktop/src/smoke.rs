@@ -31,9 +31,17 @@ pub const SCRIPT: &str = r#"
       document.getElementById(`tab-${mode}`).click();
       if(document.getElementById(`tab-${mode}`).getAttribute('aria-selected')!=='true')throw Error('Mode tab failed');
       if(mode!=='dashboard'&&!document.getElementById('experiment-start-button').disabled)throw Error('Demo enabled experiment START');
+      if(mode!=='dashboard'){
+        let mutations=0;
+        const observer=new MutationObserver(records=>{mutations+=records.length;});
+        for(const id of ['plot','pressure-plot','pressure-raw'])observer.observe(document.getElementById(id),{attributes:true,childList:true,subtree:true});
+        await new Promise(r=>setTimeout(r,600));
+        observer.disconnect();
+        if(mutations)throw Error('Hidden dashboard continued rendering');
+      }else if(document.getElementById('pressure-raw').textContent==='—')throw Error('Dashboard did not refresh on return');
     }
     const {experimentMessage}=await import('./experiment.js');
-    experimentMessage({type:'experiment_dataset',dataset:{metadata:{run:1,config:{kind:'sinusoidal'},outcome:'aborted',reason:'test fixture',count:3,elapsed_ms:100,missed_samples:0,max_lateness_ms:0,stop_queued:true},samples:[[0,0,10],[50,10,20],[100,0,10]]}});
+    experimentMessage({type:'experiment_dataset',dataset:{metadata:{run:1,config:{kind:'sinusoidal'},outcome:'aborted',reason:'test fixture',count:3,elapsed_ms:100,missed_samples:0,max_lateness_ms:0,stop_queued:true},samples:[[0,0,10,0,5,3,0,0,0,0,1,1],[50,10,20,0,5,2,0,10,0,0,2,2],[100,0,10,0,5,1,0,0,0,0,3,3]]}});
     await new Promise(r=>setTimeout(r,100));
     if(!document.getElementById('experiment-result-summary').textContent.includes('ABORTED'))throw Error('Experiment outcome missing');
     for(const name of ['position','pressure'])if(document.getElementById(`experiment-${name}-plot`).width<100)throw Error('Experiment plot did not render');
@@ -46,11 +54,21 @@ pub const SCRIPT: &str = r#"
     // No physical serial port is opened and no motion command leaves this test.
     const {setupExperiments,experimentControls}=await import('./experiment.js');
     const calls=[];let rejectStart;
-    const state={connected:true,hello:{experiments:true,sine_position:true},session:{
+    const state={connected:true,hello:{experiments:true,sine_position:true,quasi_static_speed:true},session:{
       startExperiment(config){calls.push(config);return new Promise((_,reject)=>{rejectStart=reject;});}
     }};
     setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls});
-    document.getElementById('tab-sinusoidal').click();
+    for(const mode of ['quasi_static','sinusoidal']){
+      document.getElementById(`tab-${mode}`).click();
+      const panel=document.getElementById('experiment-panel');
+      const results=document.getElementById('experiment-results');
+      const height=panel.getBoundingClientRect().height,top=results.getBoundingClientRect().top;
+      state.session.pending={expected:'pong'};experimentControls();
+      if(!document.getElementById('experiment-start-button').disabled)throw Error('Pending request enabled START');
+      if(panel.getBoundingClientRect().height!==height||results.getBoundingClientRect().top!==top)throw Error('Background PING shifted experiment layout');
+      state.session.pending=null;experimentControls();
+      if(panel.getBoundingClientRect().height!==height||results.getBoundingClientRect().top!==top)throw Error('Completed PING shifted experiment layout');
+    }
     const start=document.getElementById('experiment-start-button');
     const status=document.getElementById('experiment-state');
     const repeats=document.getElementById('experiment-repeats');
@@ -66,7 +84,7 @@ pub const SCRIPT: &str = r#"
     if(start.disabled||status.textContent!=='START failed: Test rejection')throw Error('START rejection did not recover visibly');
     state.hello.sine_position=false;experimentControls();
     if(!start.disabled||!document.getElementById('experiment-start-reason').textContent.includes('sinusoidal position control'))throw Error('Disabled START has no explanation');
-    await invoke('smoke_report',{result:{ok:true,ports:ports.length,nativeIPC:true,demo:true,disconnect:true,startClick:true,startValidation:true}});
+    await invoke('smoke_report',{result:{ok:true,ports:ports.length,nativeIPC:true,demo:true,disconnect:true,startClick:true,startValidation:true,stableExperimentLayout:true,hiddenDashboardIdle:true}});
   }catch(e){await window.__TAURI__.core.invoke('smoke_report',{result:{ok:false,error:String(e)}});}
 })();
 "#;

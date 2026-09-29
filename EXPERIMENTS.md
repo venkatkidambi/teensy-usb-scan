@@ -191,10 +191,12 @@ completes. Only a fresh conversion advances that timestamp. Ages retain the avai
 software timestamp nor TIME establishes sensor conversion time or clock alignment.
 Pressure/position samples can repeat between sensor updates. Dataset v2 retains
 identities to distinguish new publications from repeated cache reads. The frontend
-plots each unique identity as a point at `elapsed_ms - signal_age_ms`, using signed
-arithmetic (pre-start samples can have negative times). Commanded trajectory stays
-on experiment elapsed time. There is no interpolation between measured points.
-CSV exposes these independent times, both identities, and per-signal new flags.
+plots each unique position identity as a point at `elapsed_ms - epos_age_ms`, using
+signed arithmetic (pre-start samples can have negative times), without interpolation.
+Commanded trajectory and the continuous pressure line use experiment elapsed time.
+Pressure includes every logger sample, including repeated values and identities.
+CSV exposes position receipt time, both identities, and per-signal new flags;
+pressure is recorded against `time_s`, without an I²C completion time column.
 The 20 Hz logger still selects the latest sample; it does not retain every 50 Hz
 EPOS or 200 Hz pressure publication. See [EPOS_TIMING.md](EPOS_TIMING.md) for setup,
 receipt-time limitations, decimation statistics and physical acceptance.

@@ -156,10 +156,11 @@ retain samples. SSPD is changed during the waveform and remains at the last sett
 Dataset version 2 uses 48-byte records: the original ten words followed by
 `epos_generation` and `pressure_generation` (u32). The desktop rejects version 1
 datasets instead of misdecoding them. Dashboard protocol remains version 1.
-Each signal uses signed `elapsed_ms - signal_age_ms` for its own relative time;
-EPOS time is host receipt, pressure time is I²C completion. Repeated identities
-are suppressed in plots and marked in CSV, including equal-valued fresh samples.
-No measurement interpolation is applied. During the sine waveform, `target` is the
+Position uses signed `elapsed_ms - epos_age_ms` for host receipt time. Repeated
+position identities are suppressed in the plot, without interpolation. Pressure
+plots every logger sample as a continuous line against experiment elapsed time
+(`time_s` in CSV); no I²C completion time column is exported. Both identities and
+per-signal new flags remain in CSV. During the sine waveform, `target` is the
 theoretical position at actual logging time; after the waveform it is center.
 Quasi-static retains its last commanded DPOS target. Metadata adds
 `sine_control: "velocity_scan"` for sinusoidal runs and retains `trajectory_ms: 10`

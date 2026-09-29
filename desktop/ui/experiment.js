@@ -1,5 +1,6 @@
 // UI only: native Rust validates configuration, receives binary data and builds CSV.
 const $=id=>document.getElementById(id);
+const text=(id,value)=>{const node=$(id);if(node.textContent!==value)node.textContent=value;};
 let mode='dashboard',dataset=null,context=null,saving=false,starting=false;
 const modes=['dashboard','quasi_static','sinusoidal'];
 const fields=['start','increment','timing','repeats','speed'];
@@ -31,13 +32,13 @@ export function experimentControls() {
   const blocked=startBlocked(context.state());
   $('experiment-start-button').disabled=!!blocked;
   $('experiment-start-button').title=blocked;
-  $('experiment-start-reason').textContent=blocked;
+  text('experiment-start-reason',blocked);
   $('experiment-start-reason').hidden=!blocked;
-  $('experiment-motion-detail').textContent=mode==='sinusoidal'?`100 Hz sine ${hello?.sine_velocity?'velocity/direction control':'position commands'}. Starts and finishes at the center position.`:'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.';
+  text('experiment-motion-detail',mode==='sinusoidal'?`100 Hz sine ${hello?.sine_velocity?'velocity/direction control':'position commands'}. Starts and finishes at the center position.`:'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.');
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
   $('experiment-save').disabled=saving||owned||!dataset;
-  $('experiment-save').textContent=saving?'Saving…':'Save CSV';
+  text('experiment-save',saving?'Saving…':'Save CSV');
 }
 function tab(next) {
   if(mode!=='dashboard')configurations[mode]=fields.map(k=>$(`experiment-${k}`).value);
@@ -53,6 +54,7 @@ function tab(next) {
     $('experiment-timing').min=sine?'0.1':'0.001';$('experiment-timing').max=sine?'2':'204.75';
   }
   experimentControls();draw();
+  context.viewChanged?.();
 }
 export function experimentMessage(message) {
   if(message.type==='experiment_state') {
@@ -76,10 +78,11 @@ export function experimentMessage(message) {
   }
   experimentControls();
 }
-// Retain equal-valued NEW samples; suppress repeat reads by identity, never value.
-// Negative times describe the cached sample preceding acquisition start.
+// Pressure retains every logger sample at experiment elapsed time.
+// Position uses unique publications at host receipt time, including pre-start samples.
 export function signalPoints(samples, field, scale=1) {
-  const age=field===1?4:5, generation=field===1?10:11;
+  if(field===2)return samples.map(s=>[s[0],s[field]*scale]);
+  const age=4, generation=10;
   let previous;
   return samples.filter(s=>{const fresh=s[generation]!==previous;previous=s[generation];return fresh;})
     .map(s=>[s[0]-s[age],s[field]*scale]);
@@ -87,14 +90,17 @@ export function signalPoints(samples, field, scale=1) {
 function drawPlot(id,field,scale) {
   const canvas=$(id),rect=canvas.getBoundingClientRect();if(!rect.width||!dataset)return;
   const ctx=canvas.getContext('2d'),dpr=Math.min(devicePixelRatio||1,2);
-  canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;ctx.scale(dpr,dpr);
+  const width=Math.round(rect.width*dpr),height=Math.round(rect.height*dpr);
+  if(canvas.width!==width)canvas.width=width;
+  if(canvas.height!==height)canvas.height=height;
+  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,rect.width,rect.height);
   const samples=dataset.samples,l=65,r=rect.width-16,t=15,b=rect.height-30;
   const points=signalPoints(samples,field,scale);
   const command=field===1?samples.map(s=>[s[0],s[7]*scale]):[];
   let lo=Infinity,hi=-Infinity;for(const [,value] of [...points,...command]){lo=Math.min(lo,value);hi=Math.max(hi,value);}
   if(!samples.length){ctx.fillText('No samples acquired',l,40);return;}
   const pad=Math.max((hi-lo)*.1,scale);lo-=pad;hi+=pad;const end=Math.max(dataset.metadata.elapsed_ms,1);
-  const start=Math.min(0,...signalPoints(samples,1).map(p=>p[0]),...signalPoints(samples,2).map(p=>p[0]));
+  const start=field===1?Math.min(0,...points.map(p=>p[0])):0;
   const x=ms=>l+(ms-start)/(end-start)*(r-l),y=value=>b-(value-lo)/(hi-lo)*(b-t);
   ctx.font='10px system-ui';ctx.fillStyle='#646b65';
   for(let i=0;i<=4;i++){
@@ -103,7 +109,12 @@ function drawPlot(id,field,scale) {
   }
   ctx.strokeStyle='#919b96';ctx.lineWidth=1;ctx.beginPath();
   command.forEach(([ms,value],i)=>{if(i)ctx.lineTo(x(ms),y(value));else ctx.moveTo(x(ms),y(value));});ctx.stroke();
-  // Measurement points only: no interpolation across missing/deduplicated data.
+  if(field===2){
+    ctx.strokeStyle='#32684d';ctx.lineWidth=1.5;ctx.beginPath();
+    points.forEach(([ms,value],i)=>{if(i)ctx.lineTo(x(ms),y(value));else ctx.moveTo(x(ms),y(value));});ctx.stroke();
+    return;
+  }
+  // Position points only: no interpolation across missing/deduplicated data.
   ctx.fillStyle='#32684d';
   for(const [ms,value] of points){ctx.beginPath();ctx.arc(x(ms),y(value),2,0,2*Math.PI);ctx.fill();}
 }

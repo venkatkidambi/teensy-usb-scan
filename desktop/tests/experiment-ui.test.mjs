@@ -2,14 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupExperiments, experimentMessage, experimentControls, signalPoints } from '../ui/experiment.js';
 
-test('signals use independent timestamps and identity, preserving equal-valued new samples', () => {
+test('position uses receipt identity while pressure keeps every sample at elapsed time', () => {
   const samples = [
     [0, 10, 100, 0, 10, 3, 0, 20, 0, 0, 5, 9],
     [50, 10, 100, 0, 60, 2, 0, 21, 0, 0, 5, 10],
-    [100, 10, 110, 0, 5, 1, 0, 22, 0, 0, 6, 11],
+    [100, 10, 110, 0, 5, 1, 0, 22, 0, 0, 6, 10],
   ];
   assert.deepEqual(signalPoints(samples, 1), [[-10, 10], [95, 10]]);
-  assert.deepEqual(signalPoints(samples, 2), [[-3, 100], [48, 100], [99, 110]]);
+  assert.deepEqual(signalPoints(samples, 2), [[0, 100], [50, 100], [100, 110]]);
 });
 
 test('START explains blockers, validates fields, submits once, and reports failures', async () => {
