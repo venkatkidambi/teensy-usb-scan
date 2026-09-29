@@ -4,7 +4,7 @@ pub const RECORD_FIELDS: usize = 12;
 pub const DATA_VERSION: u32 = 2;
 pub const RECORD_BYTES: usize = RECORD_FIELDS * 4;
 pub const CHUNK_RECORDS: usize = 16;
-pub const SAMPLE_MS: u32 = 50;
+pub const SAMPLE_MS: u32 = 20; // 50 Hz experiment recording
 pub const TRAJECTORY_MS: u32 = 10; // 100 Hz sine velocity updates
 pub const MOVE_TIMEOUT_MS: u32 = 10_000;
 pub const MAX_SPEED_UM_S: u32 = 0x00ff_ffff;
@@ -177,7 +177,7 @@ impl ExperimentConfig {
             }
         };
         if duration > u64::from(MAX_DURATION_MS) {
-            return Err("Experiment exceeds fixed sample buffer (204.75 seconds)");
+            return Err("Experiment exceeds fixed sample buffer (81.9 seconds at 50 Hz)");
         }
         Ok(duration as u32)
     }

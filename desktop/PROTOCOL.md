@@ -133,7 +133,7 @@ The LPS22HHTR driver reports `pressure: true`. Its snapshot `pressure` object co
 The sensor uses SDA pin 18, SCL pin 19, 400 kHz I²C and repeated-start register
 reads. Data-ready is checked every millisecond; one five-byte burst reads both
 values only when fresh. Acquisition continues while streaming is paused.
-Dashboard snapshots remain 10 Hz and experiment recording remains 20 Hz.
+Dashboard snapshots remain 10 Hz and experiment recording remains 50 Hz.
 Update firmware and desktop together for this sensor-specific pressure schema.
 
 `plunger_io` remains unchanged: physical pad readbacks `standby`, `ain1`, `ain2`,
@@ -164,7 +164,7 @@ per-signal new flags remain in CSV. During the sine waveform, `target` is the
 theoretical position at actual logging time; after the waveform it is center.
 Quasi-static retains its last commanded DPOS target. Metadata adds
 `sine_control: "velocity_scan"` for sinusoidal runs and retains `trajectory_ms: 10`
-and `sample_ms: 50`. Signed theoretical velocity can be calculated from saved
+and `sample_ms: 20`. Signed theoretical velocity can be calculated from saved
 configuration and elapsed time during the waveform; no age field is replaced.
 Controller faults include a specific `reason` and, when observed by the engine,
 `fault_stat`: the triggering STAT word retained before STOP. The results display

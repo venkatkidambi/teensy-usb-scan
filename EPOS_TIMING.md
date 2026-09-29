@@ -83,8 +83,8 @@ move backlog into the controller and does not establish loss-free delivery.
 ## Records and diagnostics
 
 Dataset v2 is 48 bytes (the original 40 plus EPOS and pressure u32 generations).
-At 4096 records the buffer is 196608 bytes / 192 KiB, up 32768 bytes. Logging stays
-20 Hz, duration bound stays 204.75 s including settling (194.75 s maximum sine
+At 4096 records the buffer is 196608 bytes / 192 KiB, up 32768 bytes. Logging runs at
+50 Hz (20 ms), with a duration bound of 81.9 s including settling (71.9 s maximum sine
 waveform plus its 10 s reserve). CRC covers all 48 bytes; chunks carry at most
 16 records / 768 bytes. The native decoder explicitly requires v2. Dashboard's
 ASCII/JSON protocol remains v1. Firmware remains no_std/no_main and allocation-free.
@@ -94,7 +94,7 @@ Negative times retain the last publication before run start, including across
 SysTick rollover. CSV appends `epos_host_receipt_s`, both generations, and
 `epos_new`/`pressure_new`. All rows and raw values remain available. The position
 plot uses unique identities as points without interpolation and overlays commanded
-position at the record's experiment time. Pressure retains every 20 Hz logger
+position at the record's experiment time. Pressure retains every 50 Hz logger
 sample as a continuous line against experiment elapsed time (`time_s` in CSV);
 no pressure I²C completion time column is exported.
 
@@ -107,7 +107,7 @@ Pressure statistics observe every fresh publication in the foreground loop.
 | --- | --- |
 | `epos`, `pressure` | `updates`, rate in millihertz (`updates * 1000000 / elapsed_ms`), interval count/sum, min/max ms and mean µs; no interval exists unless count ≥2 |
 | `epos_repeated_records`, `pressure_repeated_records` | Logged identities equal to the preceding record; the first row is a baseline |
-| `epos_unlogged_updates` | Publications during RUNNING not selected by the 20 Hz logger, including overwritten cache updates; deliberate decimation, not proven transport loss |
+| `epos_unlogged_updates` | Publications during RUNNING not selected by the 50 Hz logger, including overwritten cache updates; deliberate decimation, not proven transport loss |
 | `max_epos_age_ms`, `max_pressure_age_ms` | Maximum observed receipt/publication age at every running engine poll, including a triggering stale-feedback poll |
 | `malformed_lines` | Decoder errors during RUNNING; not proof of dropped measurements |
 | `rx_peak_bytes` | Maximum RX FIFO occupancy observed before a bounded drain; not an instantaneous hardware high-water mark |
@@ -118,7 +118,7 @@ Pressure statistics observe every fresh publication in the foreground loop.
 | `before` | Original INFO/POLI readbacks, null when not obtained |
 | `info`, `poli_ms`, `feedback_verified` | Requested settings; verified must be true before interpreting them as successful configuration |
 
-No full-rate sample history is implied: 20 Hz records select the newest available
+No full-rate sample history is implied: 50 Hz records select the newest available
 values. Received but unlogged EPOS updates remain visible in counters, not as
 invented measurements. Source-side missing samples cannot be counted without a
 controller sequence identifier. Existing missed logging slots and maximum logging

@@ -10,7 +10,7 @@ procedure. PC disconnect does not stop an autonomous run if the Teensy stays pow
 Sinusoidal mode uses **100 Hz SSPD/SCAN velocity and direction control**, advertised
 by `sine_velocity` while retaining the legacy `sine_position` UI capability.
 Velocity is the derivative of the configured sine position, calculated from actual
-elapsed Teensy time. Recording remains 20 Hz and stores theoretical position.
+elapsed Teensy time. Recording remains 50 Hz and stores theoretical position.
 The run starts at center, stops scanning after the requested cycles, and confirms
 a tracked DPOS return to center. Reversals include a zero-speed stopped update;
 there is no waveform DPOS streaming or drift correction.
@@ -379,7 +379,7 @@ Pressure is sign-extended 24-bit data at **4096 counts/hPa**; temperature is sig
 16-bit data at **100 counts/°C**. The dashboard and CSV retain raw pressure counts;
 the dashboard temperature diagnostic uses °C. The 16-entry average remains
 zero-filled at startup and now spans about **80 ms** at 200 Hz. Experiments
-continue recording the latest raw value at **20 Hz**; dashboard snapshots remain
+continue recording the latest raw value at **50 Hz**; dashboard snapshots remain
 10 Hz. Both retain pressure age independently of the faster acquisition.
 
 Update both firmware and desktop app together. The pressure panel identifies

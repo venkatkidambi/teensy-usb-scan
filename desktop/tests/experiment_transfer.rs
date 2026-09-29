@@ -129,7 +129,7 @@ fn independent_signal_times_and_identities_round_trip_into_csv() {
 }
 #[test]
 fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
-    let mut records = [Record::EMPTY; 256];
+    let mut records = [Record::EMPTY; 1024];
     let mut e = engine::Engine::new(&mut records);
     let config = ExperimentConfig::Sinusoidal {
         center_nm: 0,
@@ -145,7 +145,7 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         e.poll(now, &telemetry(now), pressure(now), &mut Io);
     }
     e.abort(&mut Io);
-    assert_eq!(e.len, 11);
+    assert_eq!(e.len, 26);
     let mut d = receiver::Download::default();
     assert!(d.begin(e.run).starts_with("GET_DATA "));
     e.transfer(e.run).unwrap();
@@ -188,14 +188,28 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         }
     }
     let dataset = dataset.unwrap();
-    assert_eq!(dataset.samples.len(), 11);
+    assert_eq!(dataset.samples.len(), 26);
     assert_eq!(dataset.samples[0][1], -123);
-    assert_eq!(dataset.samples[5][7], 10); // theoretical +amplitude at t=250 ms
-    assert_eq!(dataset.samples[10][7], 0); // center at half-cycle, still scanning
+    assert_eq!(dataset.samples[12][7], 10); // theoretical near +amplitude at t=240 ms
+    assert_eq!(dataset.samples[25][7], 0); // center at half-cycle, still scanning
     assert!(dataset.csv().contains("-9.594,1193046"));
     assert_eq!(dataset.metadata["outcome"], "aborted");
     assert_eq!(dataset.metadata["sine_control"], "velocity_scan");
     assert_eq!(dataset.metadata["record_bytes"], RECORD_BYTES);
+    assert_eq!(dataset.metadata["sample_ms"], 20);
+    assert!(
+        dataset
+            .samples
+            .windows(2)
+            .all(|pair| pair[1][0] - pair[0][0] == 20)
+    );
+    let csv = dataset.csv();
+    let times: Vec<_> = csv
+        .lines()
+        .skip(2)
+        .map(|row| row.split(',').next().unwrap())
+        .collect();
+    assert_eq!(&times[..3], &["0.000", "0.020", "0.040"]);
     assert!(!e.owns_hardware());
 }
 #[test]

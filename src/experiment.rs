@@ -894,7 +894,7 @@ mod tests {
     }
     #[test]
     fn records_distinguish_fresh_stationary_epos_from_reused_cache_and_keep_ages() {
-        let mut records = [Record::EMPTY; 256];
+        let mut records = [Record::EMPTY; 1024];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         start(&mut e, sinusoidal(), 0, &mut io);
@@ -911,18 +911,18 @@ mod tests {
             t.record(b"STAT", 1344, now);
             e.poll(now, &t, p, &mut io);
         }
-        assert_eq!(e.len, 4);
+        assert_eq!(e.len, 8);
         assert_eq!(e.samples[1].epos_generation, 2);
-        assert_eq!(e.samples[2].epos_generation, 3);
+        assert_eq!(e.samples[2].epos_generation, 2);
         assert_eq!(e.samples[3].epos_generation, 3);
-        assert_eq!(e.samples[1].epos_age_ms, 49);
-        assert_eq!(e.samples[1].pressure_age_ms, 48);
+        assert_eq!(e.samples[1].epos_age_ms, 19);
+        assert_eq!(e.samples[1].pressure_age_ms, 18);
         assert_eq!(
             i64::from(e.samples[1].elapsed_ms) - i64::from(e.samples[1].epos_age_ms),
             1
         );
-        assert_eq!(e.repeated_epos, 1);
-        assert_eq!(e.repeated_pressure, 2);
+        assert_eq!(e.repeated_epos, 5);
+        assert_eq!(e.repeated_pressure, 6);
         assert_eq!(e.epos_arrivals.count, 2);
         assert_eq!(e.pressure_arrivals.count, 1);
         assert_eq!(e.max_epos_age, 99);
@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn feedback_preparation_blocks_motion_and_old_speed_replies() {
-        let mut records = [Record::EMPTY; 256];
+        let mut records = [Record::EMPTY; 1024];
         let mut e = Engine::new(&mut records);
         let mut io = Io {
             preparing: true,
@@ -970,7 +970,7 @@ mod tests {
 
     #[test]
     fn metadata_with_worst_case_timing_counters_fits_fixed_frame() {
-        let mut records = [Record::EMPTY; 256];
+        let mut records = [Record::EMPTY; 1024];
         let mut e = Engine::new(&mut records);
         start(&mut e, sinusoidal(), 0, &mut Io::default());
         e.epos_arrivals = crate::protocol::ArrivalStats {
@@ -1086,7 +1086,7 @@ mod tests {
         assert_eq!(e.run, 0);
         assert_eq!(counts(-117), Ok(-2));
 
-        let mut records = [Record::EMPTY; 256];
+        let mut records = [Record::EMPTY; 1024];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         let (mut t, p) = feedback(0, 0, true);
@@ -1256,7 +1256,7 @@ mod tests {
         e.poll(now, &t, p, &mut io);
         assert_eq!(e.state, State::Running);
         assert_eq!(io.targets.last().unwrap().0, 0);
-        assert_eq!(e.required_samples, 1585);
+        assert_eq!(e.required_samples, 3961);
         let later = now.wrapping_add(60_001);
         let (t, p) = feedback(later, e.target, false);
         e.poll(later, &t, p, &mut io);
@@ -1294,7 +1294,7 @@ mod tests {
     }
     #[test]
     fn quasi_static_records_motion_and_holds_and_uses_confirmed_reach() {
-        let mut records = [Record::EMPTY; 1000];
+        let mut records = [Record::EMPTY; 2048];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         start(
@@ -1325,13 +1325,18 @@ mod tests {
             [0, -10, -20]
         );
         assert_eq!(e.elapsed_ms, 400);
-        assert_eq!(e.len, 9);
+        assert_eq!(e.len, 21);
+        assert!(
+            e.samples[..e.len]
+                .windows(2)
+                .all(|pair| pair[1].elapsed_ms - pair[0].elapsed_ms == 20)
+        );
         assert!(e.samples[..e.len].iter().any(|r| r.stat & (1 << 10) == 0));
         assert!(io.scans.is_empty());
     }
     #[test]
     fn sine_uses_absolute_time_wraps_clock_and_finishes_without_pc() {
-        let mut records = [Record::EMPTY; 256];
+        let mut records = [Record::EMPTY; 1024];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         let begin = u32::MAX - 500;
@@ -1342,7 +1347,7 @@ mod tests {
             e.poll(now, &t, p, &mut io);
         }
         assert_eq!(e.outcome, "completed");
-        assert_eq!(e.len, 21);
+        assert_eq!(e.len, 51);
         assert_eq!(io.targets.len(), 2); // initial and final center only
         for record in &e.samples[..e.len] {
             let elapsed = record.elapsed_ms;
@@ -1352,7 +1357,13 @@ mod tests {
         }
         assert_eq!(io.targets.last().unwrap().0, 0);
         assert!(io.targets.last().unwrap().2);
-        assert_eq!(e.samples[20].elapsed_ms, 1000);
+        assert_eq!(e.samples[50].elapsed_ms, 1000);
+        assert!(
+            e.samples[..e.len]
+                .windows(2)
+                .all(|pair| pair[1].elapsed_ms - pair[0].elapsed_ms == 20)
+        );
+        assert_eq!(e.missed_samples, 0);
         assert_eq!(io.stops, 2); // waveform boundary, then terminal cleanup
         assert_eq!(io.events[..3], ["DPOS=0\n", "SSPD=49\n", "SCAN=1\n"]);
         for i in 0..10000 {
@@ -1401,7 +1412,7 @@ mod tests {
     #[test]
     fn jitter_uses_actual_velocity_and_logs_current_theoretical_position() {
         use xeryon_motion::ScanCommand::*;
-        let mut records = [Record::EMPTY; 256];
+        let mut records = [Record::EMPTY; 1024];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         let config = ExperimentConfig::Sinusoidal {
@@ -1425,10 +1436,17 @@ mod tests {
             assert_eq!(e.state, State::Running);
         }
         assert_eq!(io.targets.len(), 1);
-        assert_eq!(e.samples[1].elapsed_ms, 53);
-        assert_eq!(e.samples[1].target, sine_target(-780, 1_000_000, 1000, 53));
-        assert_eq!(e.samples[1].epos, 12345);
-        assert_eq!(e.max_lateness_ms, 3);
+        assert_eq!(e.len, 3);
+        assert_eq!(e.samples[1].elapsed_ms, 29);
+        assert_eq!(e.samples[2].elapsed_ms, 43);
+        for record in &e.samples[1..e.len] {
+            assert_eq!(
+                record.target,
+                sine_target(-780, 1_000_000, 1000, record.elapsed_ms)
+            );
+            assert_eq!(record.epos, 12345);
+        }
+        assert_eq!(e.max_lateness_ms, 9);
     }
     #[test]
     fn exact_cycles_stop_then_drain_then_return_and_confirm_center() {
@@ -1496,7 +1514,7 @@ mod tests {
     fn reversal_and_return_exits_always_stop_and_keep_partial_data() {
         for exit_phase in [250, 260, 1000, 1001, 1002] {
             for abort in [true, false] {
-                let mut records = [Record::EMPTY; 256];
+                let mut records = [Record::EMPTY; 1024];
                 let mut e = Engine::new(&mut records);
                 let mut io = Io::default();
                 start(&mut e, sinusoidal(), 0, &mut io);
@@ -1537,7 +1555,7 @@ mod tests {
             t.record(b"STAT", (1 << 6) | (1 << 13) | (1 << bit), 0);
             assert!(Engine::healthy(&t, p, 0, false, true).is_err());
         }
-        let mut records = [Record::EMPTY; 256];
+        let mut records = [Record::EMPTY; 1024];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         start(&mut e, sinusoidal(), 0, &mut io);
@@ -1563,7 +1581,7 @@ mod tests {
     #[test]
     fn waveform_send_failure_and_return_timeout_attempt_stop() {
         for failure in ["send", "stop", "return"] {
-            let mut records = [Record::EMPTY; 256];
+            let mut records = [Record::EMPTY; 1024];
             let mut e = Engine::new(&mut records);
             let mut io = Io::default();
             start(&mut e, sinusoidal(), 0, &mut io);
@@ -1594,7 +1612,7 @@ mod tests {
     #[test]
     fn faults_abort_and_deadline_preserve_partial_data() {
         for condition in 0..8 {
-            let mut records = [Record::EMPTY; 256];
+            let mut records = [Record::EMPTY; 1024];
             let mut e = Engine::new(&mut records);
             let mut io = Io::default();
             start(&mut e, sinusoidal(), 0, &mut io);
@@ -1632,7 +1650,8 @@ mod tests {
             };
             e.poll(now, &t, p, &mut io);
             assert!(e.data_ready(), "{condition}");
-            assert_eq!(e.len, 1);
+            // At 40 ms the due record is retained before the trajectory deadline faults.
+            assert_eq!(e.len, if condition == 6 { 2 } else { 1 });
             assert_eq!(io.stops, 1);
             if condition == 1 {
                 assert_eq!(e.reason, "Xeryon encoder error");
@@ -1652,7 +1671,7 @@ mod tests {
     }
     #[test]
     fn transfer_never_releases_on_wrong_or_premature_ack_and_can_restart() {
-        let mut records = [Record::EMPTY; 256];
+        let mut records = [Record::EMPTY; 1024];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         start(&mut e, sinusoidal(), 0, &mut io);
@@ -1703,16 +1722,28 @@ mod tests {
             speed_um_s: 10,
             start_nm: 0,
             step_nm: 78,
-            hold_ms: 194_750,
+            hold_ms: MAX_DURATION_MS - MOVE_TIMEOUT_MS,
             steps: 1,
         };
         start(&mut e, config, 0, &mut io);
         assert_eq!(e.required_samples, CAPACITY);
+        assert_eq!(config.validate(), Ok(81_900));
+        assert!(
+            ExperimentConfig::QuasiStatic {
+                speed_um_s: 10,
+                start_nm: 0,
+                step_nm: 78,
+                hold_ms: MAX_DURATION_MS - MOVE_TIMEOUT_MS + 1,
+                steps: 1,
+            }
+            .validate()
+            .is_err()
+        );
         let (t, p) = feedback(202, 1, true);
         e.poll(202, &t, p, &mut io);
         assert_eq!(e.len, 2);
-        assert_eq!(e.missed_samples, 3);
-        for elapsed in (250..=MAX_DURATION_MS).step_by(50) {
+        assert_eq!(e.missed_samples, 9);
+        for elapsed in (220..=MAX_DURATION_MS).step_by(20) {
             let now = e.started_ms + elapsed;
             let (t, p) = feedback(now, e.target, true);
             e.poll(now, &t, p, &mut io);

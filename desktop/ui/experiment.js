@@ -51,7 +51,7 @@ function tab(next) {
     $('experiment-title').textContent=sine?'Sinusoidal experiment':'Quasi-static experiment';
     for(const [key,label] of Object.entries({start:sine?'Center position (µm)':'Start position (µm)',increment:sine?'Amplitude (µm)':'Signed step (µm)',timing:sine?'Frequency (Hz)':'Hold time (s)',repeats:sine?'Number of cycles':'Number of steps'}))$(`experiment-${key}-label`).textContent=label;
     fields.forEach((k,i)=>{$(`experiment-${k}`).value=configurations[mode][i];});
-    $('experiment-timing').min=sine?'0.1':'0.001';$('experiment-timing').max=sine?'2':'204.75';
+    $('experiment-timing').min=sine?'0.1':'0.001';$('experiment-timing').max=sine?'2':'81.9';
   }
   experimentControls();draw();
   context.viewChanged?.();

@@ -20,7 +20,7 @@ metadata and remains the controller's current speed afterward. Rebuild the app
 and flash matching firmware; older firmware cannot run this mode from the new UI.
 
 Sinusoidal motion uses **100 Hz SSPD/SCAN velocity and direction control** and
-records at 20 Hz. Firmware advertises `sine_velocity: true` and retains the legacy
+records at 50 Hz. Firmware advertises `sine_velocity: true` and retains the legacy
 `sine_position` UI gate. Actual elapsed Teensy time determines waveform phase;
 theoretical position is logged at 0.078 µm resolution. Initial and final center
 positioning use tracked DPOS moves. Speed is changed by the waveform and remains
@@ -158,7 +158,7 @@ The pressure panel shows LPS22HHTR raw counts, a 16-sample average, sample age,
 WHO_AM_I, temperature in °C, errors, and a 60-second signal plot. Pressure counts
 convert to hPa by dividing by 4096. Firmware acquires fresh conversions at the
 sensor's nominal 200 Hz output rate over 400 kHz I²C; the dashboard receives
-10 Hz snapshots and experiments record at 20 Hz. Acquisition continues independently
+10 Hz snapshots and experiments record at 50 Hz. Acquisition continues independently
 of Xeryon enumeration or stream pause. Update firmware and desktop together.
 See the root README for [plunger wiring and behavior](../README.md#wired-plunger)
 and [pressure wiring and acquisition](../README.md#i²c-pressure-input), and

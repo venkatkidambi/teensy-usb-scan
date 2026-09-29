@@ -22,7 +22,7 @@ the Teensy. CSV is generated in desktop Rust only when Save CSV is selected.
   200 Hz sensor output, 1 ms data-ready checks and a five-byte repeated-start
   pressure/temperature burst. Transactions have a 20 ms deadline; missing fresh
   conversions for 100 ms invalidates the sensor. The 16-sample average remains
-  for the dashboard; experiments store the latest raw pressure at 20 Hz.
+  for the dashboard; experiments store the latest raw pressure at 50 Hz.
 - Plunger PWM, quadrature ISR, ADC, calibration and stop behavior remain unchanged.
   START rejects any active manual plunger or Xeryon motion.
 
@@ -75,7 +75,7 @@ positioning completes first, then acquisition begins.
 Step 1 is `start + increment`; there are exactly `steps` increments, each followed
 by a hold. Holds begin only on confirmed arrival. Samples continue through every
 move and hold. Each movement deadline is `max(10000, 2 * ceil(distance_nm /
-speed_um_s) + 1000)` milliseconds, capped at 204.75 s. Steps reserve an extra
+speed_um_s) + 1000)` milliseconds, capped at 81.9 s. Steps reserve an extra
 78 nm for endpoint rounding; the start move uses the actual encoder distance.
 The engine enforces these deadlines instead of the manual motion tracker's
 60 s deadline. TOU3, ELIM, acceleration and travel protections remain unchanged;
@@ -139,7 +139,7 @@ After that grace, closed-loop loss faults normally, and scanning during final
 positioning is rejected. Controller errors, end stops, disconnects, feedback
 freshness, pressure faults, and all deadlines remain checked throughout.
 
-Acquisition continues at 20 Hz through final settling. USB dispatch, mechanical
+Acquisition continues at 50 Hz through final settling. USB dispatch, mechanical
 response at SSPD=0/SCAN=0, reversal timing, peak-speed capability, mode feedback,
 tracking and drift still require physical validation under the intended load.
 
@@ -155,20 +155,20 @@ and remain in effect for Dashboard operation after the run.
 | Quantity | Value |
 | --- | --- |
 | Clock | Existing monotonic Teensy SysTick, 1 ms resolution, wrapping u32 |
-| Acquisition schedule | 50 ms / 20 Hz, latest cached raw values |
+| Acquisition schedule | 20 ms / 50 Hz, latest cached raw values |
 | Pressure acquisition | LPS22HHTR 200 Hz output; 1 ms readiness polling; burst read at 400 kHz |
 | Sinusoidal velocity updates | 10 ms / 100 Hz, 0.100–2.000 Hz wave frequency |
 | Record | 48 bytes, twelve explicit little-endian 32-bit words (dataset v2) |
 | Capacity | 4,096 records |
 | Sample-buffer RAM | 196,608 bytes / 192 KiB, zero-initialized DTCM `.bss` |
-| Maximum acquisition bound | 204,750 ms (204.75 s), including final settling |
-| Maximum sinusoidal waveform duration | 194,750 ms, plus reserved 10 s settling |
-| Initial positioning | Before acquisition: speed-based budget for quasi-static (at most 204.75 s); 10 s for sinusoidal |
+| Maximum acquisition bound | 81,900 ms (81.9 s), including final settling |
+| Maximum sinusoidal waveform duration | 71,900 ms, plus reserved 10 s settling |
+| Initial positioning | Before acquisition: speed-based budget for quasi-static (at most 81.9 s); 10 s for sinusoidal |
 
-Validation reserves `floor(duration_bound_ms / 50) + 1` records including t=0.
+Validation reserves `floor(duration_bound_ms / 20) + 1` records including t=0.
 Quasi-static bound is `steps * (step_move_timeout_ms + hold_ms)`; sinusoidal bound is
 `ceil(cycles * 1_000_000 / frequency_millihz) + 10_000`. Oversized runs are rejected,
-never silently shortened. A 204.75 s bound reserves all 4,096 records.
+never silently shortened. An 81.9 s bound reserves all 4,096 records.
 
 | Offset | Field | Type / interpretation |
 | --- | --- | --- |
@@ -197,7 +197,7 @@ Commanded trajectory and the continuous pressure line use experiment elapsed tim
 Pressure includes every logger sample, including repeated values and identities.
 CSV exposes position receipt time, both identities, and per-signal new flags;
 pressure is recorded against `time_s`, without an I²C completion time column.
-The 20 Hz logger still selects the latest sample; it does not retain every 50 Hz
+The 50 Hz logger still selects the latest sample; it does not guarantee capture of every asynchronous
 EPOS or 200 Hz pressure publication. See [EPOS_TIMING.md](EPOS_TIMING.md) for setup,
 receipt-time limitations, decimation statistics and physical acceptance.
 
