@@ -412,6 +412,12 @@ TU_ATTR_WEAK void tuh_cdc_tx_complete_cb(uint8_t idx) {
   (void) idx;
 }
 
+TU_ATTR_WEAK void tuh_cdc_xfer_error_cb(uint8_t idx, uint8_t ep_addr, xfer_result_t result) {
+  (void) idx;
+  (void) ep_addr;
+  (void) result;
+}
+
 //--------------------------------------------------------------------+
 // APPLICATION API
 //--------------------------------------------------------------------+
@@ -686,12 +692,14 @@ void cdch_close(uint8_t daddr) {
 }
 
 bool cdch_xfer_cb(uint8_t daddr, uint8_t ep_addr, xfer_result_t event, uint32_t xferred_bytes) {
-  // TODO handle stall response, retry failed transfer ...
-  TU_VERIFY(event == XFER_RESULT_SUCCESS);
-
   uint8_t const idx = get_idx_by_ep_addr(daddr, ep_addr);
   cdch_interface_t *p_cdc = get_itf(idx);
   TU_ASSERT(p_cdc);
+
+  if (event != XFER_RESULT_SUCCESS) {
+    tuh_cdc_xfer_error_cb(idx, ep_addr, event);
+    return false;
+  }
 
   if (ep_addr == p_cdc->stream.tx.ep_addr) {
     tuh_cdc_tx_complete_cb(idx); // invoke transmit complete callback

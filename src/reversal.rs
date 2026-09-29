@@ -444,7 +444,7 @@ impl<'a> Diagnostics<'a> {
                 .filter(|_| self.recording)
             {
                 if crossing {
-                    record.events[3 + i] = event;
+                    record.events[if kind == 2 { 4 } else { 3 }] = event;
                 } else if kind == 1 && value > 0 && record.events[5].kind == 0 {
                     record.events[5] = event;
                     record.feedback[2] = self.previous;

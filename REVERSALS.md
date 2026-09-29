@@ -1,7 +1,9 @@
 # Sinusoidal velocity reversal investigation
 
-Historical 100 Hz milestone: the zero/SCAN/resume policy below is retained, but
-[adaptive scheduling](ADAPTIVE_SCHEDULING.md) now controls its event times by default.
+Historical 100 Hz milestone: the zero/SCAN/resume ordering below is retained.
+[Transport-aware adaptive scheduling](ADAPTIVE_SCHEDULING.md) now controls event
+times and waits for each USB completion. Its latest-value coalescing and explicit
+deadlines supersede the busy-at-due fault and next-tick resume described below.
 
 ## Finding and limits of evidence
 

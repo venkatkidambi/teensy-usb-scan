@@ -110,6 +110,7 @@ unsafe extern "C" {
     fn usb_serial_timing(on: bool);
     fn usb_serial_stats(peak: *mut u32, backlog: *mut u32, gap: *mut u32, tx_ms: *mut u32);
     fn usb_serial_tx_idle() -> bool;
+    fn usb_serial_tx_failed() -> bool;
     fn usb_serial_send(data: *const u8, len: u32, stop: bool) -> bool;
     fn scanner_init() -> bool;
     fn scanner_task();
@@ -306,6 +307,10 @@ impl crate::experiment::Actuator for ExperimentActuator {
     fn tx_idle(&self) -> bool {
         // SAFETY: foreground-only transport query.
         unsafe { usb_serial_tx_idle() }
+    }
+    fn tx_failed(&self) -> bool {
+        // SAFETY: foreground-only latched CDC transfer result.
+        unsafe { usb_serial_tx_failed() }
     }
     fn query_motor_timeout(&mut self) -> Result<(), &'static str> {
         // SAFETY: foreground only, bounded copy after speed transfers drain.

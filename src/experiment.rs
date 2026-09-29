@@ -5,6 +5,8 @@ use crate::{experiment_data::*, pressure::Reading, protocol::Telemetry, xeryon_m
 pub mod reversal;
 #[path = "scheduling.rs"]
 pub mod scheduling;
+#[path = "waveform_tx.rs"]
+mod waveform_tx;
 
 const MODE_FEEDBACK_GRACE_MS: u32 = 100;
 const CENTER_TOLERANCE_COUNTS: u64 = 1; // 0.078 um encoder resolution
@@ -38,6 +40,9 @@ pub trait Actuator {
     fn speed(&mut self, speed_um_s: u32) -> Result<(), &'static str>;
     fn query_motor_timeout(&mut self) -> Result<(), &'static str>;
     fn tx_idle(&self) -> bool;
+    fn tx_failed(&self) -> bool {
+        false
+    }
     fn target(&mut self, counts: i32, now: u32, track_completion: bool)
     -> Result<(), &'static str>;
     fn stop(&mut self) -> Result<(), &'static str>;
@@ -82,6 +87,7 @@ pub struct Engine<'a> {
     center_epos_generation: u32,
     center_confirmations: u8,
     scan: xeryon_motion::ScanState,
+    waveform_tx: waveform_tx::Transport,
     pub scheduling: scheduling::Diagnostics,
     pub reversals: reversal::Diagnostics<'a>,
     motion_changed_ms: u32,
@@ -139,6 +145,7 @@ impl<'a> Engine<'a> {
             center_epos_generation: 0,
             center_confirmations: 0,
             scan: xeryon_motion::ScanState::default(),
+            waveform_tx: waveform_tx::Transport::default(),
             scheduling: scheduling::Diagnostics::default(),
             reversals: reversal::Diagnostics::new(&mut []),
             motion_changed_ms: 0,
@@ -283,6 +290,7 @@ impl<'a> Engine<'a> {
         self.center_epos_generation = t.epos_generation;
         self.center_confirmations = 0;
         self.scan = xeryon_motion::ScanState::default();
+        self.waveform_tx = waveform_tx::Transport::default();
         self.fault_stat = None;
         self.feedback_pending = true;
         self.epos_arrivals = Default::default();
@@ -325,6 +333,8 @@ impl<'a> Engine<'a> {
         }
     }
     fn finish(&mut self, state: State, reason: &'static str, io: &mut impl Actuator) {
+        self.waveform_tx
+            .close_busy(self.elapsed_ms, &mut self.scheduling);
         if self.state == State::Running && self.center_move == CenterMove::None {
             if let Some(ExperimentConfig::Sinusoidal {
                 amplitude_nm,
@@ -369,6 +379,14 @@ impl<'a> Engine<'a> {
         if !self.active() {
             return;
         }
+        if io.tx_failed() {
+            if self.state == State::Running {
+                self.elapsed_ms = now.wrapping_sub(self.started_ms);
+            }
+            self.scheduling.usb_faults += 1;
+            self.finish(State::Fault, "Xeryon USB transfer failed", io);
+            return;
+        }
         if self.state == State::Running {
             self.elapsed_ms = now.wrapping_sub(self.started_ms);
             self.scheduling.refresh(io.tx_progress());
@@ -388,8 +406,7 @@ impl<'a> Engine<'a> {
                     frequency_mhz,
                     ..
                 }) = self.config
-                    && (self.elapsed_ms >= self.next_target
-                        || self.elapsed_ms >= self.duration_ms - MOVE_TIMEOUT_MS)
+                    && self.elapsed_ms >= self.duration_ms - MOVE_TIMEOUT_MS
                 {
                     self.scheduling.observe(
                         amplitude_nm,
@@ -685,6 +702,7 @@ impl<'a> Engine<'a> {
                             && self.center_arrived(t))
                     }
                 } else if elapsed >= waveform_ms {
+                    self.waveform_tx.close_busy(elapsed, &mut self.scheduling);
                     if elapsed - waveform_ms >= TRAJECTORY_MS {
                         Err("Trajectory deadline missed")
                     } else {
@@ -696,76 +714,8 @@ impl<'a> Engine<'a> {
                             false
                         })
                     }
-                } else if elapsed >= self.next_target {
-                    self.scheduling.evaluations += 1;
-                    self.scheduling.lateness.add(elapsed - self.next_target);
-                    if elapsed - self.next_target >= TRAJECTORY_MS {
-                        Err("Trajectory deadline missed")
-                    } else {
-                        let scheduled = self.started_ms.wrapping_add(self.next_target);
-                        // Phase comes from the run clock; never integrate or replay missed ticks.
-                        let direction = sine_direction(frequency_mhz, elapsed);
-                        let crossing = self.scan.direction.is_some_and(|last| last != direction);
-                        if crossing {
-                            let phase = u64::from(elapsed) * u64::from(frequency_mhz);
-                            let event = ((phase - 250_000) / 500_000 * 500_000 + 250_000)
-                                .div_ceil(u64::from(frequency_mhz))
-                                as u32;
-                            self.scheduling.reversal_lateness.add(elapsed - event);
-                        }
-                        self.reversals.tick(elapsed, now, t, direction, crossing);
-                        if !io.tx_idle() {
-                            self.scheduling.busy_due += 1;
-                            Err("Xeryon previous transmit incomplete")
-                        } else {
-                            let result = self.scan.update(
-                                sine_velocity(amplitude_nm, frequency_mhz, elapsed),
-                                direction,
-                                |commands| {
-                                    self.scheduling.attempted += commands.len() as u32;
-                                    let before = io.tx_progress().0[0];
-                                    let result = io.scan(commands);
-                                    let progress = io.tx_progress();
-                                    let accepted = if result.is_ok() {
-                                        commands.len()
-                                    } else {
-                                        progress.0[0]
-                                            .wrapping_sub(before)
-                                            .min(commands.len() as u32)
-                                            as usize
-                                    };
-                                    self.scheduling.sent(
-                                        &commands[..accepted],
-                                        progress,
-                                        scheduled,
-                                        now,
-                                        elapsed,
-                                        direction,
-                                    );
-                                    self.reversals.sent(
-                                        &commands[..accepted],
-                                        progress,
-                                        self.started_ms,
-                                        elapsed,
-                                        crossing,
-                                    );
-                                    result
-                                },
-                            );
-                            self.next_target = scheduling::next(
-                                self.scheduling.mode,
-                                amplitude_nm,
-                                frequency_mhz,
-                                elapsed,
-                                self.scheduling.held.unwrap_or(0.0),
-                            );
-                            // Direction flips stay in scanning mode; only initial SCAN
-                            // entry and final DPOS need the mode feedback grace.
-                            result.map(|_| false)
-                        }
-                    }
                 } else {
-                    Ok(false)
+                    self.poll_waveform(now, t, amplitude_nm, frequency_mhz, io)
                 }
             }
         };
@@ -997,8 +947,27 @@ mod tests {
         scans: Vec<xeryon_motion::ScanCommand>,
         events: Vec<String>,
         preparing: bool,
+        usb_failed: bool,
+        tracked: bool,
+        clock: u32,
+        progress: [u32; 6],
+    }
+    impl Io {
+        fn complete_one(&mut self, now: u32) {
+            assert!(self.progress[0] > self.progress[1]);
+            self.progress[1] += 1;
+            self.progress[4] = self.progress[5];
+            self.progress[5] = now;
+            self.busy = self.progress[0] != self.progress[1];
+        }
     }
     impl Actuator for Io {
+        fn tx_progress(&self) -> reversal::TxProgress {
+            reversal::TxProgress(self.progress)
+        }
+        fn tx_failed(&self) -> bool {
+            self.usb_failed
+        }
         fn prepare_feedback(&mut self, _now: u32) -> Result<bool, &'static str> {
             Ok(!self.preparing)
         }
@@ -1008,6 +977,12 @@ mod tests {
             }
             self.scans.extend_from_slice(commands);
             for command in commands {
+                if self.tracked {
+                    self.progress[0] += 1;
+                    self.progress[2] = self.progress[3];
+                    self.progress[3] = self.clock;
+                    self.busy = true;
+                }
                 let mut line = String::new();
                 command.write(&mut line).unwrap();
                 self.events.push(line);
@@ -1218,6 +1193,14 @@ mod tests {
         e.scheduling.over_budget = u32::MAX;
         e.scheduling.busy_due = u32::MAX;
         e.scheduling.queue_peak = u32::MAX;
+        e.scheduling.sspd_requested = u32::MAX;
+        e.scheduling.max_coalesced = u32::MAX;
+        e.scheduling.backpressure_faults = u32::MAX;
+        e.scheduling.usb_faults = u32::MAX;
+        e.scheduling.busy_duration.add(u32::MAX);
+        e.scheduling.reversal_zero.add(u32::MAX);
+        e.scheduling.reversal_direction.add(u32::MAX);
+        e.scheduling.reversal_resume.add(u32::MAX);
         e.scheduling.max_error = f64::from(MAX_SPEED_UM_S) * 2.0;
         e.scheduling.lateness.add(u32::MAX);
         e.scheduling.reversal_lateness.add(u32::MAX);
@@ -1726,6 +1709,12 @@ mod tests {
                 e.poll(now, &t, p, &mut io);
                 assert_eq!(e.state, State::Running);
             }
+            // Zero is accepted at the crossing; direction waits for the next
+            // idle observation, even with this instantly-completing test IO.
+            assert_eq!(io.scans.last(), Some(&xeryon_motion::ScanCommand::Speed(0)));
+            let now = e.started_ms.wrapping_add(194);
+            let (t, p) = feedback(now, -123, true);
+            e.poll(now, &t, p, &mut io);
             assert_eq!(
                 &io.scans[io.scans.len() - 2..],
                 &[
@@ -1742,6 +1731,314 @@ mod tests {
             e.abort(&mut io);
             assert_eq!(io.events.last().unwrap(), "STOP\n");
         }
+    }
+
+    fn waveform_poll(e: &mut Engine<'_>, io: &mut Io, elapsed: u32) {
+        let now = e.started_ms.wrapping_add(elapsed);
+        io.clock = now;
+        let (t, p) = feedback(now, 123, true);
+        e.poll(now, &t, p, io);
+    }
+
+    #[test]
+    fn busy_updates_coalesce_and_send_current_time_without_phase_drift_or_fifo() {
+        use xeryon_motion::ScanCommand::Speed;
+        for begin in [0, u32::MAX - 105] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut e = Engine::new(&mut records);
+            e.scheduling.mode = scheduling::Mode::Adaptive;
+            let mut io = Io::default();
+            start(
+                &mut e,
+                ExperimentConfig::Sinusoidal {
+                    center_nm: 0,
+                    amplitude_nm: 1_000_000,
+                    frequency_mhz: 2000,
+                    cycles: 2,
+                },
+                begin,
+                &mut io,
+            );
+            for elapsed in 1..100 {
+                waveform_poll(&mut e, &mut io, elapsed);
+            }
+            e.next_target = 100;
+            let before = io.scans.len();
+            io.busy = true;
+            for elapsed in 100..109 {
+                waveform_poll(&mut e, &mut io, elapsed);
+                assert_eq!(e.state, State::Running);
+                assert_eq!(io.scans.len(), before); // no transport FIFO submissions
+            }
+            assert!(e.scheduling.busy_due >= 2);
+            assert!(e.scheduling.max_coalesced >= 2);
+            io.busy = false;
+            waveform_poll(&mut e, &mut io, 109); // not a historical evaluation time
+            assert_eq!(io.scans.len(), before + 1);
+            assert_eq!(
+                io.scans.last(),
+                Some(&Speed(velocity_speed(sine_velocity(1_000_000, 2000, 109))))
+            );
+            assert_ne!(
+                io.scans.last(),
+                Some(&Speed(velocity_speed(sine_velocity(1_000_000, 2000, 108))))
+            );
+            waveform_poll(&mut e, &mut io, 110);
+            assert_eq!(io.scans.len(), before + 1); // no replay of 100/104/108
+            for elapsed in 111..=125 {
+                waveform_poll(&mut e, &mut io, elapsed);
+            }
+            assert_eq!(io.scans.last(), Some(&Speed(0))); // original absolute crossing
+            assert_eq!(e.scheduling.reversal_lateness.count, 1);
+            assert_eq!(e.started_ms, begin.wrapping_add(2));
+            assert_eq!(io.targets.len(), 1); // waveform never uses DPOS
+            assert_eq!(e.missed_samples, 0);
+        }
+    }
+
+    #[test]
+    fn sustained_slow_usb_bounds_queue_and_preserves_feedback_and_completion_metrics() {
+        let mut records = [Record::EMPTY; 1024];
+        let mut turns = [reversal::Reversal::EMPTY; 4];
+        let mut e = Engine::new(&mut records).with_reversals(&mut turns);
+        let mut io = Io::default();
+        start(
+            &mut e,
+            ExperimentConfig::Sinusoidal {
+                center_nm: 0,
+                amplitude_nm: 1_000_000,
+                frequency_mhz: 2000,
+                cycles: 2,
+            },
+            u32::MAX - 105,
+            &mut io,
+        );
+        io.tracked = true;
+        let (mut t, mut p) = feedback(e.started_ms, 0, true);
+        t.timing_active = true;
+        for elapsed in 1..1000 {
+            let now = e.started_ms.wrapping_add(elapsed);
+            io.clock = now;
+            if io.busy && now.wrapping_sub(io.progress[3]) >= 9 {
+                io.complete_one(now);
+            }
+            if elapsed % 20 == 0 {
+                t.record(b"EPOS", i64::from(elapsed), now);
+                t.record(b"STAT", (1 << 6) | (1 << 13), now);
+            }
+            p.ms = now;
+            e.poll(now, &t, p, &mut io);
+            assert_eq!(e.state, State::Running, "{} at {elapsed}", e.reason);
+            assert!(io.progress[0] - io.progress[1] <= 1);
+        }
+        assert!(e.scheduling.busy_due > 20);
+        assert_eq!(e.scheduling.backpressure_faults, 0);
+        assert_eq!(e.scheduling.usb_faults, 0);
+        assert_eq!(e.scheduling.queue_peak, 1);
+        assert_eq!(e.scheduling.reversal_resume.count, 4);
+        assert_eq!(e.missed_samples, 0);
+        assert_eq!(e.epos_arrivals.count, 49);
+        assert_eq!(e.max_epos_age, 19);
+        let mut meta = String::new();
+        e.metadata(&mut meta, 1).unwrap();
+        assert!(
+            meta.contains("\"min\":9,\"mean\":9.000,\"max\":9"),
+            "{meta}"
+        );
+        // All four independent direction and resume packets complete in order.
+        for turn in &e.reversals.records[..4] {
+            let mut text = String::new();
+            turn.write(&mut text).unwrap();
+            assert!(!text.contains("null"), "{text}");
+        }
+    }
+
+    #[test]
+    fn reversal_waits_for_each_completion_and_resumes_actual_time() {
+        use xeryon_motion::ScanCommand::*;
+        let mut records = [Record::EMPTY; 1024];
+        let mut turns = [reversal::Reversal::EMPTY; 4];
+        let mut e = Engine::new(&mut records).with_reversals(&mut turns);
+        let mut io = Io::default();
+        start(&mut e, sinusoidal(), 0, &mut io);
+        for elapsed in 1..250 {
+            waveform_poll(&mut e, &mut io, elapsed);
+        }
+        let before = io.scans.len();
+        io.busy = true; // ordinary command still completing at the crossing
+        for elapsed in 250..255 {
+            waveform_poll(&mut e, &mut io, elapsed);
+        }
+        assert_eq!(io.scans.len(), before);
+        io.busy = false;
+        waveform_poll(&mut e, &mut io, 255);
+        assert_eq!(&io.scans[before..], &[Speed(0)]);
+        io.busy = true;
+        for elapsed in 256..263 {
+            waveform_poll(&mut e, &mut io, elapsed);
+        }
+        assert_eq!(&io.scans[before..], &[Speed(0)]); // zero cannot disappear
+        io.busy = false;
+        waveform_poll(&mut e, &mut io, 263);
+        assert_eq!(&io.scans[before..], &[Speed(0), Direction(-1)]);
+        io.busy = true;
+        for elapsed in 264..271 {
+            waveform_poll(&mut e, &mut io, elapsed);
+        }
+        assert_eq!(&io.scans[before..], &[Speed(0), Direction(-1)]);
+        io.busy = false;
+        waveform_poll(&mut e, &mut io, 271);
+        assert_eq!(
+            &io.scans[before..],
+            &[
+                Speed(0),
+                Direction(-1),
+                Speed(velocity_speed(sine_velocity(7800, 1000, 271)))
+            ]
+        );
+        waveform_poll(&mut e, &mut io, 272);
+        assert_eq!(e.reversals.total, 1);
+        assert_eq!(e.scheduling.reversal_zero.count, 1);
+        assert_eq!(e.scheduling.reversal_direction.count, 1);
+        assert_eq!(e.scheduling.reversal_resume.count, 1);
+        let mut text = String::new();
+        e.reversals.records[0].write(&mut text).unwrap();
+        assert!(
+            text.contains("[1,0,255,null],[2,-1,263,null],[1,6,271,null]"),
+            "{text}"
+        );
+        assert_eq!(e.state, State::Running);
+    }
+
+    #[test]
+    fn ordinary_and_reversal_backpressure_have_independent_safe_deadlines() {
+        for reversal in [false, true] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            start(&mut e, sinusoidal(), u32::MAX - 270, &mut io);
+            let start_busy = if reversal { 250 } else { 50 };
+            for elapsed in 1..start_busy {
+                waveform_poll(&mut e, &mut io, elapsed);
+            }
+            let mut fault_at = 0;
+            for elapsed in start_busy..=start_busy + 40 {
+                // Let zero complete partway through. Per-transfer busy durations
+                // stay under 40 ms; the whole reversal must still hit its bound.
+                io.busy = !(reversal && (elapsed == 250 || elapsed == 270));
+                waveform_poll(&mut e, &mut io, elapsed);
+                if e.data_ready() {
+                    fault_at = elapsed;
+                    break;
+                }
+            }
+            assert_ne!(fault_at, 0);
+            if reversal {
+                assert_eq!(fault_at, 290);
+                assert_eq!(e.reason, "Xeryon reversal backpressure deadline");
+            } else {
+                assert_eq!(e.reason, "Xeryon excessive transmit backpressure");
+            }
+            assert_eq!(e.scheduling.backpressure_faults, 1);
+            assert_eq!(io.events.last().unwrap(), "STOP\n");
+            assert!(e.stop_queued && e.len > 1);
+        }
+    }
+
+    #[test]
+    fn busy_deadline_uses_actual_completion_and_faults_at_exact_bound() {
+        for delay in [39, 40] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            start(
+                &mut e,
+                ExperimentConfig::Sinusoidal {
+                    center_nm: 0,
+                    amplitude_nm: 1_000_000,
+                    frequency_mhz: 1000,
+                    cycles: 1,
+                },
+                u32::MAX - 70,
+                &mut io,
+            );
+            for elapsed in 1..50 {
+                waveform_poll(&mut e, &mut io, elapsed);
+            }
+            // Real command progress (not FIFO space) establishes completion.
+            io.tracked = true;
+            e.next_target = 50;
+            waveform_poll(&mut e, &mut io, 50);
+            assert!(io.busy);
+            for elapsed in 51..50 + delay {
+                waveform_poll(&mut e, &mut io, elapsed);
+            }
+            io.complete_one(e.started_ms.wrapping_add(50 + delay));
+            waveform_poll(&mut e, &mut io, 50 + delay);
+            if delay == 39 {
+                assert_eq!(e.state, State::Running);
+                assert_eq!(e.scheduling.backpressure_faults, 0);
+            } else {
+                assert_eq!(e.reason, "Xeryon excessive transmit backpressure");
+                assert_eq!(io.stops, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn abort_and_real_usb_failure_override_every_reversal_stage_and_ordinary_tx() {
+        for phase in [100, 250, 251, 252] {
+            for abort in [false, true] {
+                let mut records = [Record::EMPTY; 1024];
+                let mut e = Engine::new(&mut records);
+                let mut io = Io::default();
+                start(&mut e, sinusoidal(), 0, &mut io);
+                for elapsed in 1..=phase {
+                    waveform_poll(&mut e, &mut io, elapsed);
+                }
+                io.busy = true;
+                let sent = io.scans.len();
+                if abort {
+                    e.abort(&mut io);
+                } else {
+                    io.usb_failed = true;
+                    waveform_poll(&mut e, &mut io, phase + 1);
+                    assert_eq!(e.reason, "Xeryon USB transfer failed");
+                    assert_eq!(e.scheduling.usb_faults, 1);
+                }
+                assert!(e.data_ready() && e.stop_queued);
+                assert_eq!(io.events.last().unwrap(), "STOP\n");
+                io.busy = false;
+                waveform_poll(&mut e, &mut io, phase + 2);
+                assert_eq!(io.scans.len(), sent);
+                assert_eq!(io.stops, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn waveform_completion_preempts_pending_velocity_with_stop() {
+        let mut records = [Record::EMPTY; 1024];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        start(&mut e, sinusoidal(), 0, &mut io);
+        for elapsed in 1..990 {
+            waveform_poll(&mut e, &mut io, elapsed);
+        }
+        io.busy = true;
+        let sent = io.scans.len();
+        for elapsed in 990..=1000 {
+            waveform_poll(&mut e, &mut io, elapsed);
+        }
+        assert_eq!(e.center_move, CenterMove::Stopping);
+        assert_eq!(io.scans.len(), sent);
+        assert_eq!(io.events.last().unwrap(), "STOP\n");
+        assert_eq!(io.stops, 1);
+        for elapsed in 1001..1010 {
+            waveform_poll(&mut e, &mut io, elapsed);
+        }
+        assert_eq!(io.targets.len(), 1); // return DPOS cannot overtake STOP
+        assert_eq!(io.scans.len(), sent);
     }
 
     #[test]
@@ -2025,7 +2322,7 @@ mod tests {
                     12
                 }
                 5 => {
-                    io.busy = true;
+                    io.usb_failed = true;
                     12
                 }
                 6 => 42,

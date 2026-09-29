@@ -231,5 +231,22 @@ int main(void) {
   complete_tx();
   usb_serial_progress(progress);
   assert(progress[0] == 3 && progress[1] == 3 && progress[5] == 1);
+  // Real transfer errors are latched separately from ordinary backpressure.
+  assert(!usb_serial_tx_failed());
+  tuh_cdc_xfer_error_cb(1, 1, XFER_RESULT_FAILED);
+  assert(!usb_serial_tx_failed());
+  assert(usb_serial_send(speed, sizeof(speed)-1, false));
+  tuh_cdc_xfer_error_cb(0, 1, XFER_RESULT_STALLED);
+  assert(usb_serial_tx_failed() && !usb_serial_tx_idle());
+  assert(!usb_serial_send(speed, sizeof(speed)-1, false));
+  assert(usb_serial_send((const uint8_t *)"STOP\n", 5, true));
+  assert(strcmp(transmitted, "STOP\n") == 0);
+  // Success later cannot erase a real failure or authorize resumed motion.
+  complete_tx();
+  complete_tx();
+  assert(usb_serial_tx_failed() && !usb_serial_tx_idle());
+  tuh_cdc_umount_cb(0);
+  tuh_cdc_mount_cb(0);
+  assert(!usb_serial_tx_failed());
   puts("USB serial transport tests passed");
 }

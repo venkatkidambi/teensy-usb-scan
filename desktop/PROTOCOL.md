@@ -148,8 +148,11 @@ HELLO adds `sine_velocity: true` and retains `sine_position: true` as the legacy
 gate for desired sinusoidal position. START S keeps the same parameters; velocity
 is `2π f A cos(2π f t)` using actual elapsed Teensy time. Changed integer SSPD
 magnitudes use bounded adaptive 4–10 ms updates by default; theoretical sign
-crossings are mandatory events. Reversals send SSPD=0 then SCAN=new sign, with
-current theoretical speed on the next scheduled update. No waveform DPOS or feedback drift correction is used.
+crossings are mandatory events. Ordinary busy updates coalesce and recompute
+velocity at actual send time. Reversals wait for each USB completion: SSPD=0,
+then SCAN=new sign, then current theoretical speed. Waveform TX and the full
+reversal each have a 40 ms fault/STOP bound. No waveform DPOS or feedback drift
+correction is used.
 Initial and final center positioning use finite DPOS moves. Final arrival accepts
 the tracked Position Reached confirmation or two fresh encoder publications within
 one count of center, with fresh closed-loop/non-scanning/non-indexing status after
@@ -202,6 +205,9 @@ partial-run behavior and the hardware comparison procedure.
 interval/tolerance configuration, attempted/accepted waveform command counts,
 SSPD rate and interval statistics, scheduling/reversal lateness, scheduled-to-queue
 and USB completion latency statistics, held-command error, and TX queue statistics.
+It also reports requested/coalesced updates, maximum consecutive coalescing,
+busy-duration statistics, zero/direction/resume completion latency from the
+theoretical crossing, and separate backpressure versus USB transfer fault counts.
 See [ADAPTIVE_SCHEDULING.md](../ADAPTIVE_SCHEDULING.md) for field definitions and
 measurement limitations. Groups with no timing observations are null; missing
 completions remain explicitly counted. These diagnostics are returned only after

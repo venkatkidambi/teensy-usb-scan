@@ -5,6 +5,7 @@
 
 void usb_serial_task(void);
 bool usb_serial_tx_idle(void);
+bool usb_serial_tx_failed(void);
 bool usb_serial_send(const uint8_t *data, uint32_t len, bool stop);
 bool usb_serial_rx_pending(void);
 void usb_serial_timing(bool on);

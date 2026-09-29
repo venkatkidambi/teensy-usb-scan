@@ -109,16 +109,17 @@ half-cycle, only changed SSPD values are transmitted. The outgoing direction is
 computed from integer phase: negative in [1/4, 3/4), positive otherwise. Thus
 rounding the magnitude to zero does not decide when to reverse.
 
-At the first representable millisecond of either extremum, send `SSPD=0`, then
-`SCAN=<new sign>` in separate ordered USB transfers. Hold zero for that update;
-the next scheduled tick sends the newly calculated speed, if it changed. There
-is no `SCAN=0` or STOP during waveform reversals. A quantized zero before the
-crossing retains direction; one explicit zero at the crossing is intentional.
-No subsequent identical zero or SCAN command is repeated. This cached two-stage
-policy runs in the existing scheduler, with no sleep, extra tick or phase pause.
-An unfinished preceding command at a scheduler tick still faults and stops.
-See [REVERSALS.md](REVERSALS.md) for the old sequence, evidence, diagnostic format
-and hardware acceptance procedure.
+At the first representable millisecond of either extremum, begin a mandatory
+`SSPD=0` → USB completion → `SCAN=<new sign>` → USB completion → current-time SSPD
+sequence. Each stage waits nonblockingly; the total reversal must finish within
+40 ms of the theoretical crossing. There is no `SCAN=0` or STOP during normal
+waveform reversals. A rounded-zero resume remains a mandatory ordered command.
+Ordinary updates coalesce while TX is busy and recompute velocity at actual send
+time. No historical waveform FIFO or phase pause is introduced. An unfinished
+waveform transfer lasting 40 ms, a reversal deadline, or a real transfer failure
+still faults and requests priority STOP. See
+[ADAPTIVE_SCHEDULING.md](ADAPTIVE_SCHEDULING.md) for admission rules, diagnostics
+and the hardware repeat procedure; [REVERSALS.md](REVERSALS.md) records the history.
 
 Before any motion, the peak must be finite, positive, no greater than the existing
 24-bit `MAX_SPEED_UM_S` (16,777,215 µm/s), and round to a positive representable

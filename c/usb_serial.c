@@ -11,6 +11,7 @@ enum { ATTACHED, OPENED, REMOVED, CONTROL_FAILED, CONTROL_TIMEOUT };
 static uint8_t state, cdc_index, address, interface;
 static bool busy;
 static bool tx_pending;
+static bool transfer_failed;
 static uint32_t started;
 static uintptr_t generation;
 static bool timing;
@@ -46,8 +47,16 @@ static void observe_tx(uint32_t now) {
 // FIFO space alone does not establish completion: flush removes bytes from the
 // FIFO before the USB transfer finishes. Experiments require both to be idle.
 bool usb_serial_tx_idle(void) {
-  return state == READY && !tx_pending &&
+  return state == READY && !transfer_failed && !tx_pending &&
          tuh_cdc_write_available(cdc_index) == CFG_TUH_CDC_TX_BUFSIZE;
+}
+
+bool usb_serial_tx_failed(void) { return transfer_failed; }
+
+void tuh_cdc_xfer_error_cb(uint8_t idx, uint8_t ep_addr, xfer_result_t result) {
+  (void)ep_addr;
+  (void)result;
+  if (state == READY && idx == cdc_index) transfer_failed = true;
 }
 
 void tuh_cdc_tx_complete_cb(uint8_t idx) {
@@ -68,12 +77,16 @@ void tuh_cdc_tx_complete_cb(uint8_t idx) {
 // Stop discards queued bytes; an already submitted USB packet cannot be recalled.
 bool usb_serial_send(const uint8_t *data, uint32_t len, bool stop) {
   if (state != READY || !data || !len || len > 32) return false;
+  // Latch real failures until reconnect. STOP remains eligible for best-effort
+  // transmission; clearing a software flag cannot repair a failed USB endpoint.
+  if (transfer_failed && !stop) return false;
   if (stop) tuh_cdc_write_clear(cdc_index);
   if (tuh_cdc_write_available(cdc_index) < len) return false;
   if (!tx_pending) tx_started = tusb_time_millis_api();
   tx_pending = true;
   if (tuh_cdc_write(cdc_index, data, len) != len) {
     tuh_cdc_write_clear(cdc_index);
+    transfer_failed = true;
     return false;
   }
   if (timing) {
@@ -95,6 +108,7 @@ void tuh_cdc_mount_cb(uint8_t idx) {
   state = WAIT_ENUM;
   busy = false;
   tx_pending = false;
+  transfer_failed = false;
   started = tusb_time_millis_api();
   scanner_serial_event(ATTACHED, address, interface);
 }

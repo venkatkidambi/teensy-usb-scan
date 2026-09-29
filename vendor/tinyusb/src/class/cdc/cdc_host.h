@@ -249,6 +249,8 @@ extern void tuh_cdc_rx_cb(uint8_t idx);
 
 // Invoked when a TX is complete and therefore space becomes available in TX buffer
 extern void tuh_cdc_tx_complete_cb(uint8_t idx);
+// Local extension: surface failed CDC transfers without claiming completion.
+extern void tuh_cdc_xfer_error_cb(uint8_t idx, uint8_t ep_addr, xfer_result_t result);
 
 //--------------------------------------------------------------------+
 // Internal Class Driver API

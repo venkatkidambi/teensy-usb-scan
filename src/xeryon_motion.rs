@@ -21,15 +21,24 @@ impl ScanCommand {
     }
 }
 
-/// Per-run cache and nonblocking reversal state. A phase-direction change sends
-/// zero then the new SCAN sign in ordered transfers. That tick stays at zero;
-/// the next scheduled update uses the current waveform velocity, never paused time.
+/// Per-run accepted-command cache. Completion-gated sequencing lives in
+/// experiment::waveform_tx; this cache never represents physical feedback.
 #[derive(Default)]
 pub struct ScanState {
     speed: Option<u32>,
     pub direction: Option<i8>,
 }
 impl ScanState {
+    pub fn needs_speed(&self, velocity: f64) -> bool {
+        self.speed != Some(crate::experiment_data::velocity_speed(velocity))
+    }
+    /// Commit only after the caller has accepted this mandatory reversal line.
+    pub fn commit(&mut self, command: ScanCommand) {
+        match command {
+            ScanCommand::Speed(speed) => self.speed = Some(speed),
+            ScanCommand::Direction(direction) => self.direction = Some(direction),
+        }
+    }
     pub fn stopped(&mut self) {
         self.direction = Some(0);
     }
@@ -44,6 +53,8 @@ impl ScanState {
         }
         Ok(())
     }
+    /// Ideal zero-transport-delay model used by mathematical scheduler tests.
+    #[cfg(test)]
     pub fn update(
         &mut self,
         velocity: f64,

@@ -211,6 +211,18 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     assert_eq!(dataset.metadata["reversals"][0]["commands"][4][1], -1);
     assert!(dataset.csv().contains("reversals"));
     assert_eq!(dataset.metadata["scheduler"]["mode"], "adaptive");
+    assert_eq!(dataset.metadata["scheduler"]["tx_busy_limit_ms"], 40);
+    assert_eq!(dataset.metadata["scheduler"]["reversal_limit_ms"], 40);
+    assert_eq!(dataset.metadata["scheduler"]["backpressure_faults"], 0);
+    assert_eq!(dataset.metadata["scheduler"]["usb_transfer_faults"], 0);
+    assert!(
+        dataset.metadata["scheduler"]["sspd_requested"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(dataset.csv().contains("max_consecutive_coalesced"));
+    assert!(dataset.csv().contains("reversal_resume_complete_ms"));
     assert!(dataset.metadata["scheduler"]["sspd_sent"].as_u64().unwrap() > 0);
     assert!(
         dataset.metadata["scheduler"]["held_error_um_s"]

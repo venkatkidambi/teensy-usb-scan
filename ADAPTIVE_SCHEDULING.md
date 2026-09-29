@@ -1,230 +1,192 @@
-# Adaptive sinusoidal command scheduling
+# Transport-aware adaptive sinusoidal scheduling
 
-The default firmware uses adaptive feed-forward SSPD/SCAN updates. Position and
-velocity still come from actual elapsed monotonic Teensy milliseconds. There is
-no waveform DPOS, EPOS feedback correction, drift correction, latency advance,
-or plot-time shift. Initial/final finite positioning and all STOP paths remain.
+The default remains adaptive feed-forward SSPD/SCAN control. Position and velocity
+use actual elapsed Teensy monotonic milliseconds, including across clock wrap.
+There is no waveform DPOS, EPOS feedback control, drift correction, phase advance,
+or plot-time shift. Initial/final finite positioning remains unchanged.
 
-The request's phase interpretation was reversed: for
-`v = 2πfA cos(2πft)`, `dv/dt = -(2πf)^2 A sin(2πft)` has largest magnitude at
-**position extrema**, not position center crossings. Consequently the general
-error criterion increases density near position extrema and reduces it near
-position centers. Reducing velocity-update density at position extrema would
-contradict the requested error objective.
+## Root cause and correction
 
-## Algorithm and bounds
+Previously, every due waveform evaluation checked `tx_idle()` and immediately
+faulted with `Xeryon previous transmit incomplete` when false, even before speed
+deduplication. FIFO space was correctly insufficient to prove USB completion:
+TinyUSB removes bytes from its FIFO when submitting a packet. Adaptive evaluations
+could arrive every 4 ms while that packet remained in flight. Healthy EPOS and
+logging did not imply that the independent outgoing transfer had completed.
 
-`src/scheduling.rs` defines:
+`src/scheduling.rs` still chooses useful evaluation deadlines; `src/waveform_tx.rs`
+now controls transport admission. Ordinary busy evaluations update a single
+pending deadline for diagnostics and continue running. No velocity values or
+historical commands are buffered. On the first idle foreground poll, the engine
+recalculates `v(now) = 2πfA cos(2πft)` and sends the newest changed rounded SSPD.
+Repeated evaluations coalesce. If the latest speed equals the accepted speed,
+the pending ordinary update can disappear without any transmission.
 
-| Configuration | Default |
+For example, evaluations at 100, 104 and 108 ms with TX becoming idle at 109 ms
+produce one command calculated at 109 ms. The next sign crossing still uses the
+original run clock. Coalescing cannot accumulate software phase drift, although
+transport and mechanical delay can still affect physical motion.
+
+## Bounds and reversals
+
+| Setting | Bound |
 | --- | --- |
-| `MIN_CONTROL_INTERVAL` | 4 ms for ordinary evaluations |
-| `MAX_CONTROL_INTERVAL` | 10 ms between planned evaluations |
-| `MAX_VELOCITY_ERROR` | 0.07 of peak velocity |
-| Effective per-run velocity tolerance | `max(1, 0.07 * 2πfA + 0.5)` µm/s |
+| Ordinary adaptive evaluation interval | 4–10 ms |
+| Velocity error target | max(1, 0.07 × peak velocity + 0.5) µm/s |
+| Scheduler lateness fault, unchanged | >= 10 ms |
+| Unfinished waveform TX deadline | >= 40 ms from acceptance |
+| Complete reversal deadline | >= 40 ms from first representable theoretical crossing |
 
-The 0.5 µm/s allowance accounts for integer SSPD rounding; the 1 µm/s floor
-avoids chasing sub-command-unit error in very small motions. Metadata reports
-the effective absolute tolerance, rather than requiring the reader to infer it.
+Lookahead tests the continuous held-command error, including intervening cosine
+extrema, over candidate intervals 4–10 ms. The next theoretical sign crossing
+caps the chosen interval and can shorten it below 4 ms. Ordinary deadlines advance
+even while TX is busy; held-command error continues to be measured. The error
+budget is a planning objective, not a guaranteed bound during backpressure.
+The minimum interval was not lowered and fixed scheduling was not made default.
 
-At each due event:
+Normal backpressure has no reported transfer failure and remains below both
+applicable 40 ms bounds. At a bound the run faults and requests priority STOP.
+An observed successful completion at or beyond the TX deadline still faults.
+Before a first engine-owned send, any inherited busy condition is timed from its
+first observation. These are explicit engineering limits requiring validation
+with the actual actuator/load; they do not establish a physical tracking bound.
 
-1. Calculate current velocity from **actual** elapsed time, without integrating
-   phase or replaying missed updates. Derive direction from integer trajectory
-   phase, independently of rounded speed.
-2. Preserve the existing command cache. Send changed rounded SSPD only; at a
-   sign crossing always send `SSPD=0`, then `SCAN=new sign` in ordered transfers.
-   Never send SCAN=0 at a crossing. Resume current theoretical speed on the next
-   scheduled evaluation, subject to normal integer deduplication.
-3. Using the resulting held, signed integer SSPD, test candidate hold lengths
-   4 through 10 ms and choose the longest whose maximum theoretical error stays
-   within tolerance. Error includes both interval endpoints **and every possible
-   intervening velocity extremum**; endpoints alone can miss a cosine maximum.
-   Only two alternating extrema need examination even across a long missed poll.
-   This is a bounded search, not a derivative division near zero acceleration.
-4. Cap the next deadline at `ceil(next theoretical sign-crossing time)`. A
-   crossing overrides the error threshold and may shorten an interval below
-   4 ms, down to 1 ms. Following zero, compute the next deadline from held zero.
-   Crossing times are absolute trajectory events, never accumulated periods.
-5. Maximum-time evaluations still suppress identical SSPD. Thus a constant
-   quantized speed can remain commanded longer than 10 ms without redundant
-   heartbeat traffic. The maximum bound applies to evaluation, not mandatory
-   retransmission of an unchanged command.
+Reversal phases are deterministic and nonblocking:
 
-For the supported 0.1–2 Hz range, an ordinary 4 ms hold changes ideal velocity by
-at most about 5.03% of peak. After a fractional-ms reversal, the maximum 1 ms
-crossing quantization plus a 4 ms zero hold is below 6.29% of peak. The 7% budget
-therefore accommodates both, including rounding. Tighter tuning must revisit
-this relationship. The minimum interval takes precedence if a changed tolerance
-cannot be met, and observed excess error is reported.
+1. `Normal` detects the absolute sign crossing and enters `NeedZero`.
+2. `NeedZero` waits for the preceding command, then submits mandatory `SSPD=0`,
+   even when integer rounding already selected zero.
+3. `AwaitZero` waits for USB completion before submitting `SCAN=new direction`.
+4. `AwaitDirection` waits for that completion, then recomputes and submits SSPD
+   from the current waveform time, including a rounded zero if applicable.
+5. `AwaitResume` waits for resume completion and returns to `Normal`.
 
-An on-time schedule bounds the **software held-command approximation**. It does
-not bound actual motor speed, USB/controller execution delay, or foreground
-jitter. A late poll uses the current waveform and records actual interval error;
-it can exceed the target. Existing lateness of 10 ms or more faults and requests
-STOP. An unfinished prior USB transfer at a due event also faults and requests
-STOP, including at a priority crossing; reversal is never silently postponed.
-The exact cycle-end deadline still overrides the adaptive schedule.
+The total deadline includes waiting for prior ordinary traffic and all three
+reversal packets. Intermediate progress does not restart it. Several transfers
+each shorter than 40 ms can therefore still fault the reversal. Each reversal
+line is submitted separately; it cannot be coalesced away or reordered. Ordinary
+waveform traffic has at most one outstanding line. Initial SCAN entry retains its
+existing ordered two-line SSPD/SCAN submission.
 
-## Transport and service audit
+## Failures and STOP priority
 
-The timebase is SysTick at 1 ms. Sub-ms scheduling or timing claims would be
-unsupported. USB-host callbacks and command generation run cooperatively in the
-foreground. The unchanged transport checks both in-flight transfer state and
-FIFO availability; each update submits at most two complete, separately flushed
-lines, with the second transfer following completion of the first. CDC line
-coding is 115200, but this does not establish controller command throughput.
-No measured device latency/throughput was available in this workspace.
+TinyUSB's CDC host previously returned early on failed transfers without notifying
+the application. A documented local `tuh_cdc_xfer_error_cb` extension now latches
+reported transfer failures separately from backpressure, for either endpoint.
+Partial application writes also latch failure. Rust checks the latch on every
+active poll, faults immediately, and attempts STOP. Unreported/missing completions
+remain busy and reach the 40 ms deadline. Disconnect, STAT fault, stale feedback,
+pressure and existing acquisition safety checks remain in force.
 
-The defaults retain the working 10 ms upper bound, allow ordinary evaluations
-down to 4 ms, and avoid globally increasing traffic. On-time ordinary evaluations
-are bounded to 100–250 Hz; priority crossings add at most 4 events/s at 2 Hz and
-one SCAN line per crossing. Integer deduplication can make SSPD rates much lower
-than 100 Hz. These are scheduling limits, not measured sustainable USB rates.
-The crossing exception can produce adjacent commands 1 ms apart; the existing
-TX-idle safety check remains authoritative if hardware cannot drain them.
+STOP/ABORT/fault/completion bypass waveform admission. STOP still discards waiting
+transport bytes and takes the next available transfer after any already submitted
+packet. Once terminal, the engine never resumes waveform commands. Cycle end
+requests STOP even with a waveform update pending; final-center SSPD and DPOS wait
+for STOP completion. The existing final-return deadline and terminal STOP remain.
 
-The main loop is unchanged: pressure and USB host are serviced before the engine,
-then USB1/ABORT, on every iteration. RX draining remains bounded at 256 bytes per
-poll, with no WFI while RX is pending; pressure transactions also prevent WFI.
-Pressure acquisition remains 200 Hz; logging remains 50 Hz; feedback INFO/POLI
-setup, EPOS/STAT decoding, and safety freshness checks are unchanged. Lookahead
-has at most seven candidate intervals. Held-error calculations run at due events
-and terminal cleanup, not at every pressure FIFO poll. No heap, RTOS, sleeps,
-extra readbacks, or RUNNING diagnostic streaming were introduced.
+A submitted USB packet cannot be recalled. As before, `stop_queued` means accepted
+for transmission, not confirmation of mechanical stopping. No software STOP can
+guarantee delivery through a disconnected or permanently stalled endpoint; this
+change retains priority STOP attempts and never reports those failures as healthy.
 
-The added bounded calculation cost and actual service impact still require
-hardware verification using the existing arrival/service metrics. In particular,
-do not interpret unchanged source-code service order as a measured latency result.
+## Servicing and diagnostics
 
-## Post-run diagnostics
+The main-loop order and RX burst budget are unchanged: pressure and TinyUSB host
+service precede the engine, followed by USB1/ABORT. RX drains at most 256 bytes per
+poll, and RX backlog prevents WFI. No extra flush loops, queries, blocking waits,
+heap allocation, threads, RTOS, or async runtime were introduced. INFO/POLI setup,
+EPOS/STAT parsing, 200 Hz pressure acquisition, 50 Hz logging, Dashboard,
+quasi-static mode, sample layout, CRC and dataset transfer remain unchanged.
 
-The `data_meta.scheduler` object is downloaded after the run and retained in
-normal CSV metadata. Dataset v2 sample bytes, timestamps, CRC, logging cadence,
-and plotting behavior are unchanged. Existing 4096-byte console/desktop framing
-fits the additional metadata; no transfer frame enlargement was needed.
+`data_meta.scheduler` is downloaded after the run and retained in CSV. No new
+RUNNING diagnostic stream is sent. The existing 4096-byte metadata frame still
+fits tested worst-case counters.
 
-- `mode`, `min_ms`, `max_ms`, `max_velocity_error_um_s`: active policy and bounds
-  (fixed mode reports 10 ms minimum). Legacy `trajectory_ms=10` remains for
-  compatibility; use `scheduler` to interpret adaptive timing.
-- `evaluations`, `commands_attempted`, `commands_sent`, `sspd_sent`, `sspd_hz`:
-  waveform-only evaluation/line counts and effective SSPD rate, excluding final
-  center positioning. Attempted lines are after deduplication; sent means accepted
-  by the USB queue, not controller acknowledgement. An occupied transport blocks
-  the attempt and increments `busy_due` instead. Rate uses waveform observation
-  duration, excluding final-center settling.
-- `sspd_interval_ms`: min/mean/max/count between actual accepted SSPD queue
-  timestamps, including explicit reversal zeros and gaps from deduplication.
-- `lateness_ms`: actual evaluation minus scheduled deadline, including a missed
-  deadline that faults. `reversal_lateness_ms`: detected crossing minus the first
-  representable theoretical crossing ms. Integer time quantization itself is
-  less than 1 ms and is not included in this latter lateness statistic.
-- `scheduled_to_queue_ms`, `queue_to_complete_ms`,
-  `scheduled_to_complete_ms`: min/mean/max/count for waveform SSPD **and SCAN**
-  lines. The engine retains scheduled times; C already timestamps accepted writes
-  and TinyUSB success callbacks. Two fixed pending slots pair sequence IDs with
-  callbacks, including clock wrap. Queue-to-complete includes second-command
-  waiting time. USB submission time is not separately exposed. Completion means
-  USB success, not the controller's physical execution instant.
-- `completion_unobserved`: accepted waveform lines without an observed completion
-  at diagnostic freeze, including interrupted/faulted runs. Missing observations
-  are never counted as zero latency; an empty statistics group is `null`.
-- `held_error_um_s`: continuous-interval maximum difference between the signed
-  queued-command model and theoretical velocity, including zero-speed reversals,
-  rounding, suppressed commands, and lateness. The model changes commands at the
-  evaluation instant; queue/transfer delay is measured separately, not compensated.
-  `over_budget_observations` counts examined nonempty intervals over the tolerance,
-  not elapsed milliseconds and not physical tracking failures.
-- `queue_peak`, `busy_due`: maximum accepted-minus-completed transport line count
-  (including return traffic observed while RUNNING) and due evaluations blocked
-  by pending TX. Existing `timing` retains RX peak/backlog polls, maximum service
-  gap/TX busy time, EPOS/pressure arrival rates and ages, malformed lines and
-  logger omissions. Existing reversal traces retain zero/SCAN/resume queue and
-  completion times and raw EPOS/STAT observations.
+| Metric | Meaning |
+| --- | --- |
+| `evaluations` | Actual-time waveform calculations, including idle retries |
+| `sspd_requested` | Due evaluations needing a speed update or reversal progress |
+| `commands_attempted`, `commands_sent`, `sspd_sent` | Lines attempted/accepted; SSPD includes mandatory reversal zero/resume |
+| `busy_due` | Needed due updates skipped/coalesced while TX is occupied |
+| `max_consecutive_coalesced` | Largest consecutive sequence of those updates |
+| `tx_busy_ms` | Count/min/mean/max busy episodes; terminal incomplete episode is censored at exit |
+| `scheduled_to_queue_ms` | Latest retained due deadline to acceptance; reversal zero/direction use theoretical crossing |
+| `queue_to_complete_ms`, `scheduled_to_complete_ms` | USB success latencies, not controller acknowledgements |
+| `reversal_zero_complete_ms` | Crossing to zero-command USB completion |
+| `reversal_direction_complete_ms` | Crossing to direction-command USB completion |
+| `reversal_resume_complete_ms` | Crossing to first resumed SSPD USB completion, even if rounded zero |
+| `backpressure_faults`, `usb_transfer_faults` | Deadline faults versus reported transfer/send failures |
+| `sspd_hz`, `sspd_interval_ms` | Effective accepted SSPD rate and inter-command min/mean/max |
+| `completion_unobserved` | Accepted waveform lines with no observed completion at diagnostic freeze |
+| `held_error_um_s`, `over_budget_observations` | Signed queued-command approximation error and sampled over-budget intervals |
+| `queue_peak`, `lateness_ms`, `reversal_lateness_ms` | Outstanding line peak and scheduling timing |
 
-The two recent completion timestamps may be overwritten if cleanup sends STOP
-while a two-line command is still pending; such missing observations remain
-explicitly unobserved. No compensation is enabled. The pure velocity function,
-absolute scheduler deadline, and separate transport measurements leave a clear
-place for a future, independently validated feed-forward time advance.
+The existing `timing` object retains EPOS/pressure rates and receipt ages, RX
+backlog/peak, USB service gap, malformed records, and logging omissions. Reversal
+traces retain raw EPOS/STAT, explicit zero/direction/resume queue and completion
+times. The trace's existing first-nonzero slot may follow a rounded-zero resume;
+the new resume latency statistic always measures the first resume command.
+Unknown completion groups remain null rather than inventing zero latency.
 
-## Simulation and A/B build
+Effective SSPD rate depends on useful changes, rounding, USB completion time and
+mandatory reversal packets. It may be lower than the evaluation rate. There is no
+catch-up burst and no promised 144 Hz hardware rate. Mathematical scheduler tests
+still use an ideal transport model; physical latency is neither corrected nor
+inferred from that model. The new sustained-backpressure simulation services a
+2 Hz run with 9 ms per transfer, one outstanding waveform line, ordered reversals,
+50 Hz EPOS publications, maximum receipt age 19 ms, and no lost logging slots.
+This is a host simulation, not a measurement of the device.
 
-Two-cycle, 1000 µm amplitude simulations with ideal foreground service and no
-transport delay produced the following, including reversal zero holds:
+## Builds and hardware repeat
 
-| Frequency | Adaptive SSPD/s | Fixed SSPD/s | Adaptive max error µm/s | Fixed max error µm/s |
-| --- | ---: | ---: | ---: | ---: |
-| 1 Hz | 100.000 | 100.000 | 395.000 | 395.000 |
-| 1.3 Hz | 109.162 | 100.065 | 569.072 | 1227.064 |
-| 2 Hz | 144.000 | 100.000 | 872.196 | 2354.703 |
-
-At 2 Hz the tolerance is 880.146 µm/s; the adaptive observed error is about 6.94%
-of peak, versus 18.74% for fixed mode. These are mathematical approximation
-errors, not EPOS tracking or latency measurements. Independent 0.1 ms cosine
-sampling tests cover low-amplitude quantization and 0.1, 0.333, 1, 1.3, 1.999,
-and 2 Hz waveforms. The 143-cycle engine test retains all 286 reversals across
-clock wrap; default mode now reverses at 125 ms rather than the fixed 130 ms.
-
-Engineering builds, with no normal UI setting:
+Both modes use the same transport policy. Fixed100Hz remains an engineering A/B
+option on its absolute 10 ms grid:
 
 ```sh
 rtk proxy cargo objcopy --release --locked --features fixed-100hz -- -O ihex target/firmware/firmware-fixed100hz.hex
 rtk proxy cargo objcopy --release --locked -- -O ihex target/firmware/firmware.hex
 ```
 
-Fixed100Hz preserves the previous absolute 10 ms control grid, including its
-crossing quantization, for an honest baseline. Adaptive is the default. Both
-collect identical diagnostics. Neither command flashes hardware.
+Neither command flashes hardware. No hardware was flashed during this change.
 
-## Hardware experiment to perform separately
+After separately installing the adaptive image, repeat the failed **2.0 Hz** run
+with exactly the same center, amplitude, cycle count, load, orientation and
+controller settings. Save the complete CSV and metadata. Then repeat three
+five-cycle runs at 2.0 Hz with the same established amplitude/center; each must
+retain ten ordered reversals at 125, 375, 625, ... ms. Do not substitute the
+simulation's 1000 µm amplitude unless it was already the established safe setting.
 
-1. Use the **same previously successful center, amplitude, controller settings,
-   load, and orientation** as the reported 2 Hz phase-lag run. Do not substitute
-   the illustrative 1000 µm simulation amplitude without an established safe run.
-2. For each image, run five cycles at 1.0, 1.3, and 2.0 Hz, three repetitions per
-   frequency: 18 runs total. Keep all settings except scheduler image/frequency
-   identical, alternate fixed/adaptive ordering between repetitions, and save
-   every raw CSV. Image installation is a separate hardware action.
-3. At 2 Hz compare SSPD rate/intervals and held error against the fixed baseline;
-   for a sufficiently resolved integer SSPD waveform expect roughly 144 versus
-   100 SSPD/s. Require zero busy-at-due faults, zero missed logging slots, and
-   inspect lateness and over-budget observations rather than assuming the ideal
-   simulation bound held. Each completed five-cycle run must retain ten reversals.
-4. Inspect every zero→SCAN→resume trace. At 2 Hz adaptive crossing targets are
-   125, 375, 625, ... ms; fixed targets are 130, 380, 630, ... ms. At 1.3 Hz
-   adaptive targets are ceil((250000 + k*500000)/1300) ms. Require ordered USB
-   completions, no SCAN=0, and current-theory resume speed. Compare both polarities.
-5. Compare scheduled→queue, queue→completion, and total delivery min/mean/max.
-   Require complete observations for an uncomplicated completed run; investigate
-   missing completions, growing backlog, or tail latency approaching the next
-   deadline. These measurements do not establish controller execution latency;
-   do not enable a phase advance from them alone.
-6. Compare raw EPOS phase delay and shape with unchanged theoretical position at
-   actual record time. Use recorded host receipt times/ages as before, with no
-   post-processing alignment shifts. Check EPOS arrival rate/max age, STAT ages,
-   RX backlog/service gaps and approximately 200 Hz pressure arrival rate against
-   the fixed baseline. Any degradation blocks tightening the timing limits.
-7. In both images repeat ABORT near each reversal polarity and during final
-   return; verify STOP and partial download. Exercise the established safe
-   disconnect/fault checks. Confirm cycle end and final-center completion remain
-   unchanged. No hardware was flashed or driven during this implementation.
+Require no immediate busy-at-due fault; nonzero `busy_due` is expected and allowed.
+Require zero backpressure/USB faults, no missed logging samples, complete ordered
+zero→SCAN→resume observations, and all reversal completion latencies below 40 ms.
+Check resumed SSPD against its actual queue-time waveform, not the missed due
+value. Compare measured rate and busy/queue/completion tails with the prior run.
+Check EPOS remains approximately 50 Hz, maximum receipt age approximately 21 ms,
+and USB service gap approximately 1 ms; investigate degradation before changing
+bounds. Retain raw timestamps and phase, with no alignment or phase compensation.
+
+Finally repeat ABORT during ordinary TX, near each reversal polarity and during
+final return. Confirm priority STOP, no subsequent waveform command, partial
+CSV availability, normal final-center completion, and one unchanged quasi-static
+run. Fault/disconnect validation should use the existing established procedure.
 
 ## Validation results
 
-- Firmware native suite: 64 tests passed with adaptive defaults and 64 with
-  `--cfg 'feature="fixed-100hz"'`; both C suites passed.
-- Native desktop Rust: 75 tests passed (12 application, 63 interoperability/shared
-  firmware), including adaptive metadata retention through download and CSV.
-- JavaScript UI/protocol: all 17 tests passed.
-- Firmware release builds passed in both modes; Vite and native Tauri release
-  build passed. Native GUI smoke passed IPC, demo, disconnect, START validation,
-  hidden-Dashboard idling, and stable experiment layout.
-- Existing TinyUSB `cdch_process_set_config` unused-function warning remains.
-- No hardware flash or motion was performed. Hardware command latency and service
-  impact remain unmeasured; the error/rate table above is simulation only.
+- Firmware native Rust: 71 tests passed in adaptive mode and 71 in fixed-100Hz mode.
+- Both native C suites passed, including STOP queue replacement, RX burst servicing,
+  transfer failure latching and reconnect recovery.
+- Desktop Rust: 82 tests passed (12 application and 70 interoperability/shared
+  firmware), including new diagnostic metadata retention through CSV.
+- UI/protocol: all 17 tests passed. Native GUI smoke passed demo, IPC, disconnect,
+  START validation, stable layout and hidden-Dashboard idling.
+- Firmware release builds and HEX generation passed for both modes. Vite and
+  native Tauri release builds passed (`npm run build -- --no-bundle`).
+- Firmware/desktop formatting and diff whitespace checks passed.
+- The pre-existing TinyUSB unused `cdch_process_set_config` warning remains.
+- No hardware flash or motion was performed. Device throughput, EPOS timing and
+  physical stopping remain hardware acceptance measurements.
 
-Generated artifacts:
+Generated artifacts (checksums and EOF records verified):
 
-- `target/firmware/firmware.hex`: 447435 bytes, 9947 valid Intel HEX records; SHA-256 `2b6ffa285fdbad87c0cb3881d2ab6863bb6c93c17bc5506143551fe0e659f980`.
-- `target/firmware/firmware-fixed100hz.hex`: 447480 bytes, 9948 valid Intel HEX records; SHA-256 `56182785de85ec62594f9413af5386dbe15f9ea0ba1a0c25a8c51da1405bf1a8`.
+- `target/firmware/firmware.hex`: 442424 bytes; 9836 valid Intel HEX records; SHA-256 `860addac1e8fad5eda849db6c6f4c5bc0946ebc54e6882957bf84a48a7962056`.
+- `target/firmware/firmware-fixed100hz.hex`: 442424 bytes; 9836 valid Intel HEX records; SHA-256 `60403c7a0a2b768cd480bdfd52d1dae9e185b977a89c17ee04ed650ff0864a07`.
