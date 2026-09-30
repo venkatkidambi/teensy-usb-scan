@@ -4,15 +4,15 @@ import {setupExperiments,experimentControls,experimentMessage} from '../ui/exper
 
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
 function harness() {
-  const nodes=new Map(),calls=[];
+  const nodes=new Map(),calls=[],appendFlags=[],archiveIndices=[];let archiveIndex=-1;
   const node=id=>{
-    if(!nodes.has(id))nodes.set(id,{value:'1',checked:false,elements:[],setAttribute(){},reportValidity:()=>true,getBoundingClientRect:()=>({width:0})});
+    if(!nodes.has(id))nodes.set(id,{value:'1',checked:false,elements:[],setAttribute(){},replaceChildren(...children){this.children=children;},reportValidity:()=>true,getBoundingClientRect:()=>({width:0})});
     return nodes.get(id);
   };
   const oldDocument=globalThis.document,oldObserver=globalThis.ResizeObserver;
-  globalThis.document={getElementById:node};globalThis.ResizeObserver=class{observe(){}};
+  globalThis.document={getElementById:node,createElement:()=>({})};globalThis.ResizeObserver=class{observe(){}};
   const state={connected:true,hello:{experiments:true,sine_position:true},session:{
-    async startExperiment(config){calls.push(config);this.experimentOwned=true;return {run:calls.length};},
+    async startExperiment(config,append=false){calls.push(config);appendFlags.push(append);archiveIndex=append?archiveIndex+1:0;archiveIndices[calls.length]=archiveIndex;this.experimentOwned=true;return {run:calls.length};},
     async request(command){calls.push(command);},
   }};
   const ipc=[];let validate=async()=>{};
@@ -23,11 +23,11 @@ function harness() {
   node('experiment-sweep-enabled').checked=true;node('experiment-frequencies').value='1, 5, 10';
   const submit=async()=>{await tick();return node('experiment-form').onsubmit({preventDefault(){}});};
   const result=(run,outcome='completed')=>experimentMessage({type:'experiment_dataset',dataset:{
-    archive_index:run+10,
+    archive_index:archiveIndices[run],
     metadata:{run,config:{kind:'sinusoidal',frequency_mhz:calls[run-1].timing*1000,cycles:3},outcome,reason:'test',count:0,elapsed_ms:0},samples:[],
   }});
   const release=()=>{state.session.experimentOwned=false;state.experimentUnresolved=false;experimentMessage({type:'experiment_ack',action:'data_received',run:calls.length});};
-  return {node,calls,state,ipc,submit,result,release,setValidate(fn){validate=fn;},restore(){state.connected=false;experimentControls();globalThis.document=oldDocument;globalThis.ResizeObserver=oldObserver;}};
+  return {node,calls,appendFlags,state,ipc,submit,result,release,setValidate(fn){validate=fn;},restore(){state.connected=false;experimentControls();globalThis.document=oldDocument;globalThis.ResizeObserver=oldObserver;}};
 }
 test('sweep prevalidates every frequency, waits for download and release, and exports selected history',async()=>{
   const h=harness();
@@ -48,8 +48,36 @@ test('sweep prevalidates every frequency, waits for download and release, and ex
     h.node('experiment-run').value='0';h.node('experiment-run').onchange();
     assert.match(h.node('experiment-result-summary').textContent,/Run 1/);
     await h.node('experiment-save').onclick();
-    // Native identity can differ from the visible list after recovery/reconnect.
-    assert.deepEqual(h.ipc.at(-1),['experiment_save_csv',{index:11}]);
+    assert.deepEqual(h.ipc.at(-1),['experiment_save_csv',{index:0}]);
+    assert.deepEqual(h.appendFlags,[false,true,true]);
+  }finally{h.restore();}
+});
+test('new sweeps and single runs replace the previous experiment in the result picker',async()=>{
+  const h=harness();
+  try{
+    h.node('experiment-frequencies').value='1, 2';
+    await h.submit();h.result(1);h.release();await tick();
+    h.result(2);h.release();await tick();
+    assert.equal(h.node('experiment-run').children.length,2);
+
+    // Rejected configuration keeps the current sweep available.
+    h.node('experiment-frequencies').value='20';await h.submit();
+    assert.equal(h.node('experiment-run').children.length,2);
+    h.node('experiment-frequencies').value='5, 10';await h.submit();
+    h.result(3);h.release();await tick();
+    assert.equal(h.node('experiment-run').children.length,1);
+    assert.match(h.node('experiment-run').children[0].textContent,/Run 3/);
+    h.result(4);h.release();await tick();
+    assert.equal(h.node('experiment-run').children.length,2);
+    assert.match(h.node('experiment-run').children[1].textContent,/Run 4/);
+
+    h.node('experiment-sweep-enabled').checked=false;
+    await h.submit();h.result(5);h.release();await tick();
+    assert.equal(h.node('experiment-run').children.length,1);
+    assert.match(h.node('experiment-run').children[0].textContent,/Run 5/);
+    await h.node('experiment-save').onclick();
+    assert.deepEqual(h.ipc.at(-1),['experiment_save_csv',{index:0}]);
+    assert.deepEqual(h.appendFlags,[false,true,false,true,false]);
   }finally{h.restore();}
 });
 test('abort, fault, disconnect and failed START each cancel remaining frequencies',async()=>{

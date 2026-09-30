@@ -161,7 +161,7 @@ impl Connection {
     pub fn open(
         name: &str,
         id: u32,
-        archive: Arc<Mutex<Vec<crate::experiment::Dataset>>>,
+        archive: Arc<Mutex<crate::experiment::Archive>>,
         ownership: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         if !ports()?.iter().any(|p| p.name == name) {
@@ -297,8 +297,7 @@ impl Connection {
                                             // Both empty and nonempty runs are retained before ACK.
                                             {
                                                 let mut archive = archive.lock().unwrap();
-                                                dataset.archive_index = Some(archive.len());
-                                                archive.push(dataset.clone());
+                                                archive.retain(&mut dataset);
                                             }
                                             queue.lock().unwrap().dataset = Some(dataset);
                                         }

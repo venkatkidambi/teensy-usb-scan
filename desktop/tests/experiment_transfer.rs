@@ -72,6 +72,44 @@ fn meta(run: u32, bytes: &[u8]) -> Value {
     json!({"type":"data_meta","id":receiver::DOWNLOAD_ID,"version":DATA_VERSION,"run":run,"record_bytes":RECORD_BYTES,"count":bytes.len()/RECORD_BYTES,"bytes":bytes.len(),"crc":!crc32(!0,bytes),"sample_ms":SAMPLE_MS,"outcome":"completed","reason":"none","config":{"kind":"sinusoidal"}})
 }
 #[test]
+fn archive_retains_only_the_current_experiment_and_keeps_previous_data_until_verified() {
+    let mut archive = receiver::Archive::default();
+    let mut dataset = receiver::Dataset {
+        archive_index: None,
+        metadata: json!({"run":1}),
+        samples: vec![],
+    };
+    archive.begin(false);
+    archive.retain(&mut dataset);
+    assert_eq!(dataset.archive_index, Some(0));
+    archive.begin(true);
+    dataset.metadata["run"] = json!(2);
+    archive.retain(&mut dataset);
+    assert_eq!(dataset.archive_index, Some(1));
+    assert_eq!(archive.datasets.len(), 2);
+
+    // START rejection or a disconnected transfer does not erase verified data.
+    archive.begin(false);
+    assert_eq!(archive.datasets.len(), 2);
+    dataset.metadata["run"] = json!(3);
+    archive.retain(&mut dataset);
+    assert_eq!(dataset.archive_index, Some(0));
+    assert_eq!(archive.datasets.len(), 1);
+    assert_eq!(archive.datasets[0].metadata["run"], 3);
+    archive.begin(true);
+    dataset.metadata["run"] = json!(4);
+    archive.retain(&mut dataset);
+    assert_eq!(archive.datasets.len(), 2);
+    assert_eq!(dataset.archive_index, Some(1));
+
+    archive.begin(false);
+    dataset.metadata["run"] = json!(5);
+    archive.retain(&mut dataset);
+    assert_eq!(archive.datasets.len(), 1);
+    assert_eq!(archive.datasets[0].metadata["run"], 5);
+}
+
+#[test]
 fn independent_signal_times_and_identities_round_trip_into_csv() {
     let records = [
         Record {

@@ -30,7 +30,7 @@
       <label><span id="experiment-repeats-label">Number of steps</span><input id="experiment-repeats" type="number" min="1" step="1" value="3" required></label>
       <label id="experiment-speed-field"><span id="experiment-speed-label">Actuator speed (µm/s)</span><input id="experiment-speed" type="number" min="1" max="16777215" step="1" value="10" required></label>
       <div id="experiment-sweep-fields" hidden>
-        <label><input id="experiment-sweep-enabled" type="checkbox"> Frequency sweep</label>
+        <h3 class="sweep-heading"><label for="experiment-sweep-enabled"><input id="experiment-sweep-enabled" type="checkbox"><span>Frequency sweep</span></label></h3>
         <label>Frequencies (Hz, in run order)<input id="experiment-frequencies" type="text" value="0.1, 0.5, 1, 2, 5, 10" placeholder="0.1, 0.5, 1, 2, 5, 10" disabled></label>
         <p class="pressure-detail">Same center, amplitude and cycle count at each frequency (up to 100 runs). Each run returns to center and downloads before the next starts. Keep the app connected; ABORT cancels the remaining sweep.</p>
       </div>

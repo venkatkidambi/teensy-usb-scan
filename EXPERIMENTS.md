@@ -287,7 +287,7 @@ Disconnect, CRC mismatch or a 5 s transfer-response timeout does not discard the
 Teensy copy. Reconnect and GET_DATA restart from offset zero. There is no automatic
 retry of a START. A new run is refused until the old dataset is acknowledged.
 After ACK, bytes remain intact until another START successfully passes validation;
-invalid START does not clear them. The desktop keeps all verified results across
+invalid START does not clear them. The desktop keeps the current experiment’s verified results across
 serial disconnect and page reload within the same process. Neither RAM copy is
 persistent across power loss/process exit; select Save CSV for durable storage.
 Save CSV opens a native Save As dialog for the destination folder and filename.
@@ -360,9 +360,12 @@ ABORT, a fault, START failure or disconnect cancels the remaining sequence.
 The current autonomous run can continue after disconnect; reconnect to recover it.
 The pending sweep is not resumed after reload or reconnect.
 
-All downloaded datasets stay in desktop process memory across disconnects and
-page reloads. **Recorded run** selects an earlier dataset for plots, phase analysis
-and **Save CSV**. Save each desired run before closing the desktop process.
+Only the current experiment’s downloaded datasets stay in desktop process memory
+across disconnects and page reloads. **Recorded run** selects a frequency from the
+current sweep for plots, phase analysis and **Save CSV**. The first verified result
+of a new single run or sweep replaces the previous experiment; subsequent sweep
+frequencies are retained together. Save any desired results before starting a new
+experiment or closing the desktop process.
 
 Reversal diagnostics remain bounded to 288 stored entries and two entries per
 16-sample transfer chunk. At higher frequencies the exported prefix can be shorter

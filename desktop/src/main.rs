@@ -22,7 +22,7 @@ use tauri_plugin_dialog::DialogExt;
 struct Backend {
     connection: Mutex<Option<serial::Connection>>,
     next: AtomicU32,
-    archive: Arc<Mutex<Vec<experiment::Dataset>>>,
+    archive: Arc<Mutex<experiment::Archive>>,
     experiment_owned: Arc<AtomicBool>,
 }
 
@@ -60,8 +60,8 @@ impl Backend {
             self.ensure_export_allowed()?;
             let archive = self.archive.lock().map_err(|e| e.to_string())?;
             let dataset = match index {
-                Some(index) => archive.get(index),
-                None => archive.last(),
+                Some(index) => archive.datasets.get(index),
+                None => archive.datasets.last(),
             }
             .ok_or("No verified experiment dataset")?;
             (
@@ -166,10 +166,16 @@ async fn experiment_start(
     session: u32,
     id: u32,
     config: experiment::Input,
+    append_results: Option<bool>,
     state: tauri::State<'_, Arc<Backend>>,
 ) -> Result<(), String> {
     let command = config.command(id)?;
-    state.with_session(session, |connection| connection.send(command))
+    state.with_session(session, |connection| {
+        let mut archive = state.archive.lock().map_err(|e| e.to_string())?;
+        connection.send(command)?;
+        archive.begin(append_results.unwrap_or(false));
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -180,6 +186,7 @@ fn experiment_result(
         .archive
         .lock()
         .map_err(|e| e.to_string())?
+        .datasets
         .last()
         .cloned())
 }
@@ -188,7 +195,12 @@ fn experiment_result(
 fn experiment_results(
     state: tauri::State<'_, Arc<Backend>>,
 ) -> Result<Vec<experiment::Dataset>, String> {
-    Ok(state.archive.lock().map_err(|e| e.to_string())?.clone())
+    Ok(state
+        .archive
+        .lock()
+        .map_err(|e| e.to_string())?
+        .datasets
+        .clone())
 }
 
 #[tauri::command]
@@ -281,20 +293,25 @@ mod tests {
 
     fn backend() -> Backend {
         let backend = Backend::default();
-        backend.archive.lock().unwrap().push(experiment::Dataset {
-            archive_index: Some(0),
-            metadata: serde_json::json!({"run": 7}),
-            samples: vec![[0, -10, 123, 0, 1, 2, 3, -20, 42, 4, 1, 2]],
-        });
+        backend
+            .archive
+            .lock()
+            .unwrap()
+            .datasets
+            .push(experiment::Dataset {
+                archive_index: Some(0),
+                metadata: serde_json::json!({"run": 7}),
+                samples: vec![[0, -10, 123, 0, 1, 2, 3, -20, 42, 4, 1, 2]],
+            });
         backend
     }
 
     #[test]
     fn history_export_selects_earlier_run_without_overwriting_latest() {
         let backend = backend();
-        let mut later = backend.archive.lock().unwrap()[0].clone();
+        let mut later = backend.archive.lock().unwrap().datasets[0].clone();
         later.metadata["run"] = serde_json::json!(8);
-        backend.archive.lock().unwrap().push(later);
+        backend.archive.lock().unwrap().datasets.push(later);
         backend
             .save_csv(Some(0), |name| {
                 assert_eq!(name, "experiment-7.csv");
@@ -312,7 +329,7 @@ mod tests {
                 .save_csv(Some(2), |_| panic!("invalid index"))
                 .is_err()
         );
-        assert_eq!(backend.archive.lock().unwrap().len(), 2);
+        assert_eq!(backend.archive.lock().unwrap().datasets.len(), 2);
     }
 
     struct Output(PathBuf);
@@ -342,7 +359,14 @@ mod tests {
         let backend = backend();
         let output = Output::new();
         let path = output.path();
-        let expected = backend.archive.lock().unwrap().last().unwrap().csv();
+        let expected = backend
+            .archive
+            .lock()
+            .unwrap()
+            .datasets
+            .last()
+            .unwrap()
+            .csv();
         let result = backend
             .save_csv(None, |filename| {
                 assert_eq!(filename, "experiment-7.csv");
@@ -353,7 +377,7 @@ mod tests {
             .unwrap();
         assert_eq!(result, Some(path.to_string_lossy().into_owned()));
         assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
-        assert!(!backend.archive.lock().unwrap().is_empty());
+        assert!(!backend.archive.lock().unwrap().datasets.is_empty());
     }
 
     #[test]
@@ -375,7 +399,7 @@ mod tests {
                 .contains("Could not save")
         );
         assert!(!missing_parent.exists());
-        assert!(!backend.archive.lock().unwrap().is_empty());
+        assert!(!backend.archive.lock().unwrap().datasets.is_empty());
     }
 
     #[test]
@@ -406,6 +430,6 @@ mod tests {
         });
         assert!(result.unwrap_err().contains("ownership"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "existing CSV");
-        assert!(!backend.archive.lock().unwrap().is_empty());
+        assert!(!backend.archive.lock().unwrap().datasets.is_empty());
     }
 }

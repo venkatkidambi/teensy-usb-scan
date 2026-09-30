@@ -143,13 +143,13 @@ export class NativeSession {
     while(!this.startupSeen&&!this.closed&&Date.now()<end)await new Promise(resolve=>setTimeout(resolve,20));
     if(!this.startupSeen)throw Error('No startup state received; reconnect to recover safely');
   }
-  startExperiment(config) {
+  startExperiment(config,appendResults=false) {
     if(this.closed||this.session===null||this.pending||this.experimentOwned) return Promise.reject(Error('Experiment or request already active'));
     const id=this.id=this.id===0xefffffff?1:this.id+1;
     this.experimentOwned=true;
     return new Promise((resolve,reject)=>{
       this.pending={id,resolve,reject,expected:'experiment_ack',timer:setTimeout(()=>this.rejectPending(Error('START timed out; reconnect to recover state or send ABORT')),this.timeout)};
-      const submission=this.invoke('experiment_start',{session:this.session,id,config});
+      const submission=this.invoke('experiment_start',{session:this.session,id,config,appendResults});
       this.startSubmission=submission;
       submission.then(()=>{if(this.startSubmission===submission)this.startSubmission=null;},e=>{
         if(this.startSubmission===submission)this.startSubmission=null;

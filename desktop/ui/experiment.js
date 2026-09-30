@@ -83,6 +83,8 @@ export function experimentMessage(message) {
   if(message.type==='experiment_dataset') {
     dataset=message.dataset;
     if(!message.restored){
+      // Native index zero starts a new experiment; later indices belong to its sweep.
+      if(dataset.archive_index===0)history=[];
       history.push(dataset);selectedIndex=history.length-1;updateRunPicker();
     }
     if(sweep&&dataset.metadata.run===sweep.run){
@@ -179,7 +181,7 @@ async function nextSweepRun() {
   const config=current.configs[current.index++];
   text('experiment-sweep-status',`Sweep ${current.index}/${current.configs.length} · ${config.timing} Hz`);
   experimentControls();
-  try {const ack=await current.session.startExperiment(config);if(sweep===current)current.run=ack.run;}
+  try {const ack=await current.session.startExperiment(config,current.index>1);if(sweep===current)current.run=ack.run;}
   catch(e){if(sweep===current)sweep=null;text('experiment-sweep-status',`Sweep stopped: ${e.message??e}. Results retained.`);}
   finally {starting=false;context.controls();}
 }

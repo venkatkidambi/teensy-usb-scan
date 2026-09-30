@@ -28,8 +28,10 @@ at its final setting afterward; travel limits remain configured as before.
 Sinusoidal frequencies accept 0.1–10 Hz. Enable **Frequency sweep** and enter
 frequencies in run order to repeat the same center, amplitude and cycle count.
 Each run completes and downloads before the next begins. Keep the app connected;
-ABORT, faults and disconnects cancel the remaining sweep. All verified runs remain
-selectable under **Recorded run**, with individual CSV exports, until app exit.
+ABORT, faults and disconnects cancel the remaining sweep. Only the current experiment’s runs remain
+selectable under **Recorded run**, with individual CSV exports. A new experiment’s
+first verified result replaces the previous single run or sweep. Results remain
+available across reconnects and page reloads until replaced or the app exits.
 
 Results calculate command-to-received-position and received-position-to-pressure
 phase delays in ms and degrees. Positive means lag, wrapped to ±half a cycle.

@@ -136,9 +136,32 @@ pub fn uint(value: &Value, key: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("Invalid dataset {key}"))
 }
 
+/// Retain one experiment: a single run, or all frequencies in its sweep.
+#[derive(Default)]
+pub struct Archive {
+    pub datasets: Vec<Dataset>,
+    replace_on_next: bool,
+}
+impl Archive {
+    pub fn begin(&mut self, append_results: bool) {
+        // Keep the previous results if START fails. The first verified result
+        // replaces them, including when a download is recovered after reconnect.
+        self.replace_on_next = !append_results;
+    }
+
+    pub fn retain(&mut self, dataset: &mut Dataset) {
+        if self.replace_on_next {
+            self.datasets.clear();
+            self.replace_on_next = false;
+        }
+        dataset.archive_index = Some(self.datasets.len());
+        self.datasets.push(dataset.clone());
+    }
+}
+
 #[derive(Clone, Serialize)]
 pub struct Dataset {
-    /// Process-local archive identity, independent of firmware run counter resets.
+    /// Index within the current experiment's results; zero begins a new experiment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive_index: Option<usize>,
     pub metadata: Value,
