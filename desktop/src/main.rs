@@ -18,6 +18,24 @@ use std::sync::{
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ExperimentPlot {
+    Position,
+    Pressure,
+    SweepPhase,
+}
+
+impl ExperimentPlot {
+    fn filename_suffix(&self) -> &'static str {
+        match self {
+            Self::Position => "position",
+            Self::Pressure => "pressure",
+            Self::SweepPhase => "sweep-phase",
+        }
+    }
+}
+
 #[derive(Default)]
 struct Backend {
     connection: Mutex<Option<serial::Connection>>,
@@ -42,7 +60,7 @@ impl Backend {
 
     fn ensure_export_allowed(&self) -> Result<(), String> {
         if self.experiment_owned.load(Ordering::Acquire) {
-            Err("CSV export is disabled until autonomous ownership is resolved".into())
+            Err("Export is disabled until autonomous ownership is resolved".into())
         } else {
             Ok(())
         }
@@ -75,6 +93,47 @@ impl Backend {
         let _connection = self.connection.lock().map_err(|e| e.to_string())?;
         self.ensure_export_allowed()?;
         std::fs::write(&path, csv)
+            .map_err(|e| format!("Could not save {}: {e}", path.display()))?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    }
+
+    fn save_png(
+        &self,
+        index: Option<usize>,
+        plot: ExperimentPlot,
+        png: &[u8],
+        choose_path: impl FnOnce(&str) -> Result<Option<std::path::PathBuf>, String>,
+    ) -> Result<Option<String>, String> {
+        // Only accept a bounded PNG snapshot, never an arbitrary file payload/path.
+        if png.len() > 16 * 1024 * 1024
+            || png.len() < 45
+            || !png.starts_with(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")
+            || !png.ends_with(b"\0\0\0\0IEND\xaeB\x60\x82")
+        {
+            return Err("Invalid or oversized PNG image".into());
+        }
+        let filename = {
+            let _connection = self.connection.lock().map_err(|e| e.to_string())?;
+            self.ensure_export_allowed()?;
+            let archive = self.archive.lock().map_err(|e| e.to_string())?;
+            let dataset = match index {
+                Some(index) => archive.datasets.get(index),
+                None => archive.datasets.last(),
+            }
+            .ok_or("No verified experiment dataset")?;
+            let run = if matches!(plot, ExperimentPlot::SweepPhase) {
+                &archive.datasets.first().unwrap().metadata["run"]
+            } else {
+                &dataset.metadata["run"]
+            };
+            format!("experiment-{run}-{}.png", plot.filename_suffix())
+        };
+        let Some(path) = choose_path(&filename)? else {
+            return Ok(None);
+        };
+        let _connection = self.connection.lock().map_err(|e| e.to_string())?;
+        self.ensure_export_allowed()?;
+        std::fs::write(&path, png)
             .map_err(|e| format!("Could not save {}: {e}", path.display()))?;
         Ok(Some(path.to_string_lossy().into_owned()))
     }
@@ -241,11 +300,38 @@ async fn experiment_save_csv(
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn experiment_save_png(
+    index: Option<usize>,
+    plot: ExperimentPlot,
+    png: Vec<u8>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<Backend>>,
+) -> Result<Option<String>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.save_png(index, plot, &png, |filename| {
+            window
+                .dialog()
+                .file()
+                .set_parent(&window)
+                .set_title("Save experiment plot PNG")
+                .add_filter("PNG images", &["png"])
+                .set_file_name(filename)
+                .blocking_save_file()
+                .map(|path| path.into_path().map_err(|e| e.to_string()))
+                .transpose()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // Keep normal and smoke builds on the same application command surface.
 macro_rules! command_handler {
     ($($extra:path),* $(,)?) => {
         tauri::generate_handler![serial_ports, serial_connect, serial_send, serial_poll,
-            serial_disconnect, experiment_start, experiment_result, experiment_results, experiment_validate, experiment_save_csv, $($extra),*]
+            serial_disconnect, experiment_start, experiment_result, experiment_results, experiment_validate, experiment_save_csv, experiment_save_png, $($extra),*]
     };
 }
 
@@ -431,5 +517,106 @@ mod tests {
         assert!(result.unwrap_err().contains("ownership"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "existing CSV");
         assert!(!backend.archive.lock().unwrap().datasets.is_empty());
+    }
+
+    #[test]
+    fn png_export_writes_exact_snapshot_and_releases_locks_for_dialog() {
+        let backend = backend();
+        let output = Output::new();
+        let path = output.0.join("chosen plot.png");
+        let png = include_bytes!("../icons/icon.png");
+        let result = backend
+            .save_png(Some(0), ExperimentPlot::Position, png, |name| {
+                assert_eq!(name, "experiment-7-position.png");
+                assert!(backend.connection.try_lock().is_ok());
+                assert!(backend.archive.try_lock().is_ok());
+                Ok(Some(path.clone()))
+            })
+            .unwrap();
+        assert_eq!(result, Some(path.to_string_lossy().into_owned()));
+        assert_eq!(std::fs::read(&path).unwrap(), png);
+        assert_eq!(backend.archive.lock().unwrap().datasets.len(), 1);
+    }
+
+    #[test]
+    fn png_export_cancel_invalid_payload_and_ownership_never_overwrite() {
+        let backend = backend();
+        let png = include_bytes!("../icons/icon.png");
+        assert_eq!(
+            backend
+                .save_png(None, ExperimentPlot::Pressure, png, |name| {
+                    assert_eq!(name, "experiment-7-pressure.png");
+                    Ok(None)
+                })
+                .unwrap(),
+            None
+        );
+        assert!(
+            backend
+                .save_png(None, ExperimentPlot::Position, b"not PNG", |_| panic!(
+                    "invalid PNG"
+                ))
+                .is_err()
+        );
+        assert!(
+            backend
+                .save_png(
+                    None,
+                    ExperimentPlot::Position,
+                    &vec![0; 16 * 1024 * 1024 + 1],
+                    |_| panic!("oversized PNG")
+                )
+                .is_err()
+        );
+        assert!(
+            Backend::default()
+                .save_png(None, ExperimentPlot::Position, png, |_| panic!(
+                    "no dataset"
+                ))
+                .is_err()
+        );
+        assert!(
+            backend
+                .save_png(Some(9), ExperimentPlot::Position, png, |_| panic!(
+                    "invalid index"
+                ))
+                .is_err()
+        );
+        let output = Output::new();
+        let path = output.0.join("plot.png");
+        std::fs::write(&path, "existing image").unwrap();
+        assert!(
+            backend
+                .save_png(None, ExperimentPlot::Position, png, |_| {
+                    backend.experiment_owned.store(true, Ordering::Release);
+                    Ok(Some(path.clone()))
+                })
+                .unwrap_err()
+                .contains("ownership")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing image");
+        assert!(
+            backend
+                .save_png(None, ExperimentPlot::Position, png, |_| panic!(
+                    "owned experiment"
+                ))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn sweep_png_uses_first_run_name_and_reports_write_failures() {
+        let backend = backend();
+        let mut later = backend.archive.lock().unwrap().datasets[0].clone();
+        later.metadata["run"] = serde_json::json!(8);
+        backend.archive.lock().unwrap().datasets.push(later);
+        let png = include_bytes!("../icons/icon.png");
+        let output = Output::new();
+        let result = backend.save_png(Some(1), ExperimentPlot::SweepPhase, png, |name| {
+            assert_eq!(name, "experiment-7-sweep-phase.png");
+            Ok(Some(output.0.join("missing").join("plot.png")))
+        });
+        assert!(result.unwrap_err().contains("Could not save"));
+        assert_eq!(backend.archive.lock().unwrap().datasets.len(), 2);
     }
 }

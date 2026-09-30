@@ -45,6 +45,42 @@ pub const SCRIPT: &str = r#"
     await new Promise(r=>setTimeout(r,100));
     if(!document.getElementById('experiment-result-summary').textContent.includes('ABORTED'))throw Error('Experiment outcome missing');
     for(const name of ['position','pressure'])if(document.getElementById(`experiment-${name}-plot`).width<100)throw Error('Experiment plot did not render');
+    // Exercise sweep fitting and real WebKit PNG rendering with synthetic signals.
+    for(const [index,frequency] of [1,5].entries()){
+      const samples=[],duration=3000/frequency;
+      for(let ms=0;ms<=duration;ms+=20){
+        const sine=delay=>Math.sin(2*Math.PI*frequency*(ms-delay)/1000);
+        samples.push([ms,100+20*sine(0),100000+40*sine(20),0,0,0,0,100+20*sine(0),0,0,ms/20,ms/20]);
+      }
+      experimentMessage({type:'experiment_dataset',dataset:{archive_index:index,metadata:{run:index+2,config:{kind:'sinusoidal',frequency_mhz:frequency*1000,cycles:3},outcome:'completed',reason:'none',count:samples.length,elapsed_ms:duration},samples}});
+    }
+    if(document.getElementById('experiment-sweep-results').hidden)throw Error('Sweep phase plot is hidden');
+    if(document.getElementById('experiment-sweep-phase-summary').textContent!=='2 of 2 runs plotted')throw Error('Sweep fits missing');
+    const {plotPng}=await import('./plot-export.js');
+    for(const unit of ['ms','degrees']){
+      const picker=document.getElementById('experiment-phase-unit');picker.value=unit;picker.dispatchEvent(new Event('change'));
+      for(const name of ['position','pressure','sweep-phase']){
+        const card=document.getElementById(`experiment-${name}-card`),source=card.querySelector('canvas');
+        const png=await plotPng(card);
+        if(png.length<1000||png.slice(0,8).join(',')!=='137,80,78,71,13,10,26,10')throw Error('PNG encoding failed');
+        const image=new Image();
+        image.src='data:image/png;base64,'+btoa(png.map(byte=>String.fromCharCode(byte)).join(''));
+        await image.decode();
+        const rect=card.getBoundingClientRect(),scale=source.width/source.getBoundingClientRect().width;
+        if(image.width!==Math.round(rect.width*scale)||image.height!==Math.round(rect.height*scale))throw Error('PNG changed plot dimensions');
+        const copy=document.createElement('canvas');copy.width=image.width;copy.height=image.height;
+        const ctx=copy.getContext('2d');ctx.drawImage(image,0,0);
+        const data=ctx.getImageData(0,0,copy.width,copy.height).data;
+        let green=0;
+        for(let i=0;i<data.length;i+=4)if(data[i+1]>data[i]+20&&data[i+1]>data[i+2]+10)green++;
+        if(green<10)throw Error('PNG lost the green plot or legend');
+        // The real native command accepts this image, then rejects the absent
+        // native archive before opening any dialog or writing a file.
+        let rejected=false;
+        try{await invoke('experiment_save_png',{plot:name.replaceAll('-','_'),png});}catch(e){rejected=String(e).includes('No verified experiment dataset');}
+        if(!rejected)throw Error('Native PNG command did not validate the dataset');
+      }
+    }
     document.getElementById('tab-dashboard').click();
     if(document.documentElement.scrollWidth>innerWidth)throw Error('Layout overflows window');
     document.querySelector('#connect').click();
@@ -84,7 +120,7 @@ pub const SCRIPT: &str = r#"
     if(start.disabled||status.textContent!=='START failed: Test rejection')throw Error('START rejection did not recover visibly');
     state.hello.sine_position=false;experimentControls();
     if(!start.disabled||!document.getElementById('experiment-start-reason').textContent.includes('sinusoidal position control'))throw Error('Disabled START has no explanation');
-    await invoke('smoke_report',{result:{ok:true,ports:ports.length,nativeIPC:true,demo:true,disconnect:true,startClick:true,startValidation:true,stableExperimentLayout:true,hiddenDashboardIdle:true}});
+    await invoke('smoke_report',{result:{ok:true,ports:ports.length,nativeIPC:true,demo:true,disconnect:true,startClick:true,startValidation:true,stableExperimentLayout:true,hiddenDashboardIdle:true,sweepPhasePlot:true,plotPng:true}});
   }catch(e){await window.__TAURI__.core.invoke('smoke_report',{result:{ok:false,error:String(e)}});}
 })();
 "#;

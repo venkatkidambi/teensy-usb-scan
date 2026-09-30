@@ -66,6 +66,8 @@ test('new sweeps and single runs replace the previous experiment in the result p
     await h.submit();h.result(1);h.release();await tick();
     h.result(2);h.release();await tick();
     assert.equal(h.node('experiment-run').children.length,2);
+    assert.equal(h.node('experiment-sweep-results').hidden,false);
+    assert.match(h.node('experiment-sweep-phase-summary').textContent,/0 of 2 runs plotted.*unavailable/);
 
     // Rejected configuration keeps the current sweep available.
     h.node('experiment-frequencies').value='20';await h.submit();
@@ -74,6 +76,7 @@ test('new sweeps and single runs replace the previous experiment in the result p
     h.result(3);h.release();await tick();
     assert.equal(h.node('experiment-run').children.length,1);
     assert.match(h.node('experiment-run').children[0].textContent,/Run 3/);
+    assert.match(h.node('experiment-sweep-phase-summary').textContent,/0 of 1 runs plotted/);
     h.result(4);h.release();await tick();
     assert.equal(h.node('experiment-run').children.length,2);
     assert.match(h.node('experiment-run').children[1].textContent,/Run 4/);
@@ -85,6 +88,9 @@ test('new sweeps and single runs replace the previous experiment in the result p
     await h.node('experiment-save').onclick();
     assert.deepEqual(h.ipc.at(-1),['experiment_save_csv',{index:0}]);
     assert.deepEqual(h.appendFlags,[false,true,false,true,false]);
+    experimentMessage({type:'experiment_dataset',dataset:{archive_index:0,metadata:{run:6,config:{kind:'quasi_static'},outcome:'completed',reason:'none',count:0,elapsed_ms:0},samples:[]}});
+    assert.equal(h.node('experiment-sweep-results').hidden,true);
+    assert.equal(h.node('experiment-sweep-phase-png').disabled,true);
   }finally{h.restore();}
 });
 test('abort, fault, disconnect and failed START each cancel remaining frequencies',async()=>{

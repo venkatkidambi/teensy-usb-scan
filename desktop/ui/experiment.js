@@ -1,9 +1,12 @@
 import {phaseDelays,parseFrequencies} from './phase.js';
+import {plotPng} from './plot-export.js';
 // UI only: native Rust validates configuration, receives binary data and builds CSV.
 const $=id=>document.getElementById(id);
 const text=(id,value)=>{const node=$(id);if(node.textContent!==value)node.textContent=value;};
 let mode='dashboard',view='dashboard',showResults=false,dataset=null,context=null,saving=false,starting=false;
 let sweep=null,history=[],selectedIndex=null,sweepTimer=null,historyLoading=false,validationCancelled=false;
+let phaseCache=new WeakMap(),sweepPhases=[];
+const plotNames=['position','pressure','sweep-phase'];
 const modes=['dashboard','quasi_static','sinusoidal','data'];
 const fields=['start','increment','timing','repeats','speed'];
 const configurations={quasi_static:['0','1','1','3','10'],sinusoidal:['0','1','1','3','10']};
@@ -11,7 +14,7 @@ function startBlocked({session,connected,hello,experimentUnresolved}) {
   if(historyLoading)return 'Loading recorded experiments…';
   if(starting)return 'Sending START to the Teensy…';
   if(sweep)return 'Frequency sweep in progress. Press ABORT to stop it.';
-  if(saving)return 'Wait for CSV saving to finish.';
+  if(saving)return 'Wait for export to finish.';
   if(!connected||!session)return 'Connect the Teensy to start an experiment.';
   if(session.experimentOwned)return 'An experiment owns the hardware. Wait for its results or press ABORT.';
   if(experimentUnresolved)return 'Reconnect to recover the previous experiment before starting another.';
@@ -40,7 +43,8 @@ export function experimentControls() {
   $('experiment-frequencies').disabled=owned||!sweeping;
   $('experiment-timing').disabled=owned||sweeping;
   $('experiment-sweep-fields').hidden=mode!=='sinusoidal';
-  $('experiment-run').disabled=owned||!history.length;
+  $('experiment-run').disabled=!!saving||owned||!history.length;
+  $('experiment-phase-unit').disabled=!!saving;
   const blocked=startBlocked(context.state());
   $('experiment-start-button').disabled=!!blocked;
   $('experiment-start-button').title=blocked;
@@ -49,8 +53,12 @@ export function experimentControls() {
   text('experiment-motion-detail',mode==='sinusoidal'?`Sine ${hello?.sine_velocity?'velocity/direction control':'position commands'}. Starts at center and finishes on confirmed center return, without a hold.`:'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.');
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
-  $('experiment-save').disabled=saving||owned||!dataset;
-  text('experiment-save',saving?'Saving…':'Save CSV');
+  $('experiment-save').disabled=!!saving||owned||!dataset;
+  text('experiment-save',saving==='csv'?'Saving…':'Save CSV');
+  for(const name of plotNames){
+    $(`experiment-${name}-png`).disabled=!!saving||owned||!dataset||(name==='sweep-phase'&&!sweepPhases.length);
+    text(`experiment-${name}-png`,saving===name?'Saving…':'Save PNG');
+  }
   if(sweep&&(sweep.received||sweep.index===0)&&!starting&&!session?.experimentOwned&&!session?.pending&&!experimentUnresolved){
     if(sweepTimer===null)sweepTimer=setTimeout(()=>{sweepTimer=null;void nextSweepRun();},0);
   }
@@ -92,6 +100,10 @@ export function experimentMessage(message) {
       if(dataset.archive_index===0)history=[];
       history.push(dataset);selectedIndex=history.length-1;updateRunPicker();
     }
+    sweepPhases=sweepPhasePoints(history);
+    $('experiment-sweep-results').hidden=!sweepPhases.length;
+    const available=sweepPhases.filter(point=>!point.reason).length;
+    text('experiment-sweep-phase-summary',`${available} of ${sweepPhases.length} runs plotted${available<sweepPhases.length?' · unavailable fits omitted':''}`);
     if(sweep&&dataset.metadata.run===sweep.run){
       if(dataset.metadata.outcome==='completed')sweep.received=true;
       else {text('experiment-sweep-status',`Sweep stopped: run ${sweep.index} ${dataset.metadata.outcome}. Results retained.`);sweep=null;}
@@ -121,7 +133,7 @@ export function experimentMessage(message) {
       $('experiment-result-summary').textContent+=` · ${summary.join(' · ')} · reversal command/feedback details in CSV metadata`;
     }
     if(m.reversal_total>m.reversal_count)$('experiment-result-summary').textContent+=` · reversal details retained for ${m.reversal_count} of ${m.reversal_total} peaks`;
-    const delays=phaseDelays(dataset,signalPoints(dataset.samples,1),signalPoints(dataset.samples,2));
+    const delays=datasetPhases(dataset);
     const format=value=>value.reason?`Unavailable: ${value.reason}`:`${value.ms.toFixed(2)} ms (${value.degrees.toFixed(1)}°), fit R² ${value.r2.toFixed(3)}`;
     text('experiment-phase-command',delays.reason||format(delays.commandToPosition));
     text('experiment-phase-pressure',delays.reason||format(delays.positionToPressure));
@@ -137,6 +149,18 @@ export function signalPoints(samples, field, scale=1) {
   let previous;
   return samples.filter(s=>{const fresh=s[generation]!==previous;previous=s[generation];return fresh;})
     .map(s=>[s[0]-s[age],s[field]*scale]);
+}
+function datasetPhases(result) {
+  if(!phaseCache.has(result))phaseCache.set(result,phaseDelays(result,signalPoints(result.samples,1),signalPoints(result.samples,2)));
+  return phaseCache.get(result);
+}
+export function sweepPhasePoints(results) {
+  return results.flatMap((result,index)=>{
+    if(result.metadata.config.kind!=='sinusoidal')return [];
+    const frequency=result.metadata.config.frequency_mhz/1000,delays=datasetPhases(result);
+    const phase=delays.reason?{reason:delays.reason}:delays.positionToPressure;
+    return [{index,frequency,...phase}];
+  });
 }
 function drawPlot(id,field,scale) {
   const canvas=$(id),rect=canvas.getBoundingClientRect();if(!rect.width||!dataset)return;
@@ -169,7 +193,44 @@ function drawPlot(id,field,scale) {
   ctx.fillStyle='#32684d';
   for(const [ms,value] of points){ctx.beginPath();ctx.arc(x(ms),y(value),2,0,2*Math.PI);ctx.fill();}
 }
-function draw(){drawPlot('experiment-position-plot',1,.078);drawPlot('experiment-pressure-plot',2,1);}
+function drawSweepPhase() {
+  const canvas=$('experiment-sweep-phase-plot'),rect=canvas.getBoundingClientRect();
+  if(!rect.width||!sweepPhases.length)return;
+  const ctx=canvas.getContext('2d'),dpr=Math.min(devicePixelRatio||1,2);
+  const width=Math.round(rect.width*dpr),height=Math.round(rect.height*dpr);
+  if(canvas.width!==width)canvas.width=width;
+  if(canvas.height!==height)canvas.height=height;
+  ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,rect.width,rect.height);
+  const unit=$('experiment-phase-unit').value==='degrees'?'degrees':'ms';
+  const points=sweepPhases.filter(p=>!p.reason&&Number.isFinite(p[unit]));
+  const frequencies=sweepPhases.map(p=>p.frequency).filter(f=>Number.isFinite(f)&&f>0);
+  let xmin=frequencies.length?Math.min(...frequencies):0,xmax=frequencies.length?Math.max(...frequencies):1;
+  const xpad=Math.max((xmax-xmin)*.05,xmax*.05,.01);xmin=Math.max(0,xmin-xpad);xmax+=xpad;
+  let ymin=unit==='degrees'?-180:Math.min(0,...points.map(p=>p.ms));
+  let ymax=unit==='degrees'?180:Math.max(0,...points.map(p=>p.ms));
+  if(unit==='ms'){const pad=Math.max((ymax-ymin)*.1,1);ymin-=pad;ymax+=pad;}
+  const l=75,r=rect.width-20,t=20,b=rect.height-48;
+  const x=value=>l+(value-xmin)/(xmax-xmin)*(r-l),y=value=>b-(value-ymin)/(ymax-ymin)*(b-t);
+  ctx.font='10px system-ui';ctx.fillStyle='#646b65';ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){
+    const value=ymin+(ymax-ymin)*i/4,py=y(value);
+    ctx.strokeStyle='#e0e3e0';ctx.beginPath();ctx.moveTo(l,py);ctx.lineTo(r,py);ctx.stroke();
+    ctx.textAlign='right';ctx.fillText(value.toFixed(unit==='degrees'?0:1),l-8,py+3);
+    const frequency=xmin+(xmax-xmin)*i/4;
+    ctx.textAlign='center';ctx.fillText(String(Number(frequency.toFixed(3))),x(frequency),b+16);
+  }
+  ctx.font='12px system-ui';ctx.textAlign='center';ctx.fillText('Frequency (Hz)',(l+r)/2,rect.height-7);
+  ctx.save();ctx.translate(16,(t+b)/2);ctx.rotate(-Math.PI/2);
+  ctx.fillText(`Phase delay (${unit==='degrees'?'°':'ms'})`,0,0);ctx.restore();
+  ctx.strokeStyle='#919b96';ctx.beginPath();ctx.moveTo(l,y(0));ctx.lineTo(r,y(0));ctx.stroke();
+  ctx.fillStyle='#32684d';ctx.strokeStyle='#32684d';
+  for(const point of points){
+    ctx.beginPath();ctx.arc(x(point.frequency),y(point[unit]),3,0,Math.PI*2);ctx.fill();
+    if(point.index===selectedIndex){ctx.beginPath();ctx.arc(x(point.frequency),y(point[unit]),6,0,Math.PI*2);ctx.stroke();}
+  }
+  if(!points.length){ctx.fillStyle='#646b65';ctx.fillText('No reliable phase fits available',(l+r)/2,(t+b)/2-12);}
+}
+function draw(){drawPlot('experiment-position-plot',1,.078);drawPlot('experiment-pressure-plot',2,1);drawSweepPhase();}
 function updateRunPicker() {
   const picker=$('experiment-run');
   if(picker.replaceChildren){
@@ -199,6 +260,22 @@ export function setupExperiments(api) {
   context=api;historyLoading=!!api.invoke;validationCancelled=false;clearTimeout(sweepTimer);sweepTimer=null;sweep=null;history=[];selectedIndex=null;dataset=null;starting=false;saving=false;mode='dashboard';view='dashboard';showResults=false;
   $('experiment-results').hidden=true;
   $('experiment-data-empty').hidden=false;
+  phaseCache=new WeakMap();sweepPhases=[];
+  $('experiment-sweep-results').hidden=true;
+  $('experiment-phase-unit').onchange=drawSweepPhase;
+  for(const name of plotNames)$(`experiment-${name}-png`).onclick=async()=>{
+    if(saving||sweep||starting||api.state().session?.experimentOwned||api.state().experimentUnresolved||!dataset||view!=='data')return;
+    if(name==='sweep-phase'&&!sweepPhases.length)return;
+    const index=dataset.archive_index??selectedIndex;
+    saving=name;experimentControls();
+    try{
+      draw();
+      const png=await plotPng($(`experiment-${name}-card`));
+      const path=await api.invoke('experiment_save_png',{index,plot:name.replaceAll('-','_'),png});
+      text('experiment-data-status',path?`PNG saved to ${path}`:'Save cancelled. The plot is still available.');
+    }catch(e){text('experiment-data-status',`PNG export failed: ${e.message??e}`);}
+    finally{saving=false;experimentControls();}
+  };
   $('experiment-sweep-enabled').onchange=experimentControls;
   $('experiment-run').onchange=()=>{
     selectedIndex=Number($('experiment-run').value);
@@ -252,7 +329,7 @@ export function setupExperiments(api) {
   };
   $('experiment-save').onclick=async()=>{
     if(saving||sweep||starting||api.state().session?.experimentOwned||api.state().experimentUnresolved||!dataset)return;
-    saving=true;experimentControls();
+    saving='csv';experimentControls();
     try{
       const path=await api.invoke('experiment_save_csv',{index:dataset.archive_index??selectedIndex});
       const message=path?`CSV saved to ${path}`:'Save cancelled. The dataset is still available.';

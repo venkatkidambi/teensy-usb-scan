@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {phaseDelays,parseFrequencies,fitPhase} from '../ui/phase.js';
-import {signalPoints} from '../ui/experiment.js';
+import {signalPoints,sweepPhasePoints} from '../ui/experiment.js';
 
 function synthetic(frequency,positionDelay,pressureDelay) {
   const duration=4000/frequency,samples=[];
@@ -34,4 +34,20 @@ test('frequency lists preserve run order and repeats, rejecting invalid precisio
   assert.deepEqual(parseFrequencies('10, 0.1; 1\n1 2.345'),[10,.1,1,1,2.345]);
   for(const value of ['', '0', '10.001', 'NaN', '1.0001', '1, nope',Array(101).fill('1').join(',')])
     assert.throws(()=>parseFrequencies(value));
+});
+
+test('sweep phase points use position-to-pressure delay and preserve repeated frequencies and unavailable fits',()=>{
+  const runs=[synthetic(5,7,20),synthetic(.1,90,-100),synthetic(5,30,-10),
+    {metadata:{config:{kind:'quasi_static'}},samples:[]},
+    {metadata:{config:{kind:'sinusoidal',frequency_mhz:1000,cycles:3},elapsed_ms:3000},samples:[]}];
+  const points=sweepPhasePoints(runs);
+  assert.deepEqual(points.map(p=>p.frequency),[5,.1,5,1]);
+  assert.deepEqual(points.map(p=>p.index),[0,1,2,4]);
+  for(const [index,delay] of [[0,20],[1,-100],[2,-10]]){
+    assert.ok(Math.abs(points[index].ms-delay)<1e-7);
+    assert.ok(Math.abs(points[index].degrees-delay*points[index].frequency*.36)<1e-7);
+  }
+  assert.match(points[3].reason,/eight samples/);
+  assert.equal(points[3].ms,undefined);
+  assert.deepEqual(sweepPhasePoints([runs[3]]),[]);
 });

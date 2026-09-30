@@ -50,8 +50,17 @@
       <div class="experiment-data-toolbar"><label for="experiment-run">Recorded run</label><select id="experiment-run"></select></div>
       <p id="experiment-data-summary" class="pressure-detail"></p>
       <div class="main-grid experiment-plots">
-        <section class="panel"><div class="panel-heading"><div><h3>Actuator position</h3><p>Microns (µm) · time (s)</p></div></div><div class="plot-wrap"><canvas id="experiment-position-plot" role="img" aria-label="Experiment position versus time"></canvas></div><div class="panel-foot"><span class="legend">● Position at host receipt &nbsp; <span>━ Commanded trajectory</span></span></div></section>
-        <section class="panel"><div class="panel-heading"><div><h3>Pressure signal</h3><p>Raw counts · time (s)</p></div></div><div class="plot-wrap"><canvas id="experiment-pressure-plot" role="img" aria-label="Experiment pressure versus time"></canvas></div><div class="panel-foot"><span class="legend">━ Recorded pressure</span></div></section>
+        <section id="experiment-position-card" class="panel"><div class="panel-heading"><div><h3>Actuator position</h3><p>Microns (µm) · time (s)</p></div><button id="experiment-position-png" class="plot-export" disabled>Save PNG</button></div><div class="plot-wrap"><canvas id="experiment-position-plot" role="img" aria-label="Experiment position versus time"></canvas></div><div class="panel-foot"><span class="legend">● Position at host receipt &nbsp; <span>━ Commanded trajectory</span></span></div></section>
+        <section id="experiment-pressure-card" class="panel"><div class="panel-heading"><div><h3>Pressure signal</h3><p>Raw counts · time (s)</p></div><button id="experiment-pressure-png" class="plot-export" disabled>Save PNG</button></div><div class="plot-wrap"><canvas id="experiment-pressure-plot" role="img" aria-label="Experiment pressure versus time"></canvas></div><div class="panel-foot"><span class="legend">━ Recorded pressure</span></div></section>
+      </div>
+      <div id="experiment-sweep-results" class="experiment-plots" hidden>
+        <div class="sweep-plot-controls"><label for="experiment-phase-unit">Phase delay units</label><select id="experiment-phase-unit"><option value="ms">Milliseconds (ms)</option><option value="degrees">Degrees (°)</option></select></div>
+        <section id="experiment-sweep-phase-card" class="panel">
+          <div class="panel-heading"><div><h3>Frequency sweep phase delay</h3><p>Position at host receipt → pressure signal</p></div><button id="experiment-sweep-phase-png" class="plot-export" disabled>Save PNG</button></div>
+          <div class="plot-wrap"><canvas id="experiment-sweep-phase-plot" role="img" aria-label="Position at host receipt to pressure phase delay versus frequency"></canvas></div>
+          <div class="panel-foot"><span class="legend">● Recorded run · ring: selected run</span><span id="experiment-sweep-phase-summary"></span></div>
+          <div class="panel-foot"><span>Positive = pressure lags position. Signed delay wraps to ±half a period (±180°).</span></div>
+        </section>
       </div>
       <section id="experiment-phase" class="experiment-phase" aria-labelledby="experiment-phase-title" hidden>
         <h3 id="experiment-phase-title">Phase delays</h3>

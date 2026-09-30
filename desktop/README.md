@@ -5,6 +5,18 @@ The **Experiment Data** view collects plots from both experiment types, with a
 recorded-run picker, CSV export, run details, and sinusoidal phase delays. It
 opens automatically after results arrive and the experiment releases the hardware
 (after the last run for a sweep). Configuration stays in the experiment tabs.
+Sinusoidal results also include a **Frequency sweep phase delay** plot of position
+at host receipt → pressure delay versus frequency (Hz). Choose milliseconds or
+degrees; each reliable run is a point, and a ring marks the selected run. Repeated
+frequencies remain separate points. Unavailable fits are omitted and counted.
+The plot uses only the current experiment's runs and resets with the run history.
+
+Each experiment plot has **Save PNG**, which opens a native Save As dialog. The
+image copies the displayed chart at its current size and display resolution,
+including the title, units, legend, and selected phase-delay units. **Save CSV**
+continues to export the selected run's data. Cancellation or an export error leaves
+all results available. Rebuild the desktop app to enable the native PNG command.
+
 Experiment configuration is validated in Rust before START; the Teensy performs
 all motion scheduling and acquisition. Use current copies fresh encoder position.
 Normal PC traffic pauses until the retained dataset is downloaded and verified.
