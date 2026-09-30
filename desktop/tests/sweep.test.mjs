@@ -36,6 +36,10 @@ test('sweep prevalidates every frequency, waits for download and release, and ex
     assert.deepEqual(h.ipc.find(c=>c[0]==='experiment_validate')[1].configs.map(c=>c.timing),[1,5,10]);
     assert.equal(h.calls.length,1);assert.equal(h.node('experiment-start-button').disabled,true);
     h.result(1);await tick();assert.equal(h.calls.length,1);
+    assert.equal(h.node('experiment-panel').hidden,false);
+    assert.equal(h.node('experiment-data-panel').hidden,true);
+    assert.equal(h.node('tab-data').disabled,true);
+    assert.equal(h.node('experiment-abort').disabled,false);
     h.state.session.pending=true;h.release();await tick();assert.equal(h.calls.length,1);
     h.state.session.pending=false;experimentControls();await tick();assert.equal(h.calls.length,2);
     // ACK may arrive before the result notification.
@@ -43,6 +47,9 @@ test('sweep prevalidates every frequency, waits for download and release, and ex
     h.result(2);await tick();assert.equal(h.calls.length,3);
     h.result(3);h.release();await tick();
     assert.match(h.node('experiment-sweep-status').textContent,/Sweep complete: 3/);
+    assert.equal(h.node('experiment-data-panel').hidden,false);
+    assert.equal(h.node('experiment-panel').hidden,true);
+    assert.equal(h.node('tab-data').disabled,false);
     assert.deepEqual(h.calls.map(c=>c.timing),[1,5,10]);
     assert.ok(h.calls.every(c=>c.start_um===0&&c.increment_um===1&&c.repeats===3));
     h.node('experiment-run').value='0';h.node('experiment-run').onchange();

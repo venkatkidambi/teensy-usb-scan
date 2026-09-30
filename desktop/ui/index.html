@@ -15,10 +15,11 @@
     </div>
     <div class="controller-status"><div class="controller-heading"><h3>Controller status</h3><p id="stat-word">Waiting for STAT</p></div><div id="flags" class="flags"><p class="empty-copy">Active status flags appear with XD-C feedback.</p></div><div id="stat-age" class="status-age">No status received</div></div>
   </section>
-  <nav class="mode-tabs" aria-label="Experiment modes">
+  <nav class="mode-tabs" aria-label="Panel views">
     <button id="tab-dashboard" aria-selected="true">Dashboard</button>
     <button id="tab-quasi_static" aria-selected="false">Quasi-static</button>
     <button id="tab-sinusoidal" aria-selected="false">Sinusoidal</button>
+    <button id="tab-data" aria-selected="false" aria-controls="experiment-data-panel">Experiment Data</button>
   </nav>
   <section id="experiment-panel" class="panel" hidden>
     <div class="panel-heading"><div><h2 id="experiment-title">Quasi-static experiment</h2><p id="experiment-state" role="status">Configure a run. Timing and acquisition run on the Teensy.</p></div><button id="experiment-abort" class="stop-button" disabled>ABORT</button></div>
@@ -40,18 +41,28 @@
     <p id="experiment-start-reason" class="pressure-detail" role="status" hidden></p>
     <p class="pressure-detail">50 Hz recording · up to 81.9 s. Quasi-static reserves travel time with settling margin (at least 10 s per move), plus each hold; sinusoidal reserves 10 s for final center arrival. Start positions use the current encoder reference. Sinusoidal frequency: 0.1–10 Hz with adaptive 4–10 ms control updates; tracking depends on the controller and load. Position resolution: 0.078 µm.</p>
     <p id="experiment-motion-detail" class="pressure-detail"></p>
+  </section>
+  <section id="experiment-data-panel" class="panel" aria-labelledby="experiment-data-title" hidden>
+    <div class="panel-heading"><div><h2 id="experiment-data-title">Experiment Data</h2><p>Recorded position and pressure from quasi-static and sinusoidal experiments.</p></div><button id="experiment-save" disabled>Save CSV</button></div>
+    <p id="experiment-data-status" class="pressure-detail" role="status"></p>
+    <div id="experiment-data-empty" class="experiment-data-empty"><h3>No experiment data yet</h3><p>Run a quasi-static or sinusoidal experiment to view its plots here.</p></div>
     <div id="experiment-results" hidden>
-      <label>Recorded run <select id="experiment-run"></select></label>
-      <div class="panel-heading"><div><h2>Experiment results</h2><p id="experiment-result-summary"></p></div><button id="experiment-save">Save CSV</button></div>
-      <dl class="phase-delays">
-        <dt>Commanded trajectory → position at host receipt</dt><dd id="experiment-phase-command">Awaiting results</dd>
-        <dt>Position at host receipt → pressure signal</dt><dd id="experiment-phase-pressure">Awaiting results</dd>
-      </dl>
-      <p class="pressure-detail">Sinusoidal fit during the waveform only. Positive delay means the second signal lags; signed phase is wrapped to ±180° (±half a period). Host receipt means the Teensy USB host. Pressure uses the plotted recording time. These include motion, transport and sampling effects; fit R² measures sinusoidal agreement.</p>
-      <div class="main-grid">
-        <section><h3 class="result-label">Actuator position (µm) · dots: host receipt time (s); line: commanded trajectory</h3><div class="plot-wrap"><canvas id="experiment-position-plot" aria-label="Experiment position versus time"></canvas></div></section>
-        <section><h3 class="result-label">Pressure (raw counts) vs time (s)</h3><div class="plot-wrap"><canvas id="experiment-pressure-plot" aria-label="Experiment pressure versus time"></canvas></div></section>
+      <div class="experiment-data-toolbar"><label for="experiment-run">Recorded run</label><select id="experiment-run"></select></div>
+      <p id="experiment-data-summary" class="pressure-detail"></p>
+      <div class="main-grid experiment-plots">
+        <section class="panel"><div class="panel-heading"><div><h3>Actuator position</h3><p>Microns (µm) · time (s)</p></div></div><div class="plot-wrap"><canvas id="experiment-position-plot" role="img" aria-label="Experiment position versus time"></canvas></div><div class="panel-foot"><span class="legend">● Position at host receipt &nbsp; <span>━ Commanded trajectory</span></span></div></section>
+        <section class="panel"><div class="panel-heading"><div><h3>Pressure signal</h3><p>Raw counts · time (s)</p></div></div><div class="plot-wrap"><canvas id="experiment-pressure-plot" role="img" aria-label="Experiment pressure versus time"></canvas></div><div class="panel-foot"><span class="legend">━ Recorded pressure</span></div></section>
       </div>
+      <section id="experiment-phase" class="experiment-phase" aria-labelledby="experiment-phase-title" hidden>
+        <h3 id="experiment-phase-title">Phase delays</h3>
+        <dl class="phase-delays">
+          <dt>Commanded trajectory → position at host receipt</dt><dd id="experiment-phase-command">Awaiting results</dd>
+          <dt>Position at host receipt → pressure signal</dt><dd id="experiment-phase-pressure">Awaiting results</dd>
+        </dl>
+        <p class="empty-copy">Sinusoidal fit during the waveform only. Positive delay means the second signal lags; signed phase is wrapped to ±180° (±half a period). Host receipt means the Teensy USB host. Pressure uses the plotted recording time. These include motion, transport and sampling effects; fit R² measures sinusoidal agreement.</p>
+      </section>
+      <details class="experiment-run-details"><summary>Run details</summary><p id="experiment-result-summary" class="pressure-detail"></p></details>
+      <div class="panel-foot"><span>Results are replaced by the first verified dataset of a new experiment. Sweep runs stay together.</span></div>
     </div>
   </section>
   <div id="dashboard-panel">

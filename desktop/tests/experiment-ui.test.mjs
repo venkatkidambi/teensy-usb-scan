@@ -55,6 +55,16 @@ test('START explains blockers, validates fields, submits once, and reports failu
     assert.equal(calls.length,0);
     node('experiment-repeats').reportValidity=()=>true;
     for(const [key,value] of Object.entries({start:'374.556',increment:'5',timing:'1',repeats:'5'}))node(`experiment-${key}`).value=value;
+    node('tab-data').onclick();
+    assert.equal(node('experiment-data-panel').hidden,false);
+    assert.equal(node('experiment-data-empty').hidden,false);
+    assert.equal(node('experiment-panel').hidden,true);
+    assert.equal(node('dashboard-panel').hidden,true);
+    node('tab-sinusoidal').onclick();
+    assert.equal(node('experiment-data-panel').hidden,true);
+    assert.equal(node('experiment-panel').hidden,false);
+    assert.equal(node('experiment-start').value,'374.556');
+    assert.equal(node('experiment-increment').value,'5');
     const pending=submit();
     assert.match(node('experiment-state').textContent,/Sending START/);
     assert.equal(node('experiment-start-button').disabled,true);
@@ -130,6 +140,12 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
         max_lateness_ms: 0, stop_queued: true },
       samples: [[0, 1, 2, 0, 0, 0, 0, 1, 0, 0]],
     } });
+    assert.equal(node('experiment-data-panel').hidden, false);
+    assert.equal(node('experiment-panel').hidden, true);
+    assert.equal(node('experiment-data-empty').hidden, true);
+    assert.equal(node('experiment-phase').hidden, true);
+    node('tab-sinusoidal').onclick();
+    assert.equal(node('experiment-data-panel').hidden, true);
     experimentMessage({ type: 'experiment_dataset', dataset: {
       metadata: { run: 8, config: { kind: 'sinusoidal' }, outcome: 'completed',
         reason: 'none', count: 1, elapsed_ms: 1000, missed_samples: 0,
@@ -138,6 +154,9 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
           {direction:1,max_error_counts:3,commands:[null,null,null,[1,0,750,751],[2,1,750,753],[1,1,760,761]]},
         ] }, samples: [],
     } });
+    assert.equal(node('experiment-data-panel').hidden, false);
+    assert.equal(node('experiment-phase').hidden, false);
+    assert.match(node('experiment-data-summary').textContent, /COMPLETED · Run 8 · sinusoidal/);
     assert.match(node('experiment-result-summary').textContent, /positive peak: 1 reversals, 10–10 ms zero→nonzero, max receipt-time error 0.156 µm/);
     assert.match(node('experiment-result-summary').textContent, /negative peak: 1 reversals, 10–10 ms zero→nonzero, max receipt-time error 0.234 µm/);
     assert.equal(node('experiment-save').disabled, false);
@@ -150,16 +169,19 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
     resolve('/chosen folder/my run.csv');
     await saving;
     assert.match(node('experiment-state').textContent, /CSV saved to \/chosen folder\/my run.csv/);
+    assert.match(node('experiment-data-status').textContent, /CSV saved to \/chosen folder\/my run.csv/);
     assert.equal(node('experiment-save').disabled, false);
 
     const cancelled = node('experiment-save').onclick();
     resolve(null);
     await cancelled;
     assert.match(node('experiment-state').textContent, /cancelled/);
+    assert.match(node('experiment-data-status').textContent, /cancelled/);
     const failed = node('experiment-save').onclick();
     reject('Permission denied');
     await failed;
     assert.match(node('experiment-state').textContent, /CSV export failed: Permission denied/);
+    assert.match(node('experiment-data-status').textContent, /CSV export failed: Permission denied/);
     assert.equal(node('experiment-save').disabled, false);
     assert.equal(node('experiment-results').hidden, false);
 

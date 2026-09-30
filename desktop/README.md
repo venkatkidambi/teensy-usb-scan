@@ -1,6 +1,10 @@
 # Teensy Panel desktop application
 
 Three modes are available: **Dashboard**, **Quasi-static**, and **Sinusoidal**.
+The **Experiment Data** view collects plots from both experiment types, with a
+recorded-run picker, CSV export, run details, and sinusoidal phase delays. It
+opens automatically after results arrive and the experiment releases the hardware
+(after the last run for a sweep). Configuration stays in the experiment tabs.
 Experiment configuration is validated in Rust before START; the Teensy performs
 all motion scheduling and acquisition. Use current copies fresh encoder position.
 Normal PC traffic pauses until the retained dataset is downloaded and verified.

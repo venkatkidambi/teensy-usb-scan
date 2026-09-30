@@ -2,9 +2,9 @@ import {phaseDelays,parseFrequencies} from './phase.js';
 // UI only: native Rust validates configuration, receives binary data and builds CSV.
 const $=id=>document.getElementById(id);
 const text=(id,value)=>{const node=$(id);if(node.textContent!==value)node.textContent=value;};
-let mode='dashboard',dataset=null,context=null,saving=false,starting=false;
+let mode='dashboard',view='dashboard',showResults=false,dataset=null,context=null,saving=false,starting=false;
 let sweep=null,history=[],selectedIndex=null,sweepTimer=null,historyLoading=false,validationCancelled=false;
-const modes=['dashboard','quasi_static','sinusoidal'];
+const modes=['dashboard','quasi_static','sinusoidal','data'];
 const fields=['start','increment','timing','repeats','speed'];
 const configurations={quasi_static:['0','1','1','3','10'],sinusoidal:['0','1','1','3','10']};
 function startBlocked({session,connected,hello,experimentUnresolved}) {
@@ -54,13 +54,18 @@ export function experimentControls() {
   if(sweep&&(sweep.received||sweep.index===0)&&!starting&&!session?.experimentOwned&&!session?.pending&&!experimentUnresolved){
     if(sweepTimer===null)sweepTimer=setTimeout(()=>{sweepTimer=null;void nextSweepRun();},0);
   }
+  // Keep the running experiment and ABORT visible until hardware is released.
+  if(showResults&&!owned){showResults=false;tab('data');}
 }
 function tab(next) {
-  if(mode!=='dashboard')configurations[mode]=fields.map(k=>$(`experiment-${k}`).value);
-  mode=next;
-  for(const name of modes)$(`tab-${name}`).setAttribute('aria-selected',String(mode===name));
-  $('dashboard-panel').hidden=mode!=='dashboard';$('experiment-panel').hidden=mode==='dashboard';
-  if(mode!=='dashboard'){
+  if(configurations[mode])configurations[mode]=fields.map(k=>$(`experiment-${k}`).value);
+  view=next;
+  if(next!=='data')mode=next;
+  for(const name of modes)$(`tab-${name}`).setAttribute('aria-selected',String(view===name));
+  $('dashboard-panel').hidden=view!=='dashboard';
+  $('experiment-panel').hidden=!configurations[view];
+  $('experiment-data-panel').hidden=view!=='data';
+  if(configurations[view]){
     const sine=mode==='sinusoidal';
     $('experiment-speed-field').hidden=sine;
     $('experiment-title').textContent=sine?'Sinusoidal experiment':'Quasi-static experiment';
@@ -73,7 +78,7 @@ function tab(next) {
 }
 export function experimentMessage(message) {
   if(message.type==='experiment_state') {
-    if(message.state!=='dashboard'&&mode==='dashboard')tab('quasi_static');
+    if(message.state!=='dashboard'&&(view==='dashboard'||view==='data'))tab(configurations[mode]?mode:'quasi_static');
     $('experiment-state').textContent=message.state==='running'?`Run ${message.run}: Teensy controlling experiment. Live telemetry paused.`:message.state==='data_ready'?`Run ${message.run}: downloading retained dataset…`:'Ready to configure an experiment.';
   }
   if(message.type==='experiment_ack') {
@@ -92,8 +97,13 @@ export function experimentMessage(message) {
       else {text('experiment-sweep-status',`Sweep stopped: run ${sweep.index} ${dataset.metadata.outcome}. Results retained.`);sweep=null;}
     }
     const m=dataset.metadata;
-    if(mode!==m.config.kind)tab(m.config.kind);
+    if(!message.restored&&view!=='data'&&mode!==m.config.kind)tab(m.config.kind);
+    showResults=true;
+    $('experiment-data-empty').hidden=true;
     $('experiment-results').hidden=false;
+    $('experiment-phase').hidden=m.config.kind!=='sinusoidal';
+    text('experiment-data-status','');
+    text('experiment-data-summary',`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s`);
     $('experiment-result-summary').textContent=`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.reason} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s · CRC verified · missed samples ${m.missed_samples} · max logging lateness ${m.max_lateness_ms} ms${m.stop_queued?'':' · STOP could not be queued'}`;
     if(m.fault_stat!==undefined)$('experiment-result-summary').textContent+=` · Fault STAT ${m.fault_stat}`;
     if(m.timing){const t=m.timing;
@@ -186,7 +196,9 @@ async function nextSweepRun() {
   finally {starting=false;context.controls();}
 }
 export function setupExperiments(api) {
-  context=api;historyLoading=!!api.invoke;validationCancelled=false;clearTimeout(sweepTimer);sweepTimer=null;sweep=null;history=[];selectedIndex=null;dataset=null;starting=false;saving=false;mode='dashboard';
+  context=api;historyLoading=!!api.invoke;validationCancelled=false;clearTimeout(sweepTimer);sweepTimer=null;sweep=null;history=[];selectedIndex=null;dataset=null;starting=false;saving=false;mode='dashboard';view='dashboard';showResults=false;
+  $('experiment-results').hidden=true;
+  $('experiment-data-empty').hidden=false;
   $('experiment-sweep-enabled').onchange=experimentControls;
   $('experiment-run').onchange=()=>{
     selectedIndex=Number($('experiment-run').value);
@@ -243,8 +255,9 @@ export function setupExperiments(api) {
     saving=true;experimentControls();
     try{
       const path=await api.invoke('experiment_save_csv',{index:dataset.archive_index??selectedIndex});
-      $('experiment-state').textContent=path?`CSV saved to ${path}`:'Save cancelled. The dataset is still available.';
-    }catch(e){$('experiment-state').textContent=`CSV export failed: ${e}`;}
+      const message=path?`CSV saved to ${path}`:'Save cancelled. The dataset is still available.';
+      text('experiment-state',message);text('experiment-data-status',message);
+    }catch(e){const message=`CSV export failed: ${e}`;text('experiment-state',message);text('experiment-data-status',message);}
     finally{saving=false;experimentControls();}
   };
   new ResizeObserver(draw).observe($('experiment-results'));
