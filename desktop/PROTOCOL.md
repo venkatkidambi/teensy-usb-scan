@@ -192,7 +192,10 @@ For the velocity-reversal firmware, `data_meta` additionally declares
 at most two reversal objects; its binary payload and CRC remain dataset v2.
 The native receiver appends these objects in order to retained metadata and
 requires the declared count before ACK. Restarting GET_DATA resets both payload
-and diagnostic accumulation. Nothing is streamed during RUNNING.
+and diagnostic accumulation. `reversal_count` is capped by the available sample
+chunks (two entries per chunk) and 288 stored entries; `reversal_total` can be
+larger, particularly for the supported 0.1–10 Hz runs. Nothing is streamed during
+RUNNING.
 
 The existing 4096-byte JSON line limit accommodates these headers. Older clients
 can still decode the sample payload but need updating to retain the new

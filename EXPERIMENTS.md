@@ -172,7 +172,7 @@ and remain in effect for Dashboard operation after the run.
 | Clock | Existing monotonic Teensy SysTick, 1 ms resolution, wrapping u32 |
 | Acquisition schedule | 20 ms / 50 Hz, latest cached raw values |
 | Pressure acquisition | LPS22HHTR 200 Hz output; 1 ms readiness polling; burst read at 400 kHz |
-| Sinusoidal velocity updates | Adaptive 4–10 ms plus priority crossings; optional fixed 100 Hz, 0.100–2.000 Hz wave frequency |
+| Sinusoidal velocity updates | Adaptive 4–10 ms plus priority crossings; optional fixed 100 Hz, 0.100–10.000 Hz wave frequency |
 | Record | 48 bytes, twelve explicit little-endian 32-bit words (dataset v2) |
 | Capacity | 4,096 records |
 | Sample-buffer RAM | 196,608 bytes / 192 KiB, zero-initialized DTCM `.bss` |
@@ -287,7 +287,7 @@ Disconnect, CRC mismatch or a 5 s transfer-response timeout does not discard the
 Teensy copy. Reconnect and GET_DATA restart from offset zero. There is no automatic
 retry of a START. A new run is refused until the old dataset is acknowledged.
 After ACK, bytes remain intact until another START successfully passes validation;
-invalid START does not clear them. The desktop keeps the verified result across
+invalid START does not clear them. The desktop keeps all verified results across
 serial disconnect and page reload within the same process. Neither RAM copy is
 persistent across power loss/process exit; select Save CSV for durable storage.
 Save CSV opens a native Save As dialog for the destination folder and filename.
@@ -334,3 +334,41 @@ Generate HEX with `cargo objcopy --release --locked -- -O ihex target/firmware/f
 this command does not flash hardware. Physical 100 Hz USB dispatch, transport
 latency, low-speed quantization, stop behavior, controller mode transitions,
 return-to-center and stage tracking still require a hardware trial.
+
+## Phase delay and frequency sweeps
+
+Sinusoidal results display command → position-at-host-receipt and
+position-at-host-receipt → pressure phase delays in milliseconds and degrees.
+The desktop fits an offset plus sine/cosine at the configured frequency to each
+pair's overlapping waveform interval, excluding pre-start samples and final
+centering. Position uses unique EPOS generations at `elapsed_ms - epos_age_ms`;
+pressure uses the elapsed-time signal shown in the plot. Positive delay means the
+second signal lags. Values wrap to ±180° / half a period and cannot identify
+whole-cycle delays. These are signal phase estimates including mechanical,
+transport and sampling effects, not measurements of USB transport alone.
+At least eight samples spanning 80% of a period, no gaps of half a period or
+more, and fit R² ≥ 0.50 are required for both signals; otherwise the UI explains
+why the estimate is unavailable. Short high-frequency runs may need more cycles.
+
+Enable **Frequency sweep** in the Sinusoidal tab and enter 1–100 frequencies
+(comma, semicolon or whitespace separated; 0.1–10 Hz, up to three decimal places).
+Native validation checks every run before the first START. Center, amplitude and
+cycle count stay fixed; run duration therefore changes with frequency. Entries
+run in the entered order, including duplicates. Each run returns to center and
+its verified dataset is downloaded and acknowledged before the next START.
+ABORT, a fault, START failure or disconnect cancels the remaining sequence.
+The current autonomous run can continue after disconnect; reconnect to recover it.
+The pending sweep is not resumed after reload or reconnect.
+
+All downloaded datasets stay in desktop process memory across disconnects and
+page reloads. **Recorded run** selects an earlier dataset for plots, phase analysis
+and **Save CSV**. Save each desired run before closing the desktop process.
+
+Reversal diagnostics remain bounded to 288 stored entries and two entries per
+16-sample transfer chunk. At higher frequencies the exported prefix can be shorter
+than the observed reversal count: `reversal_count` reports exported entries and
+`reversal_total` reports all observed crossings. The UI shows this difference;
+all acquired position/pressure records still transfer. Control and recording
+intervals remain unchanged. The 4 ms minimum can exceed the scheduler’s 7%
+velocity-error target at high frequencies; high-frequency tracking needs hardware
+validation.

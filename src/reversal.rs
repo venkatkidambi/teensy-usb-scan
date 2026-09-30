@@ -1,7 +1,8 @@
 //! Bounded post-run diagnostics. No additional commands, sampling or allocation.
 use crate::{experiment_data::*, protocol::Telemetry, xeryon_motion::ScanCommand};
 
-// At most 286 extrema for the validated 71.9 s waveform / 2 Hz limits.
+// Bounded diagnostic storage. Higher-frequency runs report total crossings
+// separately; transfer retains only the prefix that fits the sample chunks.
 pub const CAPACITY: usize = 288;
 pub const WINDOW_MS: u32 = 40;
 

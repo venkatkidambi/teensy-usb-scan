@@ -3,7 +3,7 @@ use super::{Actuator, Engine, scheduling};
 use crate::{experiment_data::*, protocol::Telemetry, xeryon_motion::ScanCommand};
 
 // Engineering bounds, independent of the mathematical evaluation deadline.
-// At the maximum 2 Hz these are well below the 250 ms between reversals.
+// At the maximum 10 Hz these stay below the 50 ms between reversals.
 pub const TX_BUSY_LIMIT_MS: u32 = 40;
 pub const REVERSAL_LIMIT_MS: u32 = 40;
 

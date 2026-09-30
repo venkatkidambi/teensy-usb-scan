@@ -162,8 +162,10 @@ impl ExperimentConfig {
                 frequency_mhz,
                 cycles,
             } => {
-                if amplitude_nm < 78 || !(100..=2000).contains(&frequency_mhz) || cycles == 0 {
-                    return Err("Amplitude must be positive; frequency 0.1..2 Hz; cycles positive");
+                if amplitude_nm < 78 || !(100..=10_000).contains(&frequency_mhz) || cycles == 0 {
+                    return Err(
+                        "Amplitude must be positive; frequency 0.1..10 Hz; cycles positive",
+                    );
                 }
                 counts(
                     center_nm

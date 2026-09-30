@@ -22,7 +22,7 @@ use tauri_plugin_dialog::DialogExt;
 struct Backend {
     connection: Mutex<Option<serial::Connection>>,
     next: AtomicU32,
-    archive: Arc<Mutex<Option<experiment::Dataset>>>,
+    archive: Arc<Mutex<Vec<experiment::Dataset>>>,
     experiment_owned: Arc<AtomicBool>,
 }
 
@@ -52,13 +52,18 @@ impl Backend {
     /// mutex while waiting for the user. Recheck ownership before writing the file.
     fn save_csv(
         &self,
+        index: Option<usize>,
         choose_path: impl FnOnce(&str) -> Result<Option<std::path::PathBuf>, String>,
     ) -> Result<Option<String>, String> {
         let (filename, csv) = {
             let _connection = self.connection.lock().map_err(|e| e.to_string())?;
             self.ensure_export_allowed()?;
             let archive = self.archive.lock().map_err(|e| e.to_string())?;
-            let dataset = archive.as_ref().ok_or("No verified experiment dataset")?;
+            let dataset = match index {
+                Some(index) => archive.get(index),
+                None => archive.last(),
+            }
+            .ok_or("No verified experiment dataset")?;
             (
                 format!("experiment-{}.csv", dataset.metadata["run"]),
                 dataset.csv(),
@@ -171,17 +176,43 @@ async fn experiment_start(
 fn experiment_result(
     state: tauri::State<'_, Arc<Backend>>,
 ) -> Result<Option<experiment::Dataset>, String> {
+    Ok(state
+        .archive
+        .lock()
+        .map_err(|e| e.to_string())?
+        .last()
+        .cloned())
+}
+
+#[tauri::command]
+fn experiment_results(
+    state: tauri::State<'_, Arc<Backend>>,
+) -> Result<Vec<experiment::Dataset>, String> {
     Ok(state.archive.lock().map_err(|e| e.to_string())?.clone())
 }
 
 #[tauri::command]
+fn experiment_validate(configs: Vec<experiment::Input>) -> Result<(), String> {
+    if configs.is_empty() || configs.len() > 100 {
+        return Err("Specify 1 to 100 frequencies".into());
+    }
+    for (index, config) in configs.into_iter().enumerate() {
+        config
+            .command(1)
+            .map_err(|error| format!("Run {}: {error}", index + 1))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn experiment_save_csv(
+    index: Option<usize>,
     window: tauri::WebviewWindow,
     state: tauri::State<'_, Arc<Backend>>,
 ) -> Result<Option<String>, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.save_csv(|filename| {
+        state.save_csv(index, |filename| {
             window
                 .dialog()
                 .file()
@@ -202,7 +233,7 @@ async fn experiment_save_csv(
 macro_rules! command_handler {
     ($($extra:path),* $(,)?) => {
         tauri::generate_handler![serial_ports, serial_connect, serial_send, serial_poll,
-            serial_disconnect, experiment_start, experiment_result, experiment_save_csv, $($extra),*]
+            serial_disconnect, experiment_start, experiment_result, experiment_results, experiment_validate, experiment_save_csv, $($extra),*]
     };
 }
 
@@ -250,11 +281,38 @@ mod tests {
 
     fn backend() -> Backend {
         let backend = Backend::default();
-        *backend.archive.lock().unwrap() = Some(experiment::Dataset {
+        backend.archive.lock().unwrap().push(experiment::Dataset {
+            archive_index: Some(0),
             metadata: serde_json::json!({"run": 7}),
             samples: vec![[0, -10, 123, 0, 1, 2, 3, -20, 42, 4, 1, 2]],
         });
         backend
+    }
+
+    #[test]
+    fn history_export_selects_earlier_run_without_overwriting_latest() {
+        let backend = backend();
+        let mut later = backend.archive.lock().unwrap()[0].clone();
+        later.metadata["run"] = serde_json::json!(8);
+        backend.archive.lock().unwrap().push(later);
+        backend
+            .save_csv(Some(0), |name| {
+                assert_eq!(name, "experiment-7.csv");
+                Ok(None)
+            })
+            .unwrap();
+        backend
+            .save_csv(None, |name| {
+                assert_eq!(name, "experiment-8.csv");
+                Ok(None)
+            })
+            .unwrap();
+        assert!(
+            backend
+                .save_csv(Some(2), |_| panic!("invalid index"))
+                .is_err()
+        );
+        assert_eq!(backend.archive.lock().unwrap().len(), 2);
     }
 
     struct Output(PathBuf);
@@ -284,9 +342,9 @@ mod tests {
         let backend = backend();
         let output = Output::new();
         let path = output.path();
-        let expected = backend.archive.lock().unwrap().as_ref().unwrap().csv();
+        let expected = backend.archive.lock().unwrap().last().unwrap().csv();
         let result = backend
-            .save_csv(|filename| {
+            .save_csv(None, |filename| {
                 assert_eq!(filename, "experiment-7.csv");
                 assert!(backend.connection.try_lock().is_ok());
                 assert!(backend.archive.try_lock().is_ok());
@@ -295,16 +353,16 @@ mod tests {
             .unwrap();
         assert_eq!(result, Some(path.to_string_lossy().into_owned()));
         assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
-        assert!(backend.archive.lock().unwrap().is_some());
+        assert!(!backend.archive.lock().unwrap().is_empty());
     }
 
     #[test]
     fn cancellation_and_errors_keep_the_dataset_available() {
         let backend = backend();
-        assert_eq!(backend.save_csv(|_| Ok(None)).unwrap(), None);
+        assert_eq!(backend.save_csv(None, |_| Ok(None)).unwrap(), None);
         assert_eq!(
             backend
-                .save_csv(|_| Err("dialog failed".into()))
+                .save_csv(None, |_| Err("dialog failed".into()))
                 .unwrap_err(),
             "dialog failed"
         );
@@ -312,24 +370,28 @@ mod tests {
         let missing_parent = output.0.join("missing").join("run.csv");
         assert!(
             backend
-                .save_csv(|_| Ok(Some(missing_parent.clone())))
+                .save_csv(None, |_| Ok(Some(missing_parent.clone())))
                 .unwrap_err()
                 .contains("Could not save")
         );
         assert!(!missing_parent.exists());
-        assert!(backend.archive.lock().unwrap().is_some());
+        assert!(!backend.archive.lock().unwrap().is_empty());
     }
 
     #[test]
     fn absent_dataset_or_owned_experiment_never_opens_dialog() {
         assert!(
             Backend::default()
-                .save_csv(|_| panic!("no dataset"))
+                .save_csv(None, |_| panic!("no dataset"))
                 .is_err()
         );
         let backend = backend();
         backend.experiment_owned.store(true, Ordering::Release);
-        assert!(backend.save_csv(|_| panic!("experiment active")).is_err());
+        assert!(
+            backend
+                .save_csv(None, |_| panic!("experiment active"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -338,12 +400,12 @@ mod tests {
         let output = Output::new();
         let path = output.path();
         std::fs::write(&path, "existing CSV").unwrap();
-        let result = backend.save_csv(|_| {
+        let result = backend.save_csv(None, |_| {
             backend.experiment_owned.store(true, Ordering::Release);
             Ok(Some(path.clone()))
         });
         assert!(result.unwrap_err().contains("ownership"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "existing CSV");
-        assert!(backend.archive.lock().unwrap().is_some());
+        assert!(!backend.archive.lock().unwrap().is_empty());
     }
 }

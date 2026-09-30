@@ -766,7 +766,7 @@ impl<'a> Engine<'a> {
             write!(
                 out,
                 ",\"sine_control\":\"velocity_scan\",\"reversal_count\":{},\"reversal_total\":{},\"reversal_window_ms\":{},\"reversals\":[]",
-                self.reversals.len,
+                self.transferred_reversals(),
                 self.reversals.total,
                 reversal::WINDOW_MS
             )?;
@@ -844,6 +844,12 @@ impl<'a> Engine<'a> {
         self.transfer_next = 0;
         Ok(())
     }
+    // At higher frequencies there can be more reversals than diagnostic slots
+    // in the sample transfer. Advertise only what the bounded transfer can send;
+    // reversal_total still reports every observed crossing.
+    fn transferred_reversals(&self) -> usize {
+        self.reversals.len.min(self.len.div_ceil(CHUNK_RECORDS) * 2)
+    }
     /// Two bounded diagnostics per existing 16-record chunk. Kept out of RUNNING
     /// traffic; the desktop collects them in metadata for raw CSV export.
     pub fn chunk_header(
@@ -857,10 +863,10 @@ impl<'a> Engine<'a> {
         write!(
             out,
             "{{\"type\":\"data_chunk\",\"id\":{id},\"run\":{run},\"offset\":{offset},\"bytes\":{bytes},\"reversal_offset\":{},\"reversals\":[",
-            (offset / CHUNK_RECORDS * 2).min(self.reversals.len)
+            (offset / CHUNK_RECORDS * 2).min(self.transferred_reversals())
         )?;
         let first = offset / CHUNK_RECORDS * 2;
-        for i in first..(first + 2).min(self.reversals.len) {
+        for i in first..(first + 2).min(self.transferred_reversals()) {
             if i != first {
                 write!(out, ",")?;
             }
@@ -1209,7 +1215,37 @@ mod tests {
         assert!(frame.len < 4096);
     }
     #[test]
-    fn every_reversal_is_retained_at_maximum_frequency_and_duration() {
+    fn ten_hz_runs_complete_with_bounded_downloadable_diagnostics() {
+        for cycles in [1, 10, 719] {
+            let mut records = [Record::EMPTY; CAPACITY];
+            let mut turns = [reversal::Reversal::EMPTY; reversal::CAPACITY];
+            let mut e = Engine::new(&mut records).with_reversals(&mut turns);
+            let mut io = Io::default();
+            let config = ExperimentConfig::Sinusoidal {
+                center_nm: 0,
+                amplitude_nm: 1_000_000,
+                frequency_mhz: 10_000,
+                cycles,
+            };
+            assert!(config.validate().is_ok());
+            start(&mut e, config, u32::MAX - 500, &mut io);
+            for elapsed in 1..=cycles * 100 + 3 {
+                let now = e.started_ms.wrapping_add(elapsed);
+                let (t, p) = feedback(now, e.target, true);
+                e.poll(now, &t, p, &mut io);
+            }
+            assert_eq!(e.outcome, "completed");
+            assert_eq!(e.reversals.total, cycles * 2);
+            let count = e.transferred_reversals();
+            assert!(count <= reversal::CAPACITY);
+            assert!(count <= e.len.div_ceil(CHUNK_RECORDS) * 2);
+            let mut metadata = String::new();
+            e.metadata(&mut metadata, 1).unwrap();
+            assert!(metadata.contains(&format!("\"reversal_count\":{count},")));
+        }
+    }
+    #[test]
+    fn every_reversal_is_retained_at_two_hz_and_maximum_duration() {
         let mut records = [Record::EMPTY; CAPACITY];
         let mut turns = [reversal::Reversal::EMPTY; reversal::CAPACITY];
         let mut e = Engine::new(&mut records).with_reversals(&mut turns);
@@ -1328,7 +1364,7 @@ mod tests {
             ExperimentConfig::Sinusoidal {
                 center_nm: 0,
                 amplitude_nm: 78,
-                frequency_mhz: 2001,
+                frequency_mhz: 10_001,
                 cycles: 1,
             },
             ExperimentConfig::Sinusoidal {

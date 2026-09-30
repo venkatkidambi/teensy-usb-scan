@@ -1,12 +1,16 @@
+import {phaseDelays,parseFrequencies} from './phase.js';
 // UI only: native Rust validates configuration, receives binary data and builds CSV.
 const $=id=>document.getElementById(id);
 const text=(id,value)=>{const node=$(id);if(node.textContent!==value)node.textContent=value;};
 let mode='dashboard',dataset=null,context=null,saving=false,starting=false;
+let sweep=null,history=[],selectedIndex=null,sweepTimer=null,historyLoading=false,validationCancelled=false;
 const modes=['dashboard','quasi_static','sinusoidal'];
 const fields=['start','increment','timing','repeats','speed'];
 const configurations={quasi_static:['0','1','1','3','10'],sinusoidal:['0','1','1','3','10']};
 function startBlocked({session,connected,hello,experimentUnresolved}) {
+  if(historyLoading)return 'Loading recorded experiments…';
   if(starting)return 'Sending START to the Teensy…';
+  if(sweep)return 'Frequency sweep in progress. Press ABORT to stop it.';
   if(saving)return 'Wait for CSV saving to finish.';
   if(!connected||!session)return 'Connect the Teensy to start an experiment.';
   if(session.experimentOwned)return 'An experiment owns the hardware. Wait for its results or press ABORT.';
@@ -24,11 +28,19 @@ function startStatus(message) {
 export function experimentControls() {
   if(!context)return;
   const {session,connected,hello,snapshot,experimentUnresolved}=context.state();
-  const owned=starting||!!session?.experimentOwned||experimentUnresolved;
+  if(sweep&&(!connected||session!==sweep.session)){
+    sweep=null;text('experiment-sweep-status','Sweep stopped after disconnect. Recover the current run before starting another sweep.');
+  }
+  const owned=!!sweep||starting||!!session?.experimentOwned||experimentUnresolved;
   for(const name of modes) $(`tab-${name}`).disabled=owned;
   $('dashboard-panel').inert=owned;
   for(const control of $('experiment-form').elements)control.disabled=owned;
   $('experiment-speed').disabled=owned||mode!=='quasi_static';
+  const sweeping=mode==='sinusoidal'&&$('experiment-sweep-enabled').checked;
+  $('experiment-frequencies').disabled=owned||!sweeping;
+  $('experiment-timing').disabled=owned||sweeping;
+  $('experiment-sweep-fields').hidden=mode!=='sinusoidal';
+  $('experiment-run').disabled=owned||!history.length;
   const blocked=startBlocked(context.state());
   $('experiment-start-button').disabled=!!blocked;
   $('experiment-start-button').title=blocked;
@@ -39,6 +51,9 @@ export function experimentControls() {
   $('experiment-abort').disabled=!connected||!owned;
   $('experiment-save').disabled=saving||owned||!dataset;
   text('experiment-save',saving?'Saving…':'Save CSV');
+  if(sweep&&(sweep.received||sweep.index===0)&&!starting&&!session?.experimentOwned&&!session?.pending&&!experimentUnresolved){
+    if(sweepTimer===null)sweepTimer=setTimeout(()=>{sweepTimer=null;void nextSweepRun();},0);
+  }
 }
 function tab(next) {
   if(mode!=='dashboard')configurations[mode]=fields.map(k=>$(`experiment-${k}`).value);
@@ -51,7 +66,7 @@ function tab(next) {
     $('experiment-title').textContent=sine?'Sinusoidal experiment':'Quasi-static experiment';
     for(const [key,label] of Object.entries({start:sine?'Center position (µm)':'Start position (µm)',increment:sine?'Amplitude (µm)':'Signed step (µm)',timing:sine?'Frequency (Hz)':'Hold time (s)',repeats:sine?'Number of cycles':'Number of steps'}))$(`experiment-${key}-label`).textContent=label;
     fields.forEach((k,i)=>{$(`experiment-${k}`).value=configurations[mode][i];});
-    $('experiment-timing').min=sine?'0.1':'0.001';$('experiment-timing').max=sine?'2':'81.9';
+    $('experiment-timing').min=sine?'0.1':'0.001';$('experiment-timing').max=sine?'10':'81.9';
   }
   experimentControls();draw();
   context.viewChanged?.();
@@ -62,10 +77,18 @@ export function experimentMessage(message) {
     $('experiment-state').textContent=message.state==='running'?`Run ${message.run}: Teensy controlling experiment. Live telemetry paused.`:message.state==='data_ready'?`Run ${message.run}: downloading retained dataset…`:'Ready to configure an experiment.';
   }
   if(message.type==='experiment_ack') {
+    if(sweep&&message.action==='start')sweep.run=message.run;
     $('experiment-state').textContent=message.action==='start'?`Run ${message.run}: accepted. Teensy positioning and acquiring; live telemetry paused.`:message.action==='abort'?'ABORT received. Downloading retained samples…':'Dataset verified and acknowledged. Hardware released.';
   }
   if(message.type==='experiment_dataset') {
     dataset=message.dataset;
+    if(!message.restored){
+      history.push(dataset);selectedIndex=history.length-1;updateRunPicker();
+    }
+    if(sweep&&dataset.metadata.run===sweep.run){
+      if(dataset.metadata.outcome==='completed')sweep.received=true;
+      else {text('experiment-sweep-status',`Sweep stopped: run ${sweep.index} ${dataset.metadata.outcome}. Results retained.`);sweep=null;}
+    }
     const m=dataset.metadata;
     if(mode!==m.config.kind)tab(m.config.kind);
     $('experiment-results').hidden=false;
@@ -85,6 +108,11 @@ export function experimentMessage(message) {
       });
       $('experiment-result-summary').textContent+=` · ${summary.join(' · ')} · reversal command/feedback details in CSV metadata`;
     }
+    if(m.reversal_total>m.reversal_count)$('experiment-result-summary').textContent+=` · reversal details retained for ${m.reversal_count} of ${m.reversal_total} peaks`;
+    const delays=phaseDelays(dataset,signalPoints(dataset.samples,1),signalPoints(dataset.samples,2));
+    const format=value=>value.reason?`Unavailable: ${value.reason}`:`${value.ms.toFixed(2)} ms (${value.degrees.toFixed(1)}°), fit R² ${value.r2.toFixed(3)}`;
+    text('experiment-phase-command',delays.reason||format(delays.commandToPosition));
+    text('experiment-phase-pressure',delays.reason||format(delays.positionToPressure));
     draw();
   }
   experimentControls();
@@ -130,8 +158,38 @@ function drawPlot(id,field,scale) {
   for(const [ms,value] of points){ctx.beginPath();ctx.arc(x(ms),y(value),2,0,2*Math.PI);ctx.fill();}
 }
 function draw(){drawPlot('experiment-position-plot',1,.078);drawPlot('experiment-pressure-plot',2,1);}
+function updateRunPicker() {
+  const picker=$('experiment-run');
+  if(picker.replaceChildren){
+    picker.replaceChildren(...history.map((result,index)=>{
+      const option=document.createElement('option'),m=result.metadata;
+      option.value=String(index);option.textContent=`Run ${m.run} · ${m.config.frequency_mhz?`${m.config.frequency_mhz/1000} Hz`:m.config.kind} · ${m.outcome}`;
+      return option;
+    }));
+  }
+  picker.value=String(selectedIndex);
+}
+async function nextSweepRun() {
+  const current=sweep,state=context.state();
+  if(!current||starting||!state.connected||state.session!==current.session||state.session.experimentOwned||state.session.pending||state.experimentUnresolved)return;
+  if(current.index===current.configs.length){
+    text('experiment-sweep-status',`Sweep complete: ${current.index} runs. Select a run to view or save its CSV.`);sweep=null;experimentControls();return;
+  }
+  current.received=false;starting=true;
+  const config=current.configs[current.index++];
+  text('experiment-sweep-status',`Sweep ${current.index}/${current.configs.length} · ${config.timing} Hz`);
+  experimentControls();
+  try {const ack=await current.session.startExperiment(config);if(sweep===current)current.run=ack.run;}
+  catch(e){if(sweep===current)sweep=null;text('experiment-sweep-status',`Sweep stopped: ${e.message??e}. Results retained.`);}
+  finally {starting=false;context.controls();}
+}
 export function setupExperiments(api) {
-  context=api;
+  context=api;historyLoading=!!api.invoke;validationCancelled=false;clearTimeout(sweepTimer);sweepTimer=null;sweep=null;history=[];selectedIndex=null;dataset=null;starting=false;saving=false;mode='dashboard';
+  $('experiment-sweep-enabled').onchange=experimentControls;
+  $('experiment-run').onchange=()=>{
+    selectedIndex=Number($('experiment-run').value);
+    if(history[selectedIndex])experimentMessage({type:'experiment_dataset',dataset:history[selectedIndex],restored:true});
+  };
   for(const name of modes)$(`tab-${name}`).onclick=()=>tab(name);
   $('experiment-current').onclick=()=>{$('experiment-start').value=(api.state().snapshot.values.EPOS.value*.078).toFixed(3);};
   $('experiment-form').onsubmit=async event=>{
@@ -141,7 +199,7 @@ export function setupExperiments(api) {
     // Validate here so a native number-input rejection cannot swallow START
     // before we can display a persistent explanation in the panel and log.
     for(const key of fields){
-      if(key==='speed'&&mode!=='quasi_static')continue;
+      if(key==='speed'&&mode!=='quasi_static'||key==='timing'&&mode==='sinusoidal'&&$('experiment-sweep-enabled').checked)continue;
       const input=$(`experiment-${key}`);
       if(!input.reportValidity()){
         startStatus(`${$(`experiment-${key}-label`).textContent}: ${input.validationMessage}`);
@@ -150,6 +208,19 @@ export function setupExperiments(api) {
     }
     const config={kind:mode,start_um:Number($('experiment-start').value),increment_um:Number($('experiment-increment').value),timing:Number($('experiment-timing').value),repeats:Number($('experiment-repeats').value)};
     if(mode==='quasi_static')config.speed_um_s=Number($('experiment-speed').value);
+    if(mode==='sinusoidal'&&$('experiment-sweep-enabled').checked){
+      validationCancelled=false;starting=true;experimentControls();
+      try {
+        const configs=parseFrequencies($('experiment-frequencies').value).map(timing=>({...config,timing}));
+        await api.invoke('experiment_validate',{configs});
+        if(validationCancelled)throw Error('Sweep cancelled.');
+        if(api.state().session!==state.session||!api.state().connected)throw Error('Connection changed during validation.');
+        sweep={configs,index:0,session:state.session,received:false,run:null};
+      }catch(e){startStatus(`Sweep validation failed: ${e.message??e}`);}
+      finally{starting=false;}
+      if(sweep)await nextSweepRun();
+      api.controls();return;
+    }
     starting=true;
     startStatus('Sending START to the Teensy…');
     experimentControls();
@@ -158,20 +229,27 @@ export function setupExperiments(api) {
     finally{starting=false;api.controls();}
   };
   $('experiment-abort').onclick=async()=>{
+    validationCancelled=true;
+    if(sweep){sweep=null;text('experiment-sweep-status','Sweep cancelled. No further frequencies will start.');}
+    if(!api.state().session?.experimentOwned&&!api.state().experimentUnresolved){api.controls();return;}
     try{await api.state().session.request('ABORT');}
     catch(e){$('experiment-state').textContent=`ABORT not acknowledged: ${e.message}. Autonomous operation can continue after PC disconnect. Reconnect and retry ABORT.`;}
     finally{api.controls();}
   };
   $('experiment-save').onclick=async()=>{
-    if(saving||api.state().session?.experimentOwned||api.state().experimentUnresolved||!dataset)return;
+    if(saving||sweep||starting||api.state().session?.experimentOwned||api.state().experimentUnresolved||!dataset)return;
     saving=true;experimentControls();
     try{
-      const path=await api.invoke('experiment_save_csv');
+      const path=await api.invoke('experiment_save_csv',{index:dataset.archive_index??selectedIndex});
       $('experiment-state').textContent=path?`CSV saved to ${path}`:'Save cancelled. The dataset is still available.';
     }catch(e){$('experiment-state').textContent=`CSV export failed: ${e}`;}
     finally{saving=false;experimentControls();}
   };
   new ResizeObserver(draw).observe($('experiment-results'));
-  if(api.invoke)void api.invoke('experiment_result').then(result=>{if(result)experimentMessage({type:'experiment_dataset',dataset:result});}).catch(()=>{});
+  if(api.invoke)void api.invoke('experiment_results').then(results=>{
+    if(!results?.length)return;
+    history=results;selectedIndex=history.length-1;updateRunPicker();
+    experimentMessage({type:'experiment_dataset',dataset:history[selectedIndex],restored:true});
+  }).catch(e=>startStatus(`Could not restore recorded runs: ${e.message??e}`)).finally(()=>{historyLoading=false;experimentControls();});
   experimentControls();
 }

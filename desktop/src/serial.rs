@@ -161,7 +161,7 @@ impl Connection {
     pub fn open(
         name: &str,
         id: u32,
-        archive: Arc<Mutex<Option<crate::experiment::Dataset>>>,
+        archive: Arc<Mutex<Vec<crate::experiment::Dataset>>>,
         ownership: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         if !ports()?.iter().any(|p| p.name == name) {
@@ -293,9 +293,13 @@ impl Connection {
                                     if advance_download {
                                         let (command, dataset) =
                                             download.next().map_err(io::Error::other)?;
-                                        if let Some(dataset) = dataset {
+                                        if let Some(mut dataset) = dataset {
                                             // Both empty and nonempty runs are retained before ACK.
-                                            *archive.lock().unwrap() = Some(dataset.clone());
+                                            {
+                                                let mut archive = archive.lock().unwrap();
+                                                dataset.archive_index = Some(archive.len());
+                                                archive.push(dataset.clone());
+                                            }
                                             queue.lock().unwrap().dataset = Some(dataset);
                                         }
                                         next = Some(command);
@@ -490,7 +494,7 @@ mod tests {
             "START 1 Q 0 78 500 2 10 extra",
             // Syntactically valid configurations still need duration/range checks.
             "START 1 Q 0 78 500 1000 10",
-            "START 1 S 0 780 2001 1",
+            "START 1 S 0 780 10001 1",
             "START 1 S 2617245618 780 1000 1",
         ] {
             assert!(parse_command(command).is_err(), "{command}");

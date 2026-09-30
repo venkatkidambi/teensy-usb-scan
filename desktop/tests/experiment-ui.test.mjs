@@ -118,7 +118,7 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
       controls: experimentControls,
       invoke(command) {
         calls.push(command);
-        if (command === 'experiment_result') return Promise.resolve(null);
+        if (command === 'experiment_results') return Promise.resolve(null);
         assert.equal(command, 'experiment_save_csv');
         return new Promise((ok, fail) => { resolve = ok; reject = fail; });
       },
@@ -146,7 +146,7 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
     assert.equal(node('experiment-start-button').disabled, true);
     await node('experiment-form').onsubmit({ preventDefault() {} });
     await node('experiment-save').onclick();
-    assert.deepEqual(calls, ['experiment_result', 'experiment_save_csv']);
+    assert.deepEqual(calls, ['experiment_results', 'experiment_save_csv']);
     resolve('/chosen folder/my run.csv');
     await saving;
     assert.match(node('experiment-state').textContent, /CSV saved to \/chosen folder\/my run.csv/);

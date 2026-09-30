@@ -29,13 +29,25 @@
       <label><span id="experiment-timing-label">Hold time (s)</span><input id="experiment-timing" type="number" min="0.001" step="0.001" value="1" required></label>
       <label><span id="experiment-repeats-label">Number of steps</span><input id="experiment-repeats" type="number" min="1" step="1" value="3" required></label>
       <label id="experiment-speed-field"><span id="experiment-speed-label">Actuator speed (µm/s)</span><input id="experiment-speed" type="number" min="1" max="16777215" step="1" value="10" required></label>
+      <div id="experiment-sweep-fields" hidden>
+        <label><input id="experiment-sweep-enabled" type="checkbox"> Frequency sweep</label>
+        <label>Frequencies (Hz, in run order)<input id="experiment-frequencies" type="text" value="0.1, 0.5, 1, 2, 5, 10" placeholder="0.1, 0.5, 1, 2, 5, 10" disabled></label>
+        <p class="pressure-detail">Same center, amplitude and cycle count at each frequency (up to 100 runs). Each run returns to center and downloads before the next starts. Keep the app connected; ABORT cancels the remaining sweep.</p>
+      </div>
       <button id="experiment-start-button" type="submit" class="primary" aria-describedby="experiment-start-reason" disabled>START</button>
     </form>
+    <p id="experiment-sweep-status" role="status"></p>
     <p id="experiment-start-reason" class="pressure-detail" role="status" hidden></p>
-    <p class="pressure-detail">50 Hz recording · up to 81.9 s. Quasi-static reserves travel time with settling margin (at least 10 s per move), plus each hold; sinusoidal reserves 10 s for final center arrival. Start positions use the current encoder reference. Sinusoidal frequency: 0.1–2 Hz with 100 Hz control updates; tracking depends on the controller and load. Position resolution: 0.078 µm.</p>
+    <p class="pressure-detail">50 Hz recording · up to 81.9 s. Quasi-static reserves travel time with settling margin (at least 10 s per move), plus each hold; sinusoidal reserves 10 s for final center arrival. Start positions use the current encoder reference. Sinusoidal frequency: 0.1–10 Hz with adaptive 4–10 ms control updates; tracking depends on the controller and load. Position resolution: 0.078 µm.</p>
     <p id="experiment-motion-detail" class="pressure-detail"></p>
     <div id="experiment-results" hidden>
+      <label>Recorded run <select id="experiment-run"></select></label>
       <div class="panel-heading"><div><h2>Experiment results</h2><p id="experiment-result-summary"></p></div><button id="experiment-save">Save CSV</button></div>
+      <dl class="phase-delays">
+        <dt>Commanded trajectory → position at host receipt</dt><dd id="experiment-phase-command">Awaiting results</dd>
+        <dt>Position at host receipt → pressure signal</dt><dd id="experiment-phase-pressure">Awaiting results</dd>
+      </dl>
+      <p class="pressure-detail">Sinusoidal fit during the waveform only. Positive delay means the second signal lags; signed phase is wrapped to ±180° (±half a period). Host receipt means the Teensy USB host. Pressure uses the plotted recording time. These include motion, transport and sampling effects; fit R² measures sinusoidal agreement.</p>
       <div class="main-grid">
         <section><h3 class="result-label">Actuator position (µm) · dots: host receipt time (s); line: commanded trajectory</h3><div class="plot-wrap"><canvas id="experiment-position-plot" aria-label="Experiment position versus time"></canvas></div></section>
         <section><h3 class="result-label">Pressure (raw counts) vs time (s)</h3><div class="plot-wrap"><canvas id="experiment-pressure-plot" aria-label="Experiment pressure versus time"></canvas></div></section>

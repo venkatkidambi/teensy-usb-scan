@@ -20,3 +20,5 @@
 /* Keep periodic request blockers from moving the experiment form/results. */
 #experiment-start-reason{line-height:1.5;min-height:calc(1.5em + 16px)}
 #experiment-start-reason[hidden]{display:block!important;visibility:hidden}
+
+#experiment-sweep-fields{flex-basis:100%;padding:12px 0}#experiment-sweep-fields label{margin-bottom:8px}#experiment-sweep-enabled{width:auto;min-width:0}#experiment-frequencies{width:min(100%,420px)}.phase-delays{display:grid;grid-template-columns:minmax(180px,1fr) 2fr;gap:8px 16px;font-size:13px}.phase-delays dd{margin:0;font-variant-numeric:tabular-nums}#experiment-run{margin:8px 0 16px;padding:6px}

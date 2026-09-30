@@ -89,8 +89,10 @@ during RUNNING. It observes existing feedback and command traffic only.
 Fixed storage holds 288 reversal records, sufficient for all 286 extrema of the
 longest valid 2 Hz / 143-cycle run. Reset happens only on an accepted new run.
 Aborted/faulted datasets retain partial diagnostics. `reversal_total` counts
-detected crossings; `reversal_count` is the retained count. They match with the
-firmware's full buffer; a deliberately smaller test buffer reports truncation.
+detected crossings; `reversal_count` is the exported count. With the expanded
+10 Hz limit, the exported prefix is bounded by both 288 stored entries and two
+entries per sample chunk. The results panel reports truncation explicitly; all
+position and pressure samples still transfer.
 
 The initial `data_meta` declares these counts, `reversal_window_ms=40`, and an
 empty `reversals` array. Each existing binary data chunk's JSON header carries

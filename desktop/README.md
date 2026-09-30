@@ -25,6 +25,18 @@ records at 50 Hz. Firmware advertises `sine_velocity: true` and retains the lega
 theoretical position is logged at 0.078 µm resolution. Initial and final center
 positioning use tracked DPOS moves. Speed is changed by the waveform and remains
 at its final setting afterward; travel limits remain configured as before.
+Sinusoidal frequencies accept 0.1–10 Hz. Enable **Frequency sweep** and enter
+frequencies in run order to repeat the same center, amplitude and cycle count.
+Each run completes and downloads before the next begins. Keep the app connected;
+ABORT, faults and disconnects cancel the remaining sweep. All verified runs remain
+selectable under **Recorded run**, with individual CSV exports, until app exit.
+
+Results calculate command-to-received-position and received-position-to-pressure
+phase delays in ms and degrees. Positive means lag, wrapped to ±half a cycle.
+Fits use the waveform interval, receipt timestamps for position, and plotted
+recording timestamps for pressure; weak or insufficient signals show a reason
+instead of a value. See [phase and sweep details](../EXPERIMENTS.md#phase-delay-and-frequency-sweeps).
+Rebuild both desktop and firmware to use the increased limit.
 Hardware tracking and drift still need verification under the intended load.
 
 Tauri 2 + plain HTML/CSS/JavaScript, with serial IO in Rust. The release app

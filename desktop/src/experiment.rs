@@ -138,6 +138,9 @@ pub fn uint(value: &Value, key: &str) -> Result<u32, String> {
 
 #[derive(Clone, Serialize)]
 pub struct Dataset {
+    /// Process-local archive identity, independent of firmware run counter resets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_index: Option<usize>,
     pub metadata: Value,
     /// Wire field order; i64 accommodates all signed and unsigned 32-bit words.
     pub samples: Vec<[i64; RECORD_FIELDS]>,
@@ -293,6 +296,7 @@ impl Download {
                 uint(meta, "crc")?
             ),
             Some(Dataset {
+                archive_index: None,
                 metadata: meta.clone(),
                 samples,
             }),
