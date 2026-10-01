@@ -90,8 +90,8 @@ All terminal paths request STOP; metadata says whether it could be queued.
 
 ## Xeryon waveform strategy: adaptive velocity/direction control
 
-See [ADAPTIVE_SCHEDULING.md](ADAPTIVE_SCHEDULING.md) for the error budget,
-mandatory crossing deadlines, diagnostics and engineering fixed-100-Hz comparison.
+See the [scheduler implementation](src/scheduling.rs) for the error budget and
+the [waveform transport implementation](src/waveform_tx.rs) for crossing deadlines.
 
 After confirmed initial positioning, the Teensy evaluates the desired position
 `x(t) = center + A * sin(2π f t)` and commands its derivative
@@ -117,9 +117,9 @@ waveform reversals. A rounded-zero resume remains a mandatory ordered command.
 Ordinary updates coalesce while TX is busy and recompute velocity at actual send
 time. No historical waveform FIFO or phase pause is introduced. An unfinished
 waveform transfer lasting 40 ms, a reversal deadline, or a real transfer failure
-still faults and requests priority STOP. See
-[ADAPTIVE_SCHEDULING.md](ADAPTIVE_SCHEDULING.md) for admission rules, diagnostics
-and the hardware repeat procedure; [REVERSALS.md](REVERSALS.md) records the history.
+still faults and requests priority STOP. See the
+[scheduler diagnostics](desktop/PROTOCOL.md#adaptive-scheduler-diagnostics) for
+the metadata returned after a run.
 
 Before any motion, the peak must be finite, positive, no greater than the existing
 24-bit `MAX_SPEED_UM_S` (16,777,215 µm/s), and round to a positive representable
@@ -213,8 +213,8 @@ Pressure includes every logger sample, including repeated values and identities.
 CSV exposes position receipt time, both identities, and per-signal new flags;
 pressure is recorded against `time_s`, without an I²C completion time column.
 The 50 Hz logger still selects the latest sample; it does not guarantee capture of every asynchronous
-EPOS or 200 Hz pressure publication. See [EPOS_TIMING.md](EPOS_TIMING.md) for setup,
-receipt-time limitations, decimation statistics and physical acceptance.
+EPOS or 200 Hz pressure publication. Receipt timestamps do not establish the
+controller's sampling time or USB transit delay.
 
 The foreground performs at most one logging operation per poll. Late logging
 skips expired slots rather than fabricating samples, recording missed-slot count

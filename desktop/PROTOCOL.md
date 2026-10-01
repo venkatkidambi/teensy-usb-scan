@@ -183,7 +183,7 @@ tracking accuracy or feedback sampling rate.
 Post-run `timing` metadata reports arrival statistics, cache reuse, unlogged EPOS
 updates, receipt ages, parse errors and USB service/backlog/TX occupancy.
 `epos_rtt`, `epos_source_drops` and `rx_overflow` are null (unavailable), not zero.
-See [EPOS_TIMING.md](../EPOS_TIMING.md) for exact counter and timestamp semantics.
+Receipt timestamps measure Teensy reception, not controller sampling time.
 # Sinusoidal reversal diagnostics
 
 For the velocity-reversal firmware, `data_meta` additionally declares
@@ -199,8 +199,8 @@ RUNNING.
 
 The existing 4096-byte JSON line limit accommodates these headers. Older clients
 can still decode the sample payload but need updating to retain the new
-diagnostics. See [REVERSALS.md](../REVERSALS.md) for fields, timestamp semantics,
-partial-run behavior and the hardware comparison procedure.
+diagnostics. See the [reversal record implementation](../src/reversal.rs) for
+fields and timestamp semantics.
 
 ## Adaptive scheduler diagnostics
 
@@ -211,8 +211,8 @@ and USB completion latency statistics, held-command error, and TX queue statisti
 It also reports requested/coalesced updates, maximum consecutive coalescing,
 busy-duration statistics, zero/direction/resume completion latency from the
 theoretical crossing, and separate backpressure versus USB transfer fault counts.
-See [ADAPTIVE_SCHEDULING.md](../ADAPTIVE_SCHEDULING.md) for field definitions and
-measurement limitations. Groups with no timing observations are null; missing
+See the [waveform transport implementation](../src/waveform_tx.rs) for diagnostic
+definitions. Groups with no timing observations are null; missing
 completions remain explicitly counted. These diagnostics are returned only after
 RUNNING, retained by the desktop receiver, and exported in CSV metadata. Legacy
 `trajectory_ms=10` is the fixed baseline/max evaluation interval; it no longer

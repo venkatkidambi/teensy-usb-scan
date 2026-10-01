@@ -10,3 +10,8 @@
 __pycache__/
 /node_modules/
 /desktop/dist/
+
+# Local debugging and investigation notes
+/ADAPTIVE_SCHEDULING.md
+/EPOS_TIMING.md
+/REVERSALS.md
