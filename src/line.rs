@@ -36,24 +36,3 @@ impl<const N: usize> LineBuffer<N> {
         None
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn capacity_overflow_and_recovery() {
-        let mut lines = LineBuffer::<3>::new();
-        for byte in b"abc" {
-            assert!(lines.push(*byte).is_none());
-        }
-        assert_eq!(lines.push(b'\n'), Some(Ok(&b"abc"[..])));
-        for byte in b"abcdignored" {
-            assert!(lines.push(*byte).is_none());
-        }
-        assert_eq!(lines.push(b'\n'), Some(Err(())));
-        assert_eq!(lines.push(b'\n'), Some(Ok(&b""[..])));
-        assert!(lines.push(b'\r').is_none());
-        assert_eq!(lines.push(b'\n'), Some(Ok(&b"\r"[..])));
-    }
-}

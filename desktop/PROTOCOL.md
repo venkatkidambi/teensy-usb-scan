@@ -1,8 +1,8 @@
 # PC ↔ Teensy protocol v1
 
-Firmware 0.2.0 adds `experiments: true`, START/ABORT and a retained binary dataset
-extension. See [EXPERIMENTS.md — Dataset protocol](../EXPERIMENTS.md#dataset-protocol)
-for framing, raw record layout, CRC, ownership, passive reconnect and ACK lifecycle.
+Firmware 0.2.0 advertises `experiments: true`, START/ABORT and a retained binary dataset
+extension. See [Dataset transfer](#dataset-transfer) for framing, raw record layout,
+CRC, ownership, passive reconnect and ACK lifecycle.
 All Dashboard commands below remain available when no experiment owns hardware.
 
 Current firmware also advertises `quasi_static_speed: true`. Quasi-static START
@@ -12,6 +12,13 @@ are rejected. The desktop requires this capability before offering START Q.
 Sinusoidal START keeps its existing arguments. Quasi-static metadata includes
 `speed_um_s`. START acknowledges acceptance; controller speed/TOU2 readback
 checks happen before motion and report any failure in the retained dataset.
+
+Experiment preparation queries inherited INFO/POLI, sets INFO=2 and POLI=20 ms,
+and requires fresh matching readbacks before motion. Each setup step has a
+1.5 s deadline; unavailable original settings are reported as null. Runtime
+settings remain after the run; no SAVE command writes controller nonvolatile memory.
+Quasi-static SSPD/TOU2 readbacks have three-second deadlines. Firmware checks
+TOU2 against the reserved movement budget and does not change that timeout.
 
 USB1: CDC ACM `5824:27dd`, 115200 8-N-1, no flow control, DTR asserted.
 Baud rate is a CDC setting, not USB throughput. The desktop opens the port natively.
@@ -138,7 +145,7 @@ Update firmware and desktop together for this sensor-specific pressure schema.
 
 Force calibration is a desktop presentation/export conversion; wire units remain
 raw LPS counts. The dashboard and experiment plots display mN using the
-[probe-derived calibration](README.md#lps-to-force-calibration). CSV appends
+[probe-derived calibration](../README.md#hardware-and-diagnostics). CSV appends
 `force_n`, `force_mn` and `force_extrapolated` to the existing columns, preserving
 `pressure_raw`. The CSV metadata adds `force_calibration` with the coefficients,
 supported range, source hashes and source observations used for the export.
@@ -194,7 +201,7 @@ Post-run `timing` metadata reports arrival statistics, cache reuse, unlogged EPO
 updates, receipt ages, parse errors and USB service/backlog/TX occupancy.
 `epos_rtt`, `epos_source_drops` and `rx_overflow` are null (unavailable), not zero.
 Receipt timestamps measure Teensy reception, not controller sampling time.
-# Sinusoidal reversal diagnostics
+## Sinusoidal reversal diagnostics
 
 For the velocity-reversal firmware, `data_meta` additionally declares
 `reversal_count`, `reversal_total`, `reversal_window_ms` and an initially empty
@@ -202,10 +209,11 @@ For the velocity-reversal firmware, `data_meta` additionally declares
 at most two reversal objects; its binary payload and CRC remain dataset v2.
 The native receiver appends these objects in order to retained metadata and
 requires the declared count before ACK. Restarting GET_DATA resets both payload
-and diagnostic accumulation. `reversal_count` is capped by the available sample
-chunks (two entries per chunk) and 288 stored entries; `reversal_total` can be
-larger, particularly for the supported 0.1–10 Hz runs. Nothing is streamed during
-RUNNING.
+and diagnostic accumulation. Current firmware sends one reversal per two-sample
+chunk; `reversal_count` is capped by the available chunks and 288 stored entries.
+Validation limits runs to 144 cycles so accepted reversals fit the fixed storage.
+The receiver also accepts older dataset-v2 chunks of up to sixteen samples and
+two reversal objects. Nothing is streamed during RUNNING.
 
 The 8192-byte JSON line limit accommodates these headers and final-return metadata. Older clients
 can still decode the sample payload but need updating to retain the new
@@ -255,3 +263,72 @@ boundary is fractional or observed late. `waveform_tx_pending` reports USB busy;
 The record format and DATA_VERSION remain unchanged. Deploy the updated desktop
 receiver with this firmware because final metadata may exceed the old 4096-byte
 line limit. Dataset CRC still covers binary records, as before.
+
+## Dataset transfer
+
+```text
+START <id> Q <start_nm:i64> <step_nm:i64> <hold_ms:u32> <steps:u32> <speed_um_s:u32>
+START <id> S <center_nm:i64> <amplitude_nm:u32> <frequency_millihz:u32> <cycles:u32>
+ABORT <id>
+GET_DATA <id> <run>
+GET_CHUNK <id> <run> <record_offset>
+ACK_DATA_RECEIVED <id> <run> <count> <crc32_decimal>
+```
+
+START replies with `experiment_ack`, run, and action `start`; ABORT uses action
+`abort`. The retained dataset reports the terminal outcome. Hardware ownership
+lasts through positioning, acquisition, and transfer until verified ACK. Ordinary
+commands (including PING and manual STOP) return busy; use ABORT for an active run.
+USB1 disconnect and PC heartbeat loss do not terminate autonomous acquisition.
+
+On USB1 open, `experiment_state` announces `dashboard`, `running` (including
+positioning/arming), or `data_ready`. The desktop waits passively before its
+handshake so reconnect cannot inject HELLO/PING into a running experiment.
+The native receiver downloads `data_ready` results using GET_DATA, then sequential
+GET_CHUNK requests. `data_meta` includes configuration, run, version, record size,
+count, bytes, CRC, outcome/reason, STOP queue result, timing, and retained diagnostics.
+
+A `data_chunk` JSON header with id/run/record-offset/byte-length and reversal
+metadata ends in LF, followed immediately by the declared binary bytes. There
+is no delimiter after the payload. Current firmware sends at most two records
+(96 bytes) per chunk; native reception accepts up to sixteen dataset-v2 records
+for compatibility. Binary LF/NUL/non-UTF8 bytes are opaque to line framing.
+
+Dataset v2 contains twelve explicit little-endian 32-bit words per 48-byte record:
+
+| Byte offset | Field | Type |
+| --- | --- | --- |
+| 0 | elapsed_ms | u32, actual acquisition time |
+| 4 | epos | i32, raw encoder counts |
+| 8 | pressure_raw | i32, signed sensor counts |
+| 12 | stat | u32 |
+| 16 | epos_age_ms | u32 |
+| 20 | pressure_age_ms | u32 |
+| 24 | stat_age_ms | u32 |
+| 28 | target | i32, theoretical sine / last quasi-static DPOS counts |
+| 32 | controller_ticks | u32, independently cached TIME (0.1 ms units) |
+| 36 | controller_age_ms | u32; UINT32_MAX means TIME unavailable |
+| 40 | epos_generation | u32, publication identity including unchanged values |
+| 44 | pressure_generation | u32, sensor publication identity |
+
+Capacity is 4,096 records at 20 ms sampling. Position receipt time is signed
+`elapsed_ms - epos_age_ms`; signals are asynchronous, not simultaneous measurements.
+The terminal waveform sample records the negative extremum, and subsequent return
+samples use the center target. Version 1 datasets are rejected rather than decoded
+with the wrong layout. CSV preserves raw values, ages, identities, and diagnostics.
+
+CRC-32/ISO-HDLC covers concatenated encoded records: initialize to 0xffffffff,
+use reflected polynomial 0xedb88320, and complement the final value. JSON metadata
+is validated separately and is not covered by this payload CRC. Native Rust
+checks count, bytes, offsets, run, timestamps, diagnostic count, and CRC before
+retaining the dataset and sending ACK_DATA_RECEIVED. Firmware also requires every
+record to have transferred in sequence before accepting the matching count/CRC ACK.
+Empty fault datasets still require verification and ACK.
+
+Disconnect, CRC failure, or the five-second transfer-response timeout retains
+the Teensy copy. Reconnect and GET_DATA restart from zero, including diagnostics.
+START is never retried automatically. After ACK, bytes remain until a new START
+passes validation. Desktop CSV/PNG export opens a native Save As dialog, releases
+serial locks while it is open, and rechecks ownership before writing. Cancellation
+or write failure leaves results available. RAM results are not durable across
+power loss or desktop process exit.

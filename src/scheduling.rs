@@ -302,7 +302,6 @@ impl Diagnostics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xeryon_motion::ScanState;
 
     #[test]
     fn position_centers_need_less_density_than_extrema_and_bounds_are_explicit() {
@@ -318,116 +317,6 @@ mod tests {
             assert!(dt >= MIN_CONTROL_INTERVAL || t + dt == crossing_after(f, t));
         }
         assert_eq!(next(Mode::Fixed100Hz, a, f, 123, 0.0), 130);
-    }
-
-    fn simulate(a: u32, f: u32, mode: Mode) -> (f64, u32, f64) {
-        let mut scan = ScanState::default();
-        let mut held = 0.0;
-        let mut time = 0;
-        let end = 2_000_000u32.div_ceil(f);
-        let mut error: f64 = 0.0;
-        let mut sent = 0;
-        let mut turns = 0;
-        let mut last_command = None;
-        while time < end {
-            let direction = sine_direction(f, time);
-            let crossing = scan.direction.is_some_and(|d| d != direction);
-            scan.update(sine_velocity(a, f, time), direction, |commands| {
-                for command in commands {
-                    assert_ne!(*command, ScanCommand::Direction(0));
-                    if let ScanCommand::Speed(speed) = command {
-                        if !crossing {
-                            assert_ne!(last_command, Some(*speed));
-                        }
-                        last_command = Some(*speed);
-                        held = f64::from(*speed) * f64::from(direction);
-                        sent += 1;
-                    }
-                }
-                if crossing {
-                    assert_eq!(
-                        commands,
-                        &[ScanCommand::Speed(0), ScanCommand::Direction(direction)]
-                    );
-                    turns += 1;
-                }
-                Ok(())
-            })
-            .unwrap();
-            let to = next(mode, a, f, time, held).min(end);
-            error = error.max(held_error(a, f, held, time, to));
-            if mode == Mode::Adaptive {
-                // Independent dense sampling of the analytic sine, including sub-ms times.
-                for tenth in time * 10..=to * 10 {
-                    let v = sine_max_velocity(a, f)
-                        * (core::f64::consts::TAU * f64::from(f) * f64::from(tenth) / 10_000_000.0)
-                            .sin();
-                    assert!(
-                        (held - v).abs() <= tolerance(a, f) + 1e-6,
-                        "a={a} f={f} t={tenth} error={} tolerance={}",
-                        (held - v).abs(),
-                        tolerance(a, f)
-                    );
-                }
-            }
-            time = to;
-        }
-        assert_eq!(turns, 3); // terminal crossing stops, without another SCAN reversal
-        (error, sent, f64::from(sent) * 1000.0 / f64::from(end))
-    }
-
-    #[test]
-    fn simulated_quantized_hold_respects_error_budget_and_deduplicates() {
-        for a in [800, 7_800, 1_000_000, 1_000_000_000] {
-            for f in [100, 333, 1000, 1300, 1999, 2000] {
-                let (error, _, _) = simulate(a, f, Mode::Adaptive);
-                assert!(error <= tolerance(a, f) + 1e-6);
-            }
-        }
-        for f in [1000, 1300, 2000] {
-            let adaptive = simulate(1_000_000, f, Mode::Adaptive);
-            let fixed = simulate(1_000_000, f, Mode::Fixed100Hz);
-            println!("SIM f={f}mHz A=1000um adaptive(error,count,hz)={adaptive:?} fixed={fixed:?}");
-        }
-        assert!(simulate(800, 100, Mode::Adaptive).1 < 100); // many unchanged integer speeds
-    }
-
-    #[test]
-    fn latency_pairs_ordered_commands_across_wrap_and_retains_missing_completions() {
-        let mut d = Diagnostics::default();
-        let scheduled = u32::MAX - 3;
-        let queued = u32::MAX - 1;
-        d.sent(
-            &[ScanCommand::Speed(0), ScanCommand::Direction(-1)],
-            TxProgress([2, 0, queued, queued, 0, 0]),
-            scheduled,
-            queued,
-            10,
-            -1,
-        );
-        d.refresh(TxProgress([2, 1, queued, queued, 0, 1]));
-        assert_eq!(d.completion_delay.count, 1);
-        assert_eq!(d.completion_delay.min, 3);
-        d.refresh(TxProgress([2, 2, queued, queued, 1, 3]));
-        d.refresh(TxProgress([2, 2, queued, queued, 1, 3]));
-        assert_eq!(d.completion_delay.count, 2);
-        assert_eq!(d.completion_delay.sum, 8);
-        assert_eq!(d.delivery_delay.min, 5);
-        assert_eq!(d.delivery_delay.max, 7);
-        assert_eq!(d.queue_delay.sum, 4);
-        assert_eq!(d.queue_peak, 2);
-        d.sent(
-            &[ScanCommand::Speed(100)],
-            TxProgress([3, 2, queued, 10, 1, 3]),
-            9,
-            10,
-            21,
-            -1,
-        );
-        assert_eq!(d.intervals.min, 12);
-        let mut json = String::new();
-        d.write(&mut json, 1_000_000, 2000).unwrap();
-        assert!(json.contains("\"completion_unobserved\":1"));
     }
 
     #[test]

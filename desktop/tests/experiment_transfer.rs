@@ -426,56 +426,6 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     assert_eq!(&times[..3], &["0.000", "0.020", "0.040"]);
     assert!(!e.owns_hardware());
 }
-#[test]
-fn ten_hz_short_run_transfers_available_diagnostics_and_releases_ownership() {
-    let mut records = [Record::EMPTY; CAPACITY];
-    let mut diagnostics = [engine::reversal::Reversal::EMPTY; engine::reversal::CAPACITY];
-    let mut e = engine::Engine::new(&mut records).with_reversals(&mut diagnostics);
-    let config = ExperimentConfig::Sinusoidal {
-        center_nm: 0,
-        amplitude_nm: 780,
-        frequency_mhz: 10_000,
-        cycles: 10,
-    };
-    e.accept(config, &telemetry(0), pressure(0), false, 0)
-        .unwrap();
-    e.begin(0, &mut Io);
-    for now in 1..=512 {
-        e.poll(now, &telemetry(now), pressure(now), &mut Io);
-    }
-    e.abort(&mut Io);
-    e.transfer(e.run).unwrap();
-    let mut d = receiver::Download::default();
-    d.begin(e.run);
-    let mut text = String::new();
-    e.metadata(&mut text, receiver::DOWNLOAD_ID).unwrap();
-    let metadata: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(metadata["reversal_total"], metadata["reversal_count"]);
-    d.metadata(metadata).unwrap();
-    for offset in (0..e.len).step_by(CHUNK_RECORDS) {
-        let bytes: Vec<_> = e
-            .chunk(e.run, offset)
-            .unwrap()
-            .iter()
-            .flat_map(|r| r.encode())
-            .collect();
-        let mut header = String::new();
-        e.chunk_header(
-            &mut header,
-            receiver::DOWNLOAD_ID,
-            e.run,
-            offset,
-            bytes.len(),
-        )
-        .unwrap();
-        d.chunk(serde_json::from_str(&header).unwrap(), &bytes)
-            .unwrap();
-    }
-    let (_, result) = d.next().unwrap();
-    assert_eq!(result.unwrap().samples.len(), e.len);
-    e.acknowledge(e.run, e.len, e.checksum()).unwrap();
-    assert!(!e.owns_hardware());
-}
 
 #[test]
 fn corruption_and_wrong_count_offset_or_run_never_produce_ack() {

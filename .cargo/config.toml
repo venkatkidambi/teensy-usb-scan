@@ -1,5 +1,10 @@
 [build]
 target = "thumbv7em-none-eabihf"
 
+[env]
+# The release main frame uses ~15 KiB before nested calls and interrupts.
+# The BSP's 16 KiB default overflows in the startup logger (~4 KiB more).
+TEENSY4_STACK_SIZE = { value = "65536", force = true }
+
 [target.thumbv7em-none-eabihf]
 rustflags = ["-C", "link-arg=-Tt4link.x"]

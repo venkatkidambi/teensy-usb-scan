@@ -1,17 +1,33 @@
-/target/
+# Rust, C tests, firmware conversion, and local ARM toolchains
+target/
 /.tools/
 *.hex
-*.elf
 *.bin
+*.elf
 *.map
-.DS_Store
-/desktop/target/
-/desktop/gen/
-__pycache__/
-/node_modules/
-/desktop/dist/
 
-# Local debugging and investigation notes
-/ADAPTIVE_SCHEDULING.md
-/EPOS_TIMING.md
-/REVERSALS.md
+# Vite, Tauri-generated schemas, and Node dependencies
+node_modules/
+/desktop/dist/
+/desktop/gen/
+
+# Local upload settings (use -TeensyLoader or PATH on Windows)
+/upload.config.json
+.env
+.env.*
+!.env.example
+
+# Local diagnostics and temporary files
+*.log
+*.tmp
+*.swp
+*~
+__pycache__/
+*.pyc
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

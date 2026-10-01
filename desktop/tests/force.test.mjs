@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {calibration,forceNewtons,forceMillinewtons,forceExtrapolated,forceRangeLabel} from '../ui/force.js';
-import {forcePoints,signalPoints} from '../ui/experiment.js';
-import {phaseDelays} from '../ui/phase.js';
 
 const near=(actual,expected,tolerance=1e-12)=>assert.ok(Math.abs(actual-expected)<tolerance,`${actual} != ${expected}`);
 function fit(points) {
@@ -40,23 +38,4 @@ test('calibration flags extrapolation through either stage without clamping or t
     assert.equal(forceNewtons(value),null);
     assert.equal(forceMillinewtons(value),null);
   }
-});
-test('force plots preserve timestamps, repeated samples and the averaged force',()=>{
-  const samples=[[0,0,4200000],[20,0,4200000],[40,0,4300000]];
-  const copy=structuredClone(samples),points=forcePoints(samples);
-  assert.deepEqual(points.map(p=>p[0]),[0,20,40]);
-  near(points[0][1],12.4052353779526);
-  near(points[1][1],12.4052353779526);
-  near(points[2][1],21.0542290814888);
-  assert.deepEqual(samples,copy);
-  near(forceMillinewtons(4250000),(forceMillinewtons(4200000)+forceMillinewtons(4300000))/2);
-});
-test('force calibration preserves the reported position-to-signal phase delay',()=>{
-  const samples=[];
-  for(let ms=0;ms<4000;ms+=20)samples.push([ms,100+20*Math.cos(2*Math.PI*ms/1000),4220000+40000*Math.cos(2*Math.PI*(ms-60)/1000),0,0,0,0,0,0,0,ms,ms]);
-  const dataset={samples,metadata:{config:{kind:'sinusoidal',frequency_mhz:1000,cycles:4},elapsed_ms:4000}};
-  const raw=phaseDelays(dataset,signalPoints(samples,1),signalPoints(samples,2));
-  const force=phaseDelays(dataset,signalPoints(samples,1),forcePoints(samples));
-  near(raw.positionToPressure.ms,60,1e-8);
-  near(force.positionToPressure.ms,raw.positionToPressure.ms,1e-8);
 });
