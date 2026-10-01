@@ -30,6 +30,8 @@ mod tests {
             amplitude_nm: 1_000_000,
             frequency_mhz: 1000,
             cycles: 2,
+            compensation_enabled: false,
+            compensation_ms: 17,
         };
         let mut t = Telemetry::new();
         for ms in 450..=550 {

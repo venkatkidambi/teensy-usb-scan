@@ -30,6 +30,11 @@
       <label><span id="experiment-timing-label">Hold time (s)</span><input id="experiment-timing" type="number" min="0.001" step="0.001" value="1" required></label>
       <label><span id="experiment-repeats-label">Number of steps</span><input id="experiment-repeats" type="number" min="1" step="1" value="3" required></label>
       <label id="experiment-speed-field"><span id="experiment-speed-label">Actuator speed (µm/s)</span><input id="experiment-speed" type="number" min="1" max="16777215" step="1" value="10" required></label>
+      <div id="experiment-compensation-fields" hidden>
+        <label><input id="experiment-compensation-enabled" type="checkbox">Feed-forward delay compensation</label>
+        <label id="experiment-compensation-value" hidden>Compensation (ms): <input id="experiment-compensation-ms" type="number" min="0" step="1" value="17" required></label>
+        <p class="pressure-detail">Experimental feed-forward time advance; not a measurement of mechanical delay. The advance ramps in smoothly over the first 250 ms from rest. Reference and measured timestamps stay unchanged.</p>
+      </div>
       <div id="experiment-sweep-fields" hidden>
         <h3 class="sweep-heading"><label for="experiment-sweep-enabled"><input id="experiment-sweep-enabled" type="checkbox"><span>Frequency sweep</span></label></h3>
         <label>Frequencies (Hz, in run order)<input id="experiment-frequencies" type="text" value="0.1, 0.5, 1, 2, 5, 10" placeholder="0.1, 0.5, 1, 2, 5, 10" disabled></label>

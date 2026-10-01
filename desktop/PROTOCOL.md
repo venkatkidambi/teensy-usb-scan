@@ -164,7 +164,7 @@ Firmware with `plunger_limits: true` in HELLO enforces potentiometer bounds and 
 ## Sinusoidal velocity control
 
 HELLO adds `sine_velocity: true` and retains `sine_position: true` as the legacy UI
-gate for desired sinusoidal position. START S keeps the same parameters; velocity
+gate for desired sinusoidal position. START S accepts optional feed-forward parameters described below; default velocity
 is `2π f A sin(2π f t)` using actual elapsed Teensy time. Changed integer SSPD
 magnitudes use bounded adaptive 4–10 ms updates by default; theoretical sign
 crossings are mandatory events. Ordinary busy updates coalesce and recompute
@@ -278,7 +278,7 @@ line limit. Dataset CRC still covers binary records, as before.
 
 ```text
 START <id> Q <start_nm:i64> <step_nm:i64> <hold_ms:u32> <steps:u32> <speed_um_s:u32>
-START <id> S <center_nm:i64> <amplitude_nm:u32> <frequency_millihz:u32> <cycles:u32>
+START <id> S <center_nm:i64> <amplitude_nm:u32> <frequency_millihz:u32> <cycles:u32> [<compensation_enabled:0|1> <compensation_ms:u32>]
 ABORT <id>
 GET_DATA <id> <run>
 GET_CHUNK <id> <run> <record_offset>
@@ -342,3 +342,18 @@ passes validation. Desktop CSV/PNG export opens a native Save As dialog, release
 serial locks while it is open, and rechecks ownership before writing. Cancellation
 or write failure leaves results available. RAM results are not durable across
 power loss or desktop process exit.
+
+Sinusoidal feed-forward compensation is experimental. New desktop START commands
+always include both compensation fields; legacy omitted fields mean disabled,
+17 ms configured. The firmware advertises `compensation_max_ms` in HELLO from
+`MAX_COMPENSATION_MS`; whole values 0..25 ms are validated even when disabled.
+Native configuration uses `compensation_enabled` (boolean) and `compensation_ms`
+(unsigned integer), preserved in `data_meta.config` and CSV metadata.
+`data_meta.feed_forward` labels the experiment and records `phase_deg =
+360*f*compensation_ms/1000`, `applied_phase_deg` (zero when disabled), and the
+250 ms `smoothstep_phase` activation policy. With `u=min(t/0.250,1)` and
+`s=3u²−2u³`, only velocity uses `t+τs`; direction and adaptive error calculations
+use that same monotone phase. Reference position, duration, all timestamp fields,
+pressure acquisition, and final STOP timing remain unchanged. Compensation may
+add a reversal just before the final STOP; the existing bounded diagnostics hold
+all 288 reversals of a 144-cycle run. No mechanical-delay claim is implied.

@@ -346,6 +346,7 @@ impl<'a> Engine<'a> {
                     amplitude_nm,
                     frequency_mhz,
                     self.elapsed_ms.min(self.duration_ms - MOVE_TIMEOUT_MS),
+                    self.config.unwrap().feed_forward(),
                 );
             }
         }
@@ -419,6 +420,7 @@ impl<'a> Engine<'a> {
                         amplitude_nm,
                         frequency_mhz,
                         self.elapsed_ms.min(self.duration_ms - MOVE_TIMEOUT_MS),
+                        self.config.unwrap().feed_forward(),
                     );
                 }
             }
@@ -755,10 +757,24 @@ impl<'a> Engine<'a> {
         if let Some(ExperimentConfig::Sinusoidal {
             amplitude_nm,
             frequency_mhz,
+            compensation_ms,
             ..
         }) = self.config
         {
             self.scheduling.write(out, amplitude_nm, frequency_mhz)?;
+            write!(
+                out,
+                ",\"feed_forward\":{{\"label\":\"experimental feed-forward time advance\",\"phase_deg\":{:.6},\"applied_phase_deg\":{:.6},\"activation_ms\":{},\"activation\":\"smoothstep_phase\"}}",
+                FeedForward {
+                    advance_ms: compensation_ms
+                }
+                .phase_degrees(frequency_mhz),
+                self.config
+                    .unwrap()
+                    .feed_forward()
+                    .phase_degrees(frequency_mhz),
+                COMPENSATION_RAMP_MS
+            )?;
         }
         self.final_return.write(out)?;
         if let Some(stat) = self.fault_stat {
@@ -895,6 +911,16 @@ fn sine_velocity(amplitude_nm: u32, frequency_mhz: u32, elapsed: u32) -> f64 {
     let phase = (u64::from(elapsed) * u64::from(frequency_mhz)) % 1_000_000;
     sine_max_velocity(amplitude_nm, frequency_mhz)
         * sine(phase as f64 / 1_000_000.0).clamp(-1.0, 1.0)
+}
+
+/// Only actuator velocity uses the advanced clock. The disabled branch retains
+/// exactly the original arithmetic; reference position always uses real elapsed.
+fn feed_forward_velocity(amplitude: u32, frequency: u32, elapsed: u32, ff: FeedForward) -> f64 {
+    if ff.advance_ms == 0 {
+        return sine_velocity(amplitude, frequency, elapsed);
+    }
+    let phase = ff.phase(frequency, elapsed) % 1_000_000.0;
+    sine_max_velocity(amplitude, frequency) * sine(phase / 1_000_000.0).clamp(-1.0, 1.0)
 }
 
 /// Range-reduced Taylor polynomial, |error| < 5e-14 over a cycle; no libm/heap.

@@ -22,6 +22,7 @@ function startBlocked({session,connected,hello,experimentUnresolved}) {
   if(!hello?.experiments)return 'Update the Teensy firmware to enable experiments.';
   if(mode==='quasi_static'&&!hello?.quasi_static_speed)return 'Update the Teensy firmware to enable quasi-static speed control.';
   if(mode==='sinusoidal'&&!hello?.sine_position)return 'Update the Teensy firmware to enable sinusoidal position control.';
+  if(mode==='sinusoidal'&&$('experiment-compensation-enabled').checked&&!Number.isInteger(hello?.compensation_max_ms))return 'Update the Teensy firmware to enable feed-forward compensation.';
   if(session.pending)return 'Waiting for the current Teensy request to finish…';
   return '';
 }
@@ -48,6 +49,11 @@ export function experimentControls() {
   $('dashboard-panel').inert=owned;
   for(const control of $('experiment-form').elements)control.disabled=owned;
   $('experiment-speed').disabled=owned||mode!=='quasi_static';
+  const compensation=mode==='sinusoidal'&&!!$('experiment-compensation-enabled').checked;
+  $('experiment-compensation-fields').hidden=mode!=='sinusoidal';
+  $('experiment-compensation-value').hidden=!compensation;
+  $('experiment-compensation-ms').disabled=owned||!compensation;
+  if(Number.isInteger(hello?.compensation_max_ms))$('experiment-compensation-ms').max=String(hello.compensation_max_ms);
   const sweeping=mode==='sinusoidal'&&$('experiment-sweep-enabled').checked;
   $('experiment-sweep-progress').hidden=!sweeping||!$('experiment-sweep-status').textContent;
   $('experiment-frequencies').disabled=owned||!sweeping;
@@ -60,7 +66,7 @@ export function experimentControls() {
   $('experiment-start-button').title=blocked;
   text('experiment-start-reason',blocked);
   $('experiment-start-reason').hidden=!blocked;
-  text('experiment-motion-detail',mode==='sinusoidal'?`Sine ${hello?.sine_velocity?'velocity/direction control':'position commands'}. Starts from rest at center − amplitude and stops there after the specified cycles.`:'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.');
+  text('experiment-motion-detail',mode==='sinusoidal'?`Sine ${hello?.sine_velocity?'velocity/direction control':'position commands'}. Starts from rest at center − amplitude and sends STOP after the specified cycles.`:'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.');
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
   $('experiment-save').disabled=!!saving||owned||!dataset;
@@ -132,6 +138,10 @@ export function experimentMessage(message) {
     text('experiment-data-summary',`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s`);
     text('experiment-force-calibration',dataset.samples.length?forceRangeLabel(dataset.samples.map(s=>s[2])):'No force samples');
     $('experiment-result-summary').textContent=`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.reason} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s · CRC verified · missed samples ${m.missed_samples} · max logging lateness ${m.max_lateness_ms} ms${m.stop_queued?'':' · STOP could not be queued'}`;
+    if(m.config.kind==='sinusoidal'){
+      const c=m.config,phase=m.feed_forward?.phase_deg??(360*c.frequency_mhz*(c.compensation_ms??0)/1e6);
+      $('experiment-result-summary').textContent+=` · experimental feed-forward time advance ${c.compensation_enabled?'ON':'OFF'} · configured ${c.compensation_ms??0} ms · configured phase ${phase.toFixed(3)}°`;
+    }
     if(m.fault_stat!==undefined)$('experiment-result-summary').textContent+=` · Fault STAT ${m.fault_stat}`;
     if(m.timing){const t=m.timing;
       $('experiment-result-summary').textContent+=` · EPOS ${(t.epos.rate_millihz/1000).toFixed(1)} Hz (${t.epos.updates} updates), max gap ${t.epos.max_ms} ms, max receipt age ${t.max_epos_age_ms} ms, ${t.epos_repeated_records} repeated records · pressure ${(t.pressure.rate_millihz/1000).toFixed(1)} Hz · USB max service gap ${t.max_usb_service_gap_ms} ms, RX peak ${t.rx_peak_bytes} B · feedback settings ${t.feedback_verified?'verified':'unverified'}`;
@@ -306,6 +316,7 @@ export function setupExperiments(api) {
     }catch(e){text('experiment-data-status',`PNG export failed: ${e.message??e}`);}
     finally{saving=false;experimentControls();}
   };
+  $('experiment-compensation-enabled').onchange=experimentControls;
   $('experiment-sweep-enabled').onchange=experimentControls;
   $('experiment-run').onchange=()=>{
     selectedIndex=Number($('experiment-run').value);
@@ -328,6 +339,14 @@ export function setupExperiments(api) {
       }
     }
     const config={kind:mode,start_um:Number($('experiment-start').value),increment_um:Number($('experiment-increment').value),timing:Number($('experiment-timing').value),repeats:Number($('experiment-repeats').value)};
+    if(mode==='sinusoidal'){
+      const input=$('experiment-compensation-ms');
+      if($('experiment-compensation-enabled').checked&&!input.reportValidity()){
+        startStatus(`Compensation (ms): ${input.validationMessage}`);return;
+      }
+      config.compensation_enabled=!!$('experiment-compensation-enabled').checked;
+      config.compensation_ms=Number(input.value);
+    }
     if(mode==='quasi_static')config.speed_um_s=Number($('experiment-speed').value);
     if(mode==='sinusoidal'&&$('experiment-sweep-enabled').checked){
       validationCancelled=false;starting=true;experimentControls();

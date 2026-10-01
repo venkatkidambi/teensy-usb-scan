@@ -56,16 +56,30 @@ impl Command {
                 let increment = words.next().ok_or(())?.parse::<i64>().map_err(|_| ())?;
                 let timing = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
                 let repeats = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
-                let speed = words
-                    .next()
-                    .map(str::parse::<u32>)
-                    .transpose()
-                    .map_err(|_| ())?;
-                Self::Start(
-                    id,
+                let optional = words.next();
+                let speed = if kind == "Q" {
+                    optional
+                        .map(str::parse::<u32>)
+                        .transpose()
+                        .map_err(|_| ())?
+                } else {
+                    None
+                };
+                let mut config =
                     ExperimentConfig::from_wire(kind, start, increment, timing, repeats, speed)
-                        .map_err(|_| ())?,
-                )
+                        .map_err(|_| ())?;
+                if kind == "S" {
+                    if let Some(enabled) = optional {
+                        let enabled = match enabled {
+                            "0" => false,
+                            "1" => true,
+                            _ => return Err(()),
+                        };
+                        let ms = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
+                        config = config.with_compensation(enabled, ms).map_err(|_| ())?;
+                    }
+                }
+                Self::Start(id, config)
             }
             "ABORT" => Self::Abort(id),
             "GET_DATA" => Self::GetData(id, words.next().ok_or(())?.parse().map_err(|_| ())?),

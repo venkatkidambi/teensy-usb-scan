@@ -18,6 +18,13 @@ pub struct Input {
     pub timing: f64,
     pub repeats: u32,
     pub speed_um_s: Option<u32>,
+    #[serde(default)]
+    pub compensation_enabled: bool,
+    #[serde(default = "default_compensation_ms")]
+    pub compensation_ms: u32,
+}
+fn default_compensation_ms() -> u32 {
+    17
 }
 fn scaled(value: f64, scale: f64) -> Result<i64, String> {
     let n = value * scale;
@@ -40,7 +47,7 @@ impl Input {
             "sinusoidal" => "S",
             _ => return Err("Unknown experiment mode".into()),
         };
-        let config = ExperimentConfig::from_wire(
+        let mut config = ExperimentConfig::from_wire(
             kind,
             start,
             increment,
@@ -48,6 +55,9 @@ impl Input {
             self.repeats,
             self.speed_um_s,
         )?;
+        if kind == "S" {
+            config = config.with_compensation(self.compensation_enabled, self.compensation_ms)?;
+        }
         config.validate()?;
         let mut command = format!(
             "START {id} {kind} {start} {increment} {timing} {}",
@@ -55,6 +65,15 @@ impl Input {
         );
         if let Some(speed) = config.speed() {
             write!(command, " {speed}").unwrap();
+        }
+        if kind == "S" {
+            write!(
+                command,
+                " {} {}",
+                u8::from(self.compensation_enabled),
+                self.compensation_ms
+            )
+            .unwrap();
         }
         Ok(command)
     }

@@ -1,5 +1,5 @@
 //! Bounded lookahead on the existing 1 ms monotonic clock. No phase accumulator.
-use super::{reversal::TxProgress, sine_velocity};
+use super::{feed_forward_velocity, reversal::TxProgress};
 use crate::{experiment_data::*, xeryon_motion::ScanCommand};
 
 pub const MIN_CONTROL_INTERVAL: u32 = 4;
@@ -29,18 +29,28 @@ pub fn crossing_after(frequency: u32, elapsed: u32) -> u32 {
 }
 /// Continuous-time maximum, including any velocity extrema between endpoints.
 /// This is a queued-command approximation, not inferred physical velocity.
-pub fn held_error(amplitude: u32, frequency: u32, held: f64, from: u32, to: u32) -> f64 {
-    let mut error = (held - sine_velocity(amplitude, frequency, from))
+pub fn held_error(
+    amplitude: u32,
+    frequency: u32,
+    held: f64,
+    from: u32,
+    to: u32,
+    ff: FeedForward,
+) -> f64 {
+    let mut error = (held - feed_forward_velocity(amplitude, frequency, from, ff))
         .abs()
-        .max((held - sine_velocity(amplitude, frequency, to)).abs());
+        .max((held - feed_forward_velocity(amplitude, frequency, to, ff)).abs());
     // Velocity extrema are at quarter + k half cycles in the new phase.
-    let from_phase = u64::from(from) * u64::from(frequency);
-    let to_phase = u64::from(to) * u64::from(frequency);
-    if to_phase < 250_000 {
+    let from_phase = ff.phase(frequency, from);
+    let to_phase = ff.phase(frequency, to);
+    if to_phase < 250_000.0 {
         return error;
     }
-    let first = from_phase.saturating_sub(250_000).div_ceil(500_000);
-    let last = (to_phase - 250_000) / 500_000;
+    let first = {
+        let k = (from_phase - 250_000.0).max(0.0) / 500_000.0;
+        k as u64 + u64::from(k > (k as u64) as f64)
+    };
+    let last = ((to_phase - 250_000.0) / 500_000.0) as u64;
     // At most two extrema are needed even for a missed, multi-cycle poll.
     for k in first..=last.min(first + 1) {
         let peak = sine_max_velocity(amplitude, frequency) * if k % 2 == 0 { 1.0 } else { -1.0 };
@@ -48,20 +58,35 @@ pub fn held_error(amplitude: u32, frequency: u32, held: f64, from: u32, to: u32)
     }
     error
 }
-pub fn next(mode: Mode, amplitude: u32, frequency: u32, elapsed: u32, held: f64) -> u32 {
+pub fn next(
+    mode: Mode,
+    amplitude: u32,
+    frequency: u32,
+    elapsed: u32,
+    held: f64,
+    ff: FeedForward,
+) -> u32 {
     if mode == Mode::Fixed100Hz {
         return (elapsed / 10 + 1) * 10;
     }
     let mut interval = MIN_CONTROL_INTERVAL;
     for dt in MIN_CONTROL_INTERVAL..=MAX_CONTROL_INTERVAL {
-        if held_error(amplitude, frequency, held, elapsed, elapsed + dt)
+        if held_error(amplitude, frequency, held, elapsed, elapsed + dt, ff)
             > tolerance(amplitude, frequency)
         {
             break;
         }
         interval = dt;
     }
-    (elapsed + interval).min(crossing_after(frequency, elapsed))
+    let crossing = if ff.advance_ms == 0 {
+        crossing_after(frequency, elapsed)
+    } else {
+        ff.crossing_ms(
+            frequency,
+            (ff.phase(frequency, elapsed) / 500_000.0) as u64 + 1,
+        )
+    };
+    (elapsed + interval).min(crossing)
 }
 
 #[derive(Default)]
@@ -172,9 +197,9 @@ impl Default for Diagnostics {
     }
 }
 impl Diagnostics {
-    pub fn observe(&mut self, amplitude: u32, frequency: u32, elapsed: u32) {
+    pub fn observe(&mut self, amplitude: u32, frequency: u32, elapsed: u32, ff: FeedForward) {
         if let Some(held) = self.held {
-            let error = held_error(amplitude, frequency, held, self.observed_ms, elapsed);
+            let error = held_error(amplitude, frequency, held, self.observed_ms, elapsed, ff);
             self.max_error = self.max_error.max(error);
             self.over_budget += u32::from(
                 elapsed != self.observed_ms && error > tolerance(amplitude, frequency) + 1e-6,
@@ -301,31 +326,50 @@ impl Diagnostics {
 
 #[cfg(test)]
 mod tests {
+    use super::super::sine_velocity;
     use super::*;
 
     #[test]
     fn position_centers_need_less_density_than_extrema_and_bounds_are_explicit() {
         let a = 1_000_000;
         let f = 2000;
-        let at = |t| next(Mode::Adaptive, a, f, t, sine_velocity(a, f, t)) - t;
+        let at = |t| {
+            next(
+                Mode::Adaptive,
+                a,
+                f,
+                t,
+                sine_velocity(a, f, t),
+                FeedForward::default(),
+            ) - t
+        };
         assert_eq!(at(125), MAX_CONTROL_INTERVAL); // position center, velocity maximum
         assert!(at(0) < at(125)); // approaching position extremum, large acceleration
-        assert_eq!(next(Mode::Adaptive, a, f, 248, 0.0), 250); // priority crossing < minimum
+        assert_eq!(
+            next(Mode::Adaptive, a, f, 248, 0.0, FeedForward::default()),
+            250
+        ); // priority crossing < minimum
         for t in 0..500 {
             let dt = at(t);
             assert!(dt <= MAX_CONTROL_INTERVAL);
             assert!(dt >= MIN_CONTROL_INTERVAL || t + dt == crossing_after(f, t));
         }
-        assert_eq!(next(Mode::Fixed100Hz, a, f, 123, 0.0), 130);
+        assert_eq!(
+            next(Mode::Fixed100Hz, a, f, 123, 0.0, FeedForward::default()),
+            130
+        );
     }
 
     #[test]
     fn error_includes_hidden_velocity_extrema_and_late_poll_violations() {
         let peak = sine_max_velocity(1_000_000, 2000);
-        assert_eq!(held_error(1_000_000, 2000, 0.0, 100, 150), peak);
+        assert_eq!(
+            held_error(1_000_000, 2000, 0.0, 100, 150, FeedForward::default()),
+            peak
+        );
         let mut d = Diagnostics::default();
         d.held = Some(0.0);
-        d.observe(1_000_000, 2000, 500);
+        d.observe(1_000_000, 2000, 500, FeedForward::default());
         assert_eq!(d.max_error, peak);
         assert_eq!(d.over_budget, 1);
     }

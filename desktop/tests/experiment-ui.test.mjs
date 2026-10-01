@@ -70,7 +70,7 @@ test('START explains blockers, validates fields, submits once, and reports failu
     assert.match(node('experiment-state').textContent,/Sending START/);
     assert.equal(node('experiment-start-button').disabled,true);
     await submit();
-    assert.deepEqual(calls,[{kind:'sinusoidal',start_um:374.556,increment_um:5,timing:1,repeats:5}]);
+    assert.deepEqual(calls,[{kind:'sinusoidal',start_um:374.556,increment_um:5,timing:1,repeats:5,compensation_enabled:false,compensation_ms:1}]);
     reject(Error('Controller is not ready'));await pending;
     assert.equal(node('experiment-state').textContent,'START failed: Controller is not ready');
     assert.equal(logs.at(-1),'START failed: Controller is not ready');
@@ -196,4 +196,45 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
     globalThis.document = previousDocument;
     globalThis.ResizeObserver = previousObserver;
   }
+});
+
+test('feed-forward controls support A/B runs, validated entry and retained settings across tabs', async () => {
+  const nodes=new Map(), calls=[];
+  const node=id=>{
+    if(!nodes.has(id))nodes.set(id,{value:id==='experiment-compensation-ms'?'17':'1',checked:false,elements:[],setAttribute(){},reportValidity:()=>true,getBoundingClientRect:()=>({width:0})});
+    return nodes.get(id);
+  };
+  const previousDocument=globalThis.document,previousObserver=globalThis.ResizeObserver;
+  globalThis.document={getElementById:node};globalThis.ResizeObserver=class{observe(){}};
+  try {
+    const state={connected:true,hello:{experiments:true,sine_position:true,quasi_static_speed:true,compensation_max_ms:25},session:{async startExperiment(config){calls.push(config);}}};
+    setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls});
+    node('tab-sinusoidal').onclick();
+    assert.equal(node('experiment-compensation-enabled').checked,false);
+    assert.equal(node('experiment-compensation-value').hidden,true);
+    assert.equal(node('experiment-compensation-ms').max,'25');
+    const submit=()=>node('experiment-form').onsubmit({preventDefault(){}});
+    await submit();
+    assert.equal(calls[0].compensation_enabled,false);
+    assert.equal(calls[0].compensation_ms,17);
+    node('experiment-compensation-enabled').checked=true;
+    node('experiment-compensation-enabled').onchange();
+    assert.equal(node('experiment-compensation-value').hidden,false);
+    assert.equal(node('experiment-compensation-ms').disabled,false);
+    await submit();
+    assert.deepEqual(calls[1],{...calls[0],compensation_enabled:true});
+    node('experiment-compensation-ms').reportValidity=()=>false;
+    node('experiment-compensation-ms').validationMessage='Out of range';
+    await submit();assert.equal(calls.length,2);
+    assert.match(node('experiment-state').textContent,/Compensation.*Out of range/);
+    node('experiment-compensation-ms').reportValidity=()=>true;
+    node('tab-quasi_static').onclick();
+    assert.equal(node('experiment-compensation-fields').hidden,true);
+    await submit();assert.equal(calls[2].compensation_enabled,undefined);
+    node('tab-sinusoidal').onclick();
+    assert.equal(node('experiment-compensation-enabled').checked,true);
+    assert.equal(node('experiment-compensation-ms').value,'17');
+    state.session.experimentOwned=true;experimentControls();
+    assert.equal(node('experiment-compensation-ms').disabled,true);
+  } finally {globalThis.document=previousDocument;globalThis.ResizeObserver=previousObserver;}
 });

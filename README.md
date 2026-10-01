@@ -119,6 +119,23 @@ the separate USB2 host header. Only one app/terminal can own the serial port.
   CSV and PNG exports. Sweeps run frequencies in order, downloading each result
   before the next START. ABORT, faults, or disconnect cancel remaining runs.
 
+Optional **Feed-forward delay compensation** defaults off with a 17 ms entry.
+Whole milliseconds from 0 through `MAX_COMPENSATION_MS` (25 ms) are accepted.
+Only actuator velocity advances: `v_ff(t) = Aω sin(ω(t + τ s(u)))`, where
+`τ = compensation_ms / 1000`, `u = min(t / 0.250 s, 1)`, and `s(u) = 3u² − 2u³`.
+After 250 ms this is exactly `Aω sin(ω(t + τ))`. MoveToStart stays at `C−A`;
+the smooth activation preserves zero initial velocity without an abrupt jump.
+This experimental time advance is not a measurement of mechanical delay.
+The unadvanced reference `C−A cos(ωt)`, duration `N/f`, all recorded timestamps,
+and pressure timing retain real elapsed time. There is no EPOS feedback or
+waveform DPOS correction. Reversals and scheduler error bounds use the advanced
+velocity, retaining ordered `SSPD=0 → SCAN=new direction → current speed`.
+The boundary STOP remains at `N/f`, even if advanced velocity is nonzero there;
+compensation does not guarantee physical return to the start position. Metadata
+and CSV retain the settings, configured/applied phase advance, and existing
+command latency and feedback age statistics. Toggle the checkbox for A/B runs
+without changing firmware; sweep runs retain the same settings.
+
 Experiments record at 50 Hz into 4,096 fixed 48-byte records (192 KiB). The total
 acquisition bound is 81.9 s; sinusoidal runs reserve 10 s for final STOP transmission,
 accept 0.1–10 Hz, and are limited to 144 cycles by diagnostic capacity. USB1 PC

@@ -132,8 +132,179 @@ mod tests {
             amplitude_nm: 7800,
             frequency_mhz: 1000,
             cycles: 1,
+            compensation_enabled: false,
+            compensation_ms: 17,
         }
     }
+    #[test]
+    fn compensation_equation_startup_and_disabled_bit_identity() {
+        for f in [100, 333, 1000, 2000, 10_000] {
+            for ms in [0, 17, MAX_COMPENSATION_MS] {
+                let ff = FeedForward { advance_ms: ms };
+                assert_eq!(feed_forward_velocity(7800, f, 0, ff), 0.0);
+                let mut previous = 0.0;
+                for t in 0..=2000 {
+                    let disabled = sinusoidal()
+                        .with_compensation(false, ms)
+                        .unwrap()
+                        .feed_forward();
+                    assert_eq!(
+                        feed_forward_velocity(7800, f, t, disabled).to_bits(),
+                        sine_velocity(7800, f, t).to_bits()
+                    );
+                    let clock = ff.time_ms(t);
+                    assert!(clock >= previous);
+                    if t > 0 {
+                        assert!(clock - previous <= 1.15 + 1e-9);
+                    }
+                    previous = clock;
+                    if t >= COMPENSATION_RAMP_MS {
+                        assert_eq!(
+                            feed_forward_velocity(7800, f, t, ff),
+                            sine_velocity(7800, f, t + ms)
+                        );
+                    }
+                    let phase = core::f64::consts::TAU * f64::from(f) * clock / 1e6;
+                    assert!(
+                        (feed_forward_velocity(7800, f, t, ff)
+                            - sine_max_velocity(7800, f) * phase.sin())
+                        .abs()
+                            < 1e-7
+                    );
+                }
+                for k in 1..=20 {
+                    let crossing = ff.crossing_ms(f, k);
+                    assert_ne!(ff.direction(f, crossing - 1), ff.direction(f, crossing));
+                    assert_eq!(
+                        scheduling::next(
+                            scheduling::Mode::Adaptive,
+                            7800,
+                            f,
+                            crossing - 1,
+                            0.0,
+                            ff
+                        ),
+                        crossing
+                    );
+                    if k > 1 {
+                        assert!(crossing - ff.crossing_ms(f, k - 1) > 40);
+                    }
+                }
+            }
+        }
+        assert_eq!(FeedForward { advance_ms: 17 }.phase_degrees(2000), 12.24);
+        assert!(
+            sinusoidal()
+                .with_compensation(true, MAX_COMPENSATION_MS + 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn compensated_scheduler_bounds_actual_command_function_including_activation() {
+        for f in [100, 1300, 2000, 10_000] {
+            let ff = FeedForward {
+                advance_ms: MAX_COMPENSATION_MS,
+            };
+            for t in 0..1000 {
+                let held = feed_forward_velocity(1_000_000, f, t, ff);
+                let next = scheduling::next(scheduling::Mode::Adaptive, 1_000_000, f, t, held, ff);
+                let bound = scheduling::held_error(1_000_000, f, held, t, next, ff);
+                for sample in t..=next {
+                    let actual = (held - feed_forward_velocity(1_000_000, f, sample, ff)).abs();
+                    assert!(actual <= bound + 1e-7);
+                }
+                if next - t > scheduling::MIN_CONTROL_INTERVAL {
+                    assert!(bound <= scheduling::tolerance(1_000_000, f));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compensation_preserves_real_records_reference_duration_and_stop_but_advances_reversal() {
+        let mut baseline = Vec::new();
+        for enabled in [false, true] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut turns = [reversal::Reversal::EMPTY; 4];
+            let mut e = Engine::new(&mut records).with_reversals(&mut turns);
+            let mut io = Io::default();
+            let config = sinusoidal().with_compensation(enabled, 17).unwrap();
+            assert_eq!(config.validate(), sinusoidal().validate());
+            start(&mut e, config, u32::MAX - 100, &mut io);
+            assert_eq!(io.events[..3], ["DPOS=-100\n", "SSPD=0\n", "SCAN=1\n"]);
+            let mut transitions = Vec::new();
+            for elapsed in 1..=1002 {
+                let now = e.started_ms.wrapping_add(elapsed);
+                let (mut t, mut p) = feedback(now.wrapping_sub(3), 12, true);
+                t.epos_generation = elapsed;
+                p.ms = now.wrapping_sub(2);
+                p.samples = elapsed;
+                let n = io.scans.len();
+                e.poll(now, &t, p, &mut io);
+                if io.scans[n..].contains(&xeryon_motion::ScanCommand::Speed(0)) && elapsed > 400 {
+                    transitions.push(elapsed);
+                }
+            }
+            assert_eq!(e.outcome, "completed");
+            assert_eq!(io.stops, 1);
+            assert_eq!(io.targets.len(), 1); // MoveToStart only, never waveform DPOS.
+            assert_eq!(e.samples[e.len - 1].elapsed_ms, 1000);
+            if enabled {
+                assert_eq!(e.samples[..e.len], baseline);
+                assert_eq!(transitions, [483, 983]);
+                assert_eq!(e.reversals.total, 2);
+                let i = io
+                    .scans
+                    .iter()
+                    .position(|v| *v == xeryon_motion::ScanCommand::Direction(-1))
+                    .unwrap();
+                assert_eq!(io.scans[i - 1], xeryon_motion::ScanCommand::Speed(0));
+                assert_eq!(
+                    io.scans[i + 1],
+                    xeryon_motion::ScanCommand::Speed(velocity_speed(feed_forward_velocity(
+                        7800,
+                        1000,
+                        485,
+                        config.feed_forward()
+                    )))
+                );
+            } else {
+                baseline = e.samples[..e.len].to_vec();
+                assert_eq!(transitions, [500]);
+            }
+        }
+    }
+
+    #[test]
+    fn compensation_abort_and_fault_cancel_motion_identically() {
+        for enabled in [false, true] {
+            for fault in [false, true] {
+                let mut records = [Record::EMPTY; 1024];
+                let mut e = Engine::new(&mut records);
+                let mut io = Io::default();
+                start(
+                    &mut e,
+                    sinusoidal().with_compensation(enabled, 17).unwrap(),
+                    0,
+                    &mut io,
+                );
+                let (t, p) = feedback(20, 0, true);
+                if fault {
+                    io.usb_failed = true;
+                } else {
+                    e.abort(&mut io);
+                }
+                e.poll(20, &t, p, &mut io);
+                assert_eq!(e.outcome, if fault { "faulted" } else { "aborted" });
+                assert_eq!(io.stops, 1);
+                let before = io.events.clone();
+                e.poll(30, &t, p, &mut io);
+                assert_eq!(io.events, before);
+            }
+        }
+    }
+
     #[test]
     fn records_distinguish_fresh_stationary_epos_from_reused_cache_and_keep_ages() {
         let mut records = [Record::EMPTY; 1024];
@@ -317,7 +488,7 @@ mod tests {
     }
     #[test]
     fn ten_hz_runs_complete_with_bounded_downloadable_diagnostics() {
-        for cycles in [1, 10, 144] {
+        for (cycles, enabled) in [(1, false), (10, false), (144, false), (144, true)] {
             let mut records = [Record::EMPTY; CAPACITY];
             let mut turns = [reversal::Reversal::EMPTY; reversal::CAPACITY];
             let mut e = Engine::new(&mut records).with_reversals(&mut turns);
@@ -327,6 +498,8 @@ mod tests {
                 amplitude_nm: 1_000_000,
                 frequency_mhz: 10_000,
                 cycles,
+                compensation_enabled: enabled,
+                compensation_ms: 17,
             };
             assert!(config.validate().is_ok());
             start(&mut e, config, u32::MAX - 500, &mut io);
@@ -336,10 +509,10 @@ mod tests {
                 e.poll(now, &t, p, &mut io);
             }
             assert_eq!(e.outcome, "completed");
-            assert_eq!(e.reversals.total, cycles * 2 - 1); // final boundary stops the waveform
+            assert_eq!(e.reversals.total, cycles * 2 - u32::from(!enabled)); // final boundary stops the waveform
             let count = e.transferred_reversals();
             assert!(count <= reversal::CAPACITY);
-            assert_eq!(count, (cycles * 2 - 1) as usize);
+            assert_eq!(count, (cycles * 2 - u32::from(!enabled)) as usize);
             let mut metadata = String::new();
             e.metadata(&mut metadata, 1).unwrap();
             assert!(metadata.contains(&format!("\"reversal_count\":{count},")));
@@ -384,6 +557,8 @@ mod tests {
                 amplitude_nm: 10000,
                 frequency_mhz: 10000,
                 cycles: 145,
+                compensation_enabled: false,
+                compensation_ms: 17,
             },
             ExperimentConfig::QuasiStatic {
                 speed_um_s: 10,
@@ -411,18 +586,24 @@ mod tests {
                 amplitude_nm: 78,
                 frequency_mhz: 100,
                 cycles: 1,
+                compensation_enabled: false,
+                compensation_ms: 17,
             },
             ExperimentConfig::Sinusoidal {
                 center_nm: 0,
                 amplitude_nm: 78,
                 frequency_mhz: 10_001,
                 cycles: 1,
+                compensation_enabled: false,
+                compensation_ms: 17,
             },
             ExperimentConfig::Sinusoidal {
                 center_nm: 0,
                 amplitude_nm: 78,
                 frequency_mhz: 100,
                 cycles: 21,
+                compensation_enabled: false,
+                compensation_ms: 17,
             },
         ] {
             assert!(config.validate().is_err(), "{config:?}");
@@ -770,6 +951,8 @@ mod tests {
                 amplitude_nm: 7800,
                 frequency_mhz: 1000,
                 cycles: 1,
+                compensation_enabled: false,
+                compensation_ms: 17,
             };
             let (t, p) = feedback(0, 0, true);
             assert!(e.accept(config, &t, p, false, 0).is_err());
@@ -831,6 +1014,8 @@ mod tests {
             amplitude_nm,
             frequency_mhz: 2000,
             cycles: 1,
+            compensation_enabled: false,
+            compensation_ms: 17,
         };
         assert!(config(boundary).validate().is_ok());
         // Endpoints still fit: this fails specifically because of peak speed.
@@ -850,6 +1035,8 @@ mod tests {
                 amplitude_nm: 78,
                 frequency_mhz: 100,
                 cycles: 1,
+                compensation_enabled: false,
+                compensation_ms: 17,
             }
             .validate()
             .is_err()
@@ -869,6 +1056,8 @@ mod tests {
                     amplitude_nm,
                     frequency_mhz: 1300,
                     cycles: 1,
+                    compensation_enabled: false,
+                    compensation_ms: 17,
                 },
                 u32::MAX - 100,
                 &mut io,
@@ -909,7 +1098,14 @@ mod tests {
             assert_eq!(e.scheduling.reversal_lateness.count, 1);
             assert_eq!(
                 e.next_target,
-                scheduling::next(scheduling::Mode::Adaptive, amplitude_nm, 1300, 385, 0.0)
+                scheduling::next(
+                    scheduling::Mode::Adaptive,
+                    amplitude_nm,
+                    1300,
+                    385,
+                    0.0,
+                    FeedForward::default()
+                )
             );
             assert_eq!(io.targets.len(), 1); // no waveform DPOS despite arbitrary EPOS
             e.abort(&mut io);
@@ -1039,6 +1235,8 @@ mod tests {
                     amplitude_nm: 1_000_000,
                     frequency_mhz: 2000,
                     cycles: 2,
+                    compensation_enabled: false,
+                    compensation_ms: 17,
                 },
                 begin,
                 &mut io,
@@ -1093,6 +1291,8 @@ mod tests {
                 amplitude_nm: 1_000_000,
                 frequency_mhz: 2000,
                 cycles: 2,
+                compensation_enabled: false,
+                compensation_ms: 17,
             },
             u32::MAX - 105,
             &mut io,
@@ -1140,58 +1340,77 @@ mod tests {
     #[test]
     fn reversal_waits_for_each_completion_and_resumes_actual_time() {
         use xeryon_motion::ScanCommand::*;
-        let mut records = [Record::EMPTY; 1024];
-        let mut turns = [reversal::Reversal::EMPTY; 4];
-        let mut e = Engine::new(&mut records).with_reversals(&mut turns);
-        let mut io = Io::default();
-        start(&mut e, sinusoidal(), 0, &mut io);
-        for elapsed in 1..500 {
-            waveform_poll(&mut e, &mut io, elapsed);
+        for advance in [0, 17] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut turns = [reversal::Reversal::EMPTY; 4];
+            let mut e = Engine::new(&mut records).with_reversals(&mut turns);
+            let mut io = Io::default();
+            start(
+                &mut e,
+                sinusoidal()
+                    .with_compensation(advance != 0, advance)
+                    .unwrap(),
+                0,
+                &mut io,
+            );
+            for elapsed in 1..(500 - advance) {
+                waveform_poll(&mut e, &mut io, elapsed);
+            }
+            let before = io.scans.len();
+            io.busy = true; // ordinary command still completing at the crossing
+            for elapsed in (500 - advance)..(505 - advance) {
+                waveform_poll(&mut e, &mut io, elapsed);
+            }
+            assert_eq!(io.scans.len(), before);
+            io.busy = false;
+            waveform_poll(&mut e, &mut io, 505 - advance);
+            assert_eq!(&io.scans[before..], &[Speed(0)]);
+            io.busy = true;
+            for elapsed in (506 - advance)..(513 - advance) {
+                waveform_poll(&mut e, &mut io, elapsed);
+            }
+            assert_eq!(&io.scans[before..], &[Speed(0)]); // zero cannot disappear
+            io.busy = false;
+            waveform_poll(&mut e, &mut io, 513 - advance);
+            assert_eq!(&io.scans[before..], &[Speed(0), Direction(-1)]);
+            io.busy = true;
+            for elapsed in (514 - advance)..(521 - advance) {
+                waveform_poll(&mut e, &mut io, elapsed);
+            }
+            assert_eq!(&io.scans[before..], &[Speed(0), Direction(-1)]);
+            io.busy = false;
+            waveform_poll(&mut e, &mut io, 521 - advance);
+            assert_eq!(
+                &io.scans[before..],
+                &[
+                    Speed(0),
+                    Direction(-1),
+                    Speed(velocity_speed(feed_forward_velocity(
+                        7800,
+                        1000,
+                        521 - advance,
+                        e.config.unwrap().feed_forward()
+                    )))
+                ]
+            );
+            waveform_poll(&mut e, &mut io, 522 - advance);
+            assert_eq!(e.reversals.total, 1);
+            assert_eq!(e.scheduling.reversal_zero.count, 1);
+            assert_eq!(e.scheduling.reversal_direction.count, 1);
+            assert_eq!(e.scheduling.reversal_resume.count, 1);
+            let mut text = String::new();
+            e.reversals.records[0].write(&mut text).unwrap();
+            assert!(
+                text.contains(&format!(
+                    "[1,0,{},null],[2,-1,{},null],[1,6,{},null]",
+                    505 - advance,
+                    513 - advance,
+                    521 - advance
+                )),
+                "{text}"
+            );
+            assert_eq!(e.state, State::Running);
         }
-        let before = io.scans.len();
-        io.busy = true; // ordinary command still completing at the crossing
-        for elapsed in 500..505 {
-            waveform_poll(&mut e, &mut io, elapsed);
-        }
-        assert_eq!(io.scans.len(), before);
-        io.busy = false;
-        waveform_poll(&mut e, &mut io, 505);
-        assert_eq!(&io.scans[before..], &[Speed(0)]);
-        io.busy = true;
-        for elapsed in 506..513 {
-            waveform_poll(&mut e, &mut io, elapsed);
-        }
-        assert_eq!(&io.scans[before..], &[Speed(0)]); // zero cannot disappear
-        io.busy = false;
-        waveform_poll(&mut e, &mut io, 513);
-        assert_eq!(&io.scans[before..], &[Speed(0), Direction(-1)]);
-        io.busy = true;
-        for elapsed in 514..521 {
-            waveform_poll(&mut e, &mut io, elapsed);
-        }
-        assert_eq!(&io.scans[before..], &[Speed(0), Direction(-1)]);
-        io.busy = false;
-        waveform_poll(&mut e, &mut io, 521);
-        assert_eq!(
-            &io.scans[before..],
-            &[
-                Speed(0),
-                Direction(-1),
-                Speed(velocity_speed(sine_velocity(7800, 1000, 521)))
-            ]
-        );
-        waveform_poll(&mut e, &mut io, 522);
-        assert_eq!(e.reversals.total, 1);
-        assert_eq!(e.scheduling.reversal_zero.count, 1);
-        assert_eq!(e.scheduling.reversal_direction.count, 1);
-        assert_eq!(e.scheduling.reversal_resume.count, 1);
-        let mut text = String::new();
-        e.reversals.records[0].write(&mut text).unwrap();
-        assert!(
-            text.contains("[1,0,505,null],[2,-1,513,null],[1,6,521,null]"),
-            "{text}"
-        );
-        assert_eq!(e.state, State::Running);
     }
 
     #[test]
@@ -1242,6 +1461,8 @@ mod tests {
                     amplitude_nm: 1_000_000,
                     frequency_mhz: 1000,
                     cycles: 1,
+                    compensation_enabled: false,
+                    compensation_ms: 17,
                 },
                 u32::MAX - 70,
                 &mut io,
@@ -1385,6 +1606,8 @@ mod tests {
             amplitude_nm: 1_000_000,
             frequency_mhz: 1000,
             cycles: 1,
+            compensation_enabled: false,
+            compensation_ms: 17,
         };
         start(&mut e, config, 0, &mut io);
         assert_eq!(io.scans, [Speed(0), Direction(1)]);
@@ -1424,6 +1647,8 @@ mod tests {
                 amplitude_nm: 1_000_000,
                 frequency_mhz,
                 cycles,
+                compensation_enabled: false,
+                compensation_ms: 17,
             };
             start(&mut e, config, 0, &mut io);
             let boundary = (cycles * 1_000_000).div_ceil(frequency_mhz);
@@ -1642,7 +1867,9 @@ mod tests {
                     center_nm: 0,
                     amplitude_nm: 0,
                     frequency_mhz: 1000,
-                    cycles: 1
+                    cycles: 1,
+                    compensation_enabled: false,
+                    compensation_ms: 17,
                 },
                 &t,
                 p,

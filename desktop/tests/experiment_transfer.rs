@@ -298,6 +298,8 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         amplitude_nm: 780,
         frequency_mhz: 1000,
         cycles: 1,
+        compensation_enabled: false,
+        compensation_ms: 17,
     };
     e.accept(config, &telemetry(0), pressure(0), false, 0)
         .unwrap();
@@ -306,7 +308,7 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     for now in 2..=1012 {
         e.poll(now, &telemetry(now), pressure(now), &mut Io);
     }
-    e.abort(&mut Io);
+    e.abort(&mut Io); // A late ABORT cannot overwrite a completed run.
     assert_eq!(e.len, 51);
     let mut d = receiver::Download::default();
     assert!(d.begin(e.run).starts_with("GET_DATA "));
@@ -375,10 +377,10 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         csv.lines().nth(2).unwrap().split(',').nth(7),
         Some("-0.780")
     );
-    assert_eq!(dataset.metadata["outcome"], "aborted");
-    assert_eq!(dataset.metadata["final_return"]["error_counts"], -123);
-    assert_eq!(dataset.metadata["final_return"]["error_um"], -9.594);
-    assert_eq!(dataset.metadata["final_return"]["finished_ms"], 1012);
+    assert_eq!(dataset.metadata["outcome"], "completed");
+    assert_eq!(dataset.metadata["final_return"]["error_counts"], -113);
+    assert_eq!(dataset.metadata["final_return"]["error_um"], -8.814);
+    assert_eq!(dataset.metadata["final_return"]["finished_ms"], 1003);
     assert_eq!(dataset.metadata["final_return"]["expired"], false);
     assert!(dataset.csv().contains("final_feedback"));
     assert_eq!(dataset.metadata["reversal_count"], 1);
@@ -582,6 +584,8 @@ fn native_configuration_is_validated_in_rust() {
     let command = receiver::Input {
         kind: "quasi_static".into(),
         speed_um_s: Some(10),
+        compensation_enabled: false,
+        compensation_ms: 17,
         start_um: -1.234,
         increment_um: 0.078,
         timing: 0.5,
@@ -639,6 +643,8 @@ fn native_configuration_is_validated_in_rust() {
             receiver::Input {
                 kind: "sinusoidal".into(),
                 speed_um_s: None,
+                compensation_enabled: false,
+                compensation_ms: 17,
                 start_um: 0.0,
                 increment_um: 1.0,
                 timing,
@@ -651,3 +657,90 @@ fn native_configuration_is_validated_in_rust() {
 }
 #[path = "../../src/xeryon.rs"]
 mod xeryon;
+
+#[test]
+fn compensation_roundtrips_native_wire_firmware_metadata_and_csv_without_retiming() {
+    for enabled in [false, true] {
+        for ms in [0, 17, MAX_COMPENSATION_MS] {
+            let input: receiver::Input = serde_json::from_value(json!({
+                "kind":"sinusoidal", "start_um":0, "increment_um":1,
+                "timing":2, "repeats":1, "compensation_enabled":enabled, "compensation_ms":ms,
+            }))
+            .unwrap();
+            let wire = input.command(1).unwrap();
+            assert_eq!(
+                wire,
+                format!("START 1 S 0 1000 2000 1 {} {ms}", u8::from(enabled))
+            );
+            let command::Command::Start(_, config) =
+                command::Command::parse(wire.as_bytes()).unwrap()
+            else {
+                panic!()
+            };
+            let mut records = [Record::EMPTY; 1];
+            let mut e = engine::Engine::new(&mut records);
+            e.config = Some(config);
+            let mut metadata = String::new();
+            e.metadata(&mut metadata, 1).unwrap();
+            let metadata: Value = serde_json::from_str(&metadata).unwrap();
+            assert_eq!(metadata["config"]["compensation_enabled"], enabled);
+            assert_eq!(metadata["config"]["compensation_ms"], ms);
+            let phase = 360.0 * 2.0 * f64::from(ms) / 1000.0;
+            assert_eq!(metadata["feed_forward"]["phase_deg"], phase);
+            assert_eq!(
+                metadata["feed_forward"]["applied_phase_deg"],
+                if enabled { phase } else { 0.0 }
+            );
+            assert_eq!(
+                metadata["feed_forward"]["activation_ms"],
+                COMPENSATION_RAMP_MS
+            );
+            assert!(metadata["scheduler"]["scheduled_to_complete_ms"].is_null());
+            assert_eq!(metadata["timing"]["epos_timestamp"], "host_receipt_ms");
+            let samples = vec![[20, 10, 100, 0, 3, 2, 0, 12, 10, 0, 5, 6]];
+            let data = receiver::Dataset {
+                archive_index: None,
+                metadata,
+                samples: samples.clone(),
+            };
+            let csv = data.csv();
+            assert!(csv.contains("compensation_enabled"));
+            assert!(csv.contains("phase_deg"));
+            assert!(
+                csv.lines()
+                    .nth(2)
+                    .unwrap()
+                    .starts_with("0.020,0.780,100,0,3,2,0,0.936,10,0,10,12,0.017,")
+            );
+            assert_eq!(data.samples, samples);
+        }
+    }
+    for value in [
+        json!(-1),
+        json!(1.5),
+        json!(null),
+        json!("NaN"),
+        json!("invalid"),
+        json!(MAX_COMPENSATION_MS + 1),
+    ] {
+        for enabled in [false, true] {
+            let input = serde_json::from_value::<receiver::Input>(json!({
+                "kind":"sinusoidal", "start_um":0, "increment_um":1,
+                "timing":1, "repeats":1, "compensation_enabled":enabled, "compensation_ms":value,
+            }));
+            assert!(input.map(|v| v.command(1).is_err()).unwrap_or(true));
+        }
+    }
+    for suffix in ["1", "2 17", "1 -1", "1 NaN", "1 1.5", "0 26", "1 17 extra"] {
+        assert!(
+            command::Command::parse(format!("START 1 S 0 1000 1000 1 {suffix}").as_bytes())
+                .is_err()
+        );
+    }
+    let command::Command::Start(_, legacy) =
+        command::Command::parse(b"START 1 S 0 1000 1000 1").unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(legacy.feed_forward().advance_ms, 0);
+}

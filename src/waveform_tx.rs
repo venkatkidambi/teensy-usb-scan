@@ -107,6 +107,7 @@ impl Engine<'_> {
         io: &mut impl Actuator,
     ) -> Result<bool, &'static str> {
         let elapsed = self.elapsed_ms;
+        let ff = self.config.unwrap().feed_forward();
         let idle = io.tx_idle();
         let progress = io.tx_progress();
         // RUNNING has one owner and at most one outstanding reversal line.
@@ -164,14 +165,14 @@ impl Engine<'_> {
         }
         // Absolute monotonic phase for *every* evaluation, including retries.
         self.scheduling.evaluations += 1;
-        self.scheduling.observe(amplitude, frequency, elapsed);
-        let velocity = super::sine_velocity(amplitude, frequency, elapsed);
-        let direction = sine_direction(frequency, elapsed);
+        self.scheduling.observe(amplitude, frequency, elapsed, ff);
+        let velocity = super::feed_forward_velocity(amplitude, frequency, elapsed, ff);
+        let direction = ff.direction(frequency, elapsed);
         let crossing = self.waveform_tx.phase == Phase::Normal
             && self.scan.direction.is_some_and(|last| last != direction);
         if crossing {
-            let phase = u64::from(elapsed) * u64::from(frequency);
-            let event = (phase / 500_000 * 500_000).div_ceil(u64::from(frequency)) as u32;
+            let half_cycle = (ff.phase(frequency, elapsed) / 500_000.0) as u64;
+            let event = ff.crossing_ms(frequency, half_cycle);
             self.scheduling.reversal_lateness.add(elapsed - event);
             self.waveform_tx.phase = Phase::NeedZero;
             self.waveform_tx.reversal_started = event;
@@ -222,6 +223,7 @@ impl Engine<'_> {
                 frequency,
                 elapsed,
                 self.scheduling.held.unwrap_or(0.0),
+                ff,
             );
         }
         if !idle {
@@ -237,7 +239,7 @@ impl Engine<'_> {
                 self.reversals
                     .stage(1, elapsed, reversal, velocity_speed(velocity), self.target);
                 self.next_target =
-                    scheduling::next(self.scheduling.mode, amplitude, frequency, elapsed, 0.0);
+                    scheduling::next(self.scheduling.mode, amplitude, frequency, elapsed, 0.0, ff);
                 return Ok(false);
             }
             Phase::AwaitZero => {
@@ -306,6 +308,7 @@ impl Engine<'_> {
             frequency,
             elapsed,
             self.scheduling.held.unwrap_or(0.0),
+            ff,
         );
         Ok(false)
     }

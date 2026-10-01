@@ -359,8 +359,9 @@ impl Console {
                     }
                     Ok(Command::Hello(id)) => writeln!(
                         self.tx,
-                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"quasi_static_speed\":true,\"sine_position\":true,\"sine_velocity\":true}}",
-                        env!("CARGO_PKG_VERSION")
+                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"quasi_static_speed\":true,\"sine_position\":true,\"sine_velocity\":true,\"compensation_max_ms\":{}}}",
+                        env!("CARGO_PKG_VERSION"),
+                        crate::experiment_data::MAX_COMPENSATION_MS
                     ),
                     Ok(Command::Ping(id)) => {
                         writeln!(self.tx, "{{\"type\":\"pong\",\"id\":{id},\"ms\":{now}}}")
