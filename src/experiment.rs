@@ -50,13 +50,6 @@ pub trait Actuator {
     -> Result<(), &'static str>;
     fn stop(&mut self) -> Result<(), &'static str>;
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CenterMove {
-    None,
-    Stopping,
-    SettingSpeed,
-    Positioning,
-}
 pub struct Engine<'a> {
     pub state: State,
     pub config: Option<ExperimentConfig>,
@@ -86,7 +79,7 @@ pub struct Engine<'a> {
     target: i32,
     epoch: u32,
     transfer_next: usize,
-    center_move: CenterMove,
+    stopping: bool,
     final_return: final_return::Diagnostics,
     scan: xeryon_motion::ScanState,
     waveform_tx: waveform_tx::Transport,
@@ -144,7 +137,7 @@ impl<'a> Engine<'a> {
             target: 0,
             epoch: 0,
             transfer_next: 0,
-            center_move: CenterMove::None,
+            stopping: false,
             final_return: Default::default(),
             scan: xeryon_motion::ScanState::default(),
             waveform_tx: waveform_tx::Transport::default(),
@@ -290,7 +283,7 @@ impl<'a> Engine<'a> {
         self.target = target;
         self.epoch = t.epoch;
         self.step = 0;
-        self.center_move = CenterMove::None;
+        self.stopping = false;
         self.final_return = Default::default();
         self.scan = xeryon_motion::ScanState::default();
         self.waveform_tx = waveform_tx::Transport::default();
@@ -341,7 +334,7 @@ impl<'a> Engine<'a> {
         }
         self.waveform_tx
             .close_busy(self.elapsed_ms, &mut self.scheduling);
-        if self.state == State::Running && self.center_move == CenterMove::None {
+        if self.state == State::Running && !self.stopping {
             if let Some(ExperimentConfig::Sinusoidal {
                 amplitude_nm,
                 frequency_mhz,
@@ -370,7 +363,8 @@ impl<'a> Engine<'a> {
             _ => "faulted",
         };
         self.reason = reason;
-        self.stop_queued = io.stop().is_ok();
+        // Successful sinusoidal completion already drained the boundary STOP.
+        self.stop_queued = (state == State::Complete && self.stopping) || io.stop().is_ok();
         if !self.stop_queued && state == State::Complete {
             self.outcome = "faulted";
             self.reason = "STOP could not be queued";
@@ -403,7 +397,7 @@ impl<'a> Engine<'a> {
             self.elapsed_ms = now.wrapping_sub(self.started_ms);
             self.scheduling.refresh(io.tx_progress());
             self.reversals.refresh(io.tx_progress(), self.started_ms);
-            if self.center_move == CenterMove::None {
+            if !self.stopping {
                 self.reversals.observe(
                     self.config.unwrap(),
                     self.elapsed_ms,
@@ -412,7 +406,7 @@ impl<'a> Engine<'a> {
                     !io.tx_idle(),
                 );
             }
-            if self.center_move == CenterMove::None {
+            if !self.stopping {
                 if let Some(ExperimentConfig::Sinusoidal {
                     amplitude_nm,
                     frequency_mhz,
@@ -444,21 +438,17 @@ impl<'a> Engine<'a> {
             && matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. }));
         // STOP may clear closed-loop status. Allow the deliberately
         // stopped phases and a bounded 100 ms mode-change feedback grace after
-        // restarting SCAN or DPOS. All other health checks stay in force.
+        // starting SCAN. All other health checks stay in force.
         let stopped_transition = sine_running
-            && (matches!(
-                self.center_move,
-                CenterMove::Stopping | CenterMove::SettingSpeed
-            ) || (self.center_move == CenterMove::None && self.scan.direction == Some(0))
+            && (self.stopping
+                || self.scan.direction == Some(0)
                 || now.wrapping_sub(self.motion_changed_ms) < MODE_FEEDBACK_GRACE_MS);
         let fault = Self::healthy(
             t,
             p,
             now,
             self.state != State::MoveToStart && !stopped_transition,
-            sine_running
-                && (self.center_move != CenterMove::Positioning
-                    || now.wrapping_sub(self.motion_changed_ms) < MODE_FEEDBACK_GRACE_MS),
+            sine_running,
         )
         .err()
         .or_else(|| (t.epoch != self.epoch).then_some("Xeryon connection changed"))
@@ -585,9 +575,7 @@ impl<'a> Engine<'a> {
         }
         let elapsed = now.wrapping_sub(self.started_ms);
         self.elapsed_ms = elapsed;
-        if self.center_move == CenterMove::None
-            && self.envelope.exceeded(self.config.unwrap(), t, now)
-        {
+        if !self.stopping && self.envelope.exceeded(self.config.unwrap(), t, now) {
             self.finish(State::Fault, "Sinusoidal trajectory envelope exceeded", io);
             return;
         }
@@ -604,12 +592,9 @@ impl<'a> Engine<'a> {
             frequency_mhz,
             ..
         } = self.config.unwrap()
-            && (elapsed >= self.next_sample
-                || (self.center_move == CenterMove::None && elapsed >= self.next_target))
+            && (elapsed >= self.next_sample || (!self.stopping && elapsed >= self.next_target))
         {
-            self.target = if self.center_move != CenterMove::None {
-                counts(center_nm).unwrap()
-            } else if elapsed >= self.duration_ms - MOVE_TIMEOUT_MS {
+            self.target = if elapsed >= self.duration_ms - MOVE_TIMEOUT_MS {
                 // Clamp the terminal sample to the exact endpoint before STOP.
                 self.config.unwrap().start().unwrap()
             } else {
@@ -697,49 +682,24 @@ impl<'a> Engine<'a> {
                 }
             }
             ExperimentConfig::Sinusoidal {
-                center_nm,
                 amplitude_nm,
                 frequency_mhz,
                 ..
             } => {
                 let waveform_ms = self.duration_ms - MOVE_TIMEOUT_MS;
-                if self.center_move != CenterMove::None {
+                if self.stopping {
                     if now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS {
-                        Err("Final center move deadline")
-                    } else if self.center_move == CenterMove::Stopping && io.tx_idle() {
-                        // Never return at the last (possibly zero) waveform speed.
-                        // STOP has drained before changing SSPD; DPOS waits too.
-                        // STOP can discard queued waveform bytes. The scan cache
-                        // describes acceptance, not controller execution, so never
-                        // deduplicate this positioning speed against that cache.
-                        let speed = xeryon_motion::ScanCommand::Speed(velocity_speed(
-                            sine_max_velocity(amplitude_nm, frequency_mhz),
-                        ));
-                        io.scan(&[speed]).map(|_| {
-                            self.scan.commit(speed);
-                            self.center_move = CenterMove::SettingSpeed;
-                            false
-                        })
-                    } else if self.center_move == CenterMove::SettingSpeed && io.tx_idle() {
-                        self.final_return.dpos.scheduled = Some(now);
-                        io.target(self.target, now, true).map(|_| {
-                            self.final_return.dpos.queued(now, io.tx_progress());
-                            self.center_move = CenterMove::Positioning;
-                            self.motion_changed_ms = now;
-                            false
-                        })
+                        Err("Final STOP deadline")
                     } else {
-                        Ok(self.center_move == CenterMove::Positioning
-                            && io.tx_idle()
-                            && self.center_arrived(t))
+                        Ok(io.tx_idle())
                     }
                 } else if elapsed >= waveform_ms {
                     self.final_return = final_return::Diagnostics {
                         boundary: Some(self.started_ms.wrapping_add(waveform_ms)),
                         observed: now,
                         theoretical_counts: self.config.unwrap().start().unwrap(),
-                        target: counts(center_nm).unwrap(),
-                        speed: velocity_speed(sine_max_velocity(amplitude_nm, frequency_mhz)),
+                        target: self.config.unwrap().start().unwrap(),
+                        speed: 0,
                         waveform_pending: !io.tx_idle(),
                         intent_pending: self.waveform_tx.intent_pending(),
                         settings: t.positioning,
@@ -753,8 +713,8 @@ impl<'a> Engine<'a> {
                     if elapsed - waveform_ms >= TRAJECTORY_MS {
                         Err("Trajectory deadline missed")
                     } else {
-                        self.target = counts(center_nm).unwrap();
-                        self.center_move = CenterMove::Stopping;
+                        self.target = self.config.unwrap().start().unwrap();
+                        self.stopping = true;
                         self.move_started = now;
                         self.final_return.stop.scheduled = Some(now);
                         io.stop().map(|_| {
@@ -773,17 +733,6 @@ impl<'a> Engine<'a> {
             Err(e) => self.finish(State::Fault, e, io),
             _ => {}
         }
-    }
-    /// Use the same tracked DPOS echo/Position Reached confirmation as startup.
-    /// PTOL/PTO2/TOUT/DLAY belong to the controller: never gate on EPOS error.
-    fn center_arrived(&self, t: &Telemetry) -> bool {
-        let status = t.samples[2];
-        let age = status.ms.wrapping_sub(self.motion_changed_ms);
-        age > 0
-            && age < 0x8000_0000
-            && status.value & ((1 << 6) | (1 << 9) | (1 << 13)) == (1 << 6)
-            && t.xeryon_motion
-                .is_some_and(|m| m.state == 2 && m.target == Some(self.target))
     }
     pub fn metadata(&self, out: &mut impl core::fmt::Write, id: u32) -> core::fmt::Result {
         write!(

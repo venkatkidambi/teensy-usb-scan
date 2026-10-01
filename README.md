@@ -113,13 +113,14 @@ the separate USB2 host header. Only one app/terminal can own the serial port.
   `x = center − A cos(2πft)` and `v = 2πfA sin(2πft)`. Adaptive 4–10 ms SSPD/SCAN
   commands use elapsed Teensy time and coalesce under backpressure. Reversals
   wait for zero-speed, direction, and resume transfer completion in order. The
-  final boundary sends STOP before a tracked DPOS return to center.
+  final boundary sends STOP at the original starting extremum (`center − amplitude`),
+  with no subsequent positioning move.
 - **Experiment Data:** verified results, position/force plots, phase estimates,
   CSV and PNG exports. Sweeps run frequencies in order, downloading each result
   before the next START. ABORT, faults, or disconnect cancel remaining runs.
 
 Experiments record at 50 Hz into 4,096 fixed 48-byte records (192 KiB). The total
-acquisition bound is 81.9 s; sinusoidal runs reserve 10 s for final positioning,
+acquisition bound is 81.9 s; sinusoidal runs reserve 10 s for final STOP transmission,
 accept 0.1–10 Hz, and are limited to 144 cycles by diagnostic capacity. USB1 PC
 disconnect does **not** stop an autonomous run while Teensy power remains. Manual
 moves instead stop on disconnect, stale feedback, heartbeat loss, or deadline.
@@ -171,7 +172,7 @@ normal firmware uses adaptive scheduling.
 
 Fatal pin-13 LED diagnostics repeat a long pulse, a fault group, then a phase group.
 Fault counts: 2 panic, 3 HardFault, 4 unexpected exception, 5 stalled foreground.
-Phase counts: 1 dashboard/startup, 2 positioning, 3 armed, 4 waveform/return,
+Phase counts: 1 dashboard/startup, 2 positioning, 3 armed, 4 waveform/stopping,
 5 cleanup. An immediate **3 / 1** can indicate startup stack overflow.
 `.cargo/config.toml` reserves **64 KiB** because the main frame plus startup logging
 exceeds the BSP's 16 KiB default. Fatal handling uses a separate 1 KiB emergency

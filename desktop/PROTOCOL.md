@@ -167,12 +167,13 @@ velocity at actual send time. Reversals wait for each USB completion: SSPD=0,
 then SCAN=new sign, then current theoretical speed. Waveform TX and the full
 reversal each have a 40 ms fault/STOP bound. No waveform DPOS or feedback drift
 correction is used.
-Initial DPOS targets `center - amplitude`; final DPOS targets center. Both require
-tracked Position Reached. RUNNING starts with SSPD=0 then SCAN=1 at t=0 after
-initial positioning drains. Position follows `center - A cos(2π f t)`. Final
-arrival requires fresh closed-loop/non-scanning/non-indexing status after the
-command. The run ends on arrival without a center dwell. The waveform
-ends with STOP before the final center move. ABORT/fault paths request STOP and
+Initial DPOS targets `center - amplitude` and requires tracked Position Reached.
+RUNNING starts with SSPD=0 then SCAN=1 at t=0 after initial positioning drains.
+Position follows `center - A cos(2π f t)`. After the specified cycles, the waveform
+ends with STOP at the original starting extremum (`center - amplitude`). No final
+SSPD or DPOS positioning command is sent. Completion waits for STOP transmission
+to drain, bounded by the existing 10 s reserve; it does not require Position
+Reached or correct accumulated scan drift. ABORT/fault paths request STOP and
 retain samples. SSPD is changed during the waveform and remains at the last setting.
 
 Dataset version 2 uses 48-byte records: the original ten words followed by
@@ -184,7 +185,7 @@ plots every logger sample as a continuous line against experiment elapsed time
 (`time_s` in CSV); no I²C completion time column is exported. Both identities and
 per-signal new flags remain in CSV. During the sine waveform, `target` is the
 theoretical position at actual logging time; the terminal sample at STOP is the
-negative extremum, and during the return it is center.
+negative extremum, which remains the target while STOP drains.
 Quasi-static retains its last commanded DPOS target. Metadata adds
 `sine_control: "velocity_scan"` and
 `sine_initialization: "negative_extremum_zero_velocity"` for sinusoidal runs and retains `trajectory_ms: 10`
@@ -237,10 +238,14 @@ RUNNING, retained by the desktop receiver, and exported in CSV metadata. Legacy
 describes every default-mode control interval. The sample format is unchanged.
 
 
-### Final center-return evidence
+### Final STOP evidence
 
 `data_meta.final_return` (version 1, sinusoidal runs that reach the boundary) retains
-host timestamps in wrapping absolute milliseconds. Subtract `started_ms` modulo
+host timestamps in wrapping absolute milliseconds. The legacy `final_return`
+field name and version are retained for dataset compatibility. `target_counts`
+and `theoretical_counts` both identify the starting extremum; `speed_um_s` is zero.
+No final DPOS is sent: its token is zero, its timestamps are null, and `echo` is null.
+Subtract `started_ms` modulo
 2^32 for run-relative times. `stop` and `dpos` each contain an accepted command
 `token` and `ms=[scheduled, queued, USB-completed]`; null means unobserved. USB
 completion is not a controller acknowledgement. The DPOS `echo` is separate.
@@ -252,7 +257,7 @@ bit 10 is Position Reached. Overflow is counted in `stat_transitions_dropped`.
 The 50 Hz binary records retain the intermediate feedback and its ages, while
 `final_feedback` captures completion/failure between logger ticks. No field
 claims to be a synchronized physical measurement. `error_counts` and `error_um`
-are signed EPOS minus the center DPOS target, diagnostic only. `deadline_ms`,
+are signed EPOS minus the starting extremum, diagnostic only. `deadline_ms`,
 `expired`, and `finished_ms` distinguish a timeout from successful completion.
 `boundary_ms` is the first representable millisecond at or after the mathematical
 cycle boundary; `observed_ms` is the actual foreground observation. The declared
@@ -313,8 +318,8 @@ Dataset v2 contains twelve explicit little-endian 32-bit words per 48-byte recor
 
 Capacity is 4,096 records at 20 ms sampling. Position receipt time is signed
 `elapsed_ms - epos_age_ms`; signals are asynchronous, not simultaneous measurements.
-The terminal waveform sample records the negative extremum, and subsequent return
-samples use the center target. Version 1 datasets are rejected rather than decoded
+The terminal waveform sample and any subsequent samples while STOP drains record
+the original starting extremum. Version 1 datasets are rejected rather than decoded
 with the wrong layout. CSV preserves raw values, ages, identities, and diagnostics.
 
 CRC-32/ISO-HDLC covers concatenated encoded records: initialize to 0xffffffff,

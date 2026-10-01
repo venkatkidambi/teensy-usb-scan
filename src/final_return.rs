@@ -1,4 +1,4 @@
-//! Retained final-return evidence. Times are wrapping host milliseconds, not
+//! Retained final STOP evidence under the legacy final_return wire key. Times are wrapping host milliseconds, not
 //! controller execution times. The 50 Hz dataset supplies the EPOS/STAT/TIME
 //! history; these snapshots retain the boundary and between-tick completion.
 use super::reversal::TxProgress;

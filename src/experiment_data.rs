@@ -191,6 +191,7 @@ impl ExperimentConfig {
                 {
                     return Err("Sinusoidal peak speed is outside representable SSPD range");
                 }
+                // Preserve the acquisition reserve while the final STOP drains.
                 (u64::from(cycles) * 1_000_000).div_ceil(u64::from(frequency_mhz))
                     + u64::from(MOVE_TIMEOUT_MS)
             }

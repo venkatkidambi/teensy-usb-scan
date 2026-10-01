@@ -336,7 +336,7 @@ mod tests {
                 e.poll(now, &t, p, &mut io);
             }
             assert_eq!(e.outcome, "completed");
-            assert_eq!(e.reversals.total, cycles * 2 - 1); // final boundary stops for DPOS return
+            assert_eq!(e.reversals.total, cycles * 2 - 1); // final boundary stops the waveform
             let count = e.transferred_reversals();
             assert!(count <= reversal::CAPACITY);
             assert_eq!(count, (cycles * 2 - 1) as usize);
@@ -698,14 +698,14 @@ mod tests {
         }
         assert_eq!(e.outcome, "completed");
         assert_eq!(e.len, 51);
-        assert_eq!(io.targets.len(), 2); // initial extremum and final center only
+        assert_eq!(io.targets.len(), 1); // initial extremum only
         for record in &e.samples[..e.len] {
             let elapsed = record.elapsed_ms;
             let expected = (-100.0 * (f64::from(elapsed) * core::f64::consts::TAU / 1000.0).cos())
                 .round() as i32;
             assert_eq!(record.target, expected);
         }
-        assert_eq!(io.targets.last().unwrap().0, 0);
+        assert_eq!(io.targets.last().unwrap().0, -100);
         assert!(io.targets.last().unwrap().2);
         assert_eq!(e.samples[50].elapsed_ms, 1000);
         assert!(
@@ -714,7 +714,7 @@ mod tests {
                 .all(|pair| pair[1].elapsed_ms - pair[0].elapsed_ms == 20)
         );
         assert_eq!(e.missed_samples, 0);
-        assert_eq!(io.stops, 2); // waveform boundary, then terminal cleanup
+        assert_eq!(io.stops, 1); // waveform boundary only
         assert_eq!(io.events[..3], ["DPOS=-100\n", "SSPD=0\n", "SCAN=1\n"]);
         for i in 0..10000 {
             let phase = i as f64 / 10000.0;
@@ -751,7 +751,7 @@ mod tests {
                 previous = direction;
             }
             // Two mathematical reversals per complete cycle, excluding t=0.
-            // At the final one the finite experiment stops for the DPOS return.
+            // At the final one the finite experiment stops at the starting extremum.
             assert_eq!(crossings, [500_000u32.div_ceil(frequency), end]);
         }
     }
@@ -1314,133 +1314,63 @@ mod tests {
         for elapsed in 990..=1000 {
             waveform_poll(&mut e, &mut io, elapsed);
         }
-        assert_eq!(e.center_move, CenterMove::Stopping);
+        assert!(e.stopping);
         assert_eq!(io.scans.len(), sent);
         assert_eq!(io.events.last().unwrap(), "STOP\n");
         assert_eq!(io.stops, 1);
         for elapsed in 1001..1010 {
             waveform_poll(&mut e, &mut io, elapsed);
         }
-        assert_eq!(io.targets.len(), 1); // return DPOS cannot overtake STOP
+        assert_eq!(io.targets.len(), 1); // no final positioning command
         assert_eq!(io.scans.len(), sent);
     }
 
     #[test]
-    fn final_return_real_tracker_accepts_controller_tolerance_without_exact_epos() {
-        // Include PTOL/PTO2 edges, both signs and tick rollover. Firmware never
-        // reimplements the controller's tolerance decision from EPOS.
-        for begin in [0, u32::MAX - 1050] {
-            for error in [-10, -2, -1, 0, 1, 2, 10] {
-                let mut records = [Record::EMPTY; 1024];
-                let mut e = Engine::new(&mut records);
-                let mut io = Io::default();
-                start(&mut e, sinusoidal(), begin, &mut io);
-                for elapsed in 1..=1002 {
-                    waveform_poll(&mut e, &mut io, elapsed);
-                }
-                let sent = io.targets.last().unwrap().1;
-                let (mut t, mut p) = feedback(sent, error, false);
-                let mut tracker = xeryon_motion::Motion::new();
-                tracker.start(0, sent);
-                // Cached reached and matching echo belong to the previous move.
-                t.record(b"DPOS", 0, sent.wrapping_sub(1));
-                t.record(b"STAT", 1344, sent.wrapping_sub(1));
-                for offset in 1..=5 {
-                    let now = sent.wrapping_add(offset);
-                    t.record(b"EPOS", i64::from(error), now);
-                    p.ms = now;
-                    match offset {
-                        2 => {
-                            // Fresh reached but wrong echo cannot complete.
-                            t.record(b"DPOS", 1, now);
-                            t.record(b"STAT", 1344, now);
-                        }
-                        3 => t.record(b"DPOS", 0, now), // correct echo, old STAT
-                        4 => t.record(b"STAT", 1344, sent.wrapping_add(3)), // same tick
-                        5 => t.record(b"STAT", 1344, now), // subsequent STAT
-                        _ => {}
-                    }
-                    assert!(!tracker.poll_policy(&t, now, true));
-                    t.xeryon_motion = Some(tracker);
-                    e.poll(now, &t, p, &mut io);
-                    assert_eq!(e.data_ready(), offset == 5);
-                }
-                assert_eq!(e.outcome, "completed");
-                assert_eq!(e.final_return.echo.value, 0);
-                assert_eq!(e.final_return.echo.ms, sent.wrapping_add(3));
-                assert_eq!(e.final_return.last[0].value, i64::from(error));
-                assert_eq!(e.final_return.finished, Some(sent.wrapping_add(5)));
-                assert!(!e.final_return.expired);
-                let mut json = String::new();
-                e.metadata(&mut json, 1).unwrap();
-                assert!(json.contains(&format!("\"error_counts\":{error},")));
+    fn final_stop_drains_without_positioning_or_requiring_position_reached() {
+        for begin in [0, u32::MAX - 1000] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            start(&mut e, sinusoidal(), begin, &mut io);
+            for elapsed in 1..1000 {
+                waveform_poll(&mut e, &mut io, elapsed);
             }
+            let sent = io.scans.len();
+            io.tracked = true;
+            let boundary = e.started_ms.wrapping_add(1000);
+            io.clock = boundary;
+            waveform_poll(&mut e, &mut io, 1000);
+            assert_eq!(e.final_return.theoretical_counts, -100);
+            assert_eq!(e.final_return.target, -100);
+            assert_eq!(e.final_return.speed, 0);
+            assert_eq!(e.final_return.stop.queued, Some(boundary));
+            assert_eq!(e.samples[50].target, -100);
+            // Keep recording the starting extremum while STOP drains, even
+            // after the waveform would otherwise have begun another cycle.
+            for elapsed in 1001..=1020 {
+                waveform_poll(&mut e, &mut io, elapsed);
+                assert!(!e.data_ready());
+            }
+            assert_eq!(e.samples[51].target, -100);
+            let finished = boundary.wrapping_add(21);
+            io.complete_one(finished);
+            let (mut t, p) = feedback(finished, -98, false);
+            t.record(b"STAT", 0, finished); // STOP can clear closed loop/reached
+            e.poll(finished, &t, p, &mut io);
+            assert_eq!(e.outcome, "completed");
+            assert!(e.stop_queued);
+            assert_eq!(e.final_return.stop.completed, Some(finished));
+            assert_eq!(e.final_return.finished, Some(finished));
+            assert_eq!(e.final_return.dpos.scheduled, None);
+            assert!(!e.final_return.echo.valid);
+            assert!(!e.final_return.expired);
+            assert_eq!(io.targets.len(), 1);
+            assert_eq!(io.scans.len(), sent);
+            assert_eq!(io.stops, 1);
+            let mut json = String::new();
+            e.metadata(&mut json, 1).unwrap();
+            assert!(json.contains("\"error_counts\":2,"));
         }
-    }
-
-    #[test]
-    fn final_return_captures_stop_drain_dpos_identity_and_between_tick_completion() {
-        let mut records = [Record::EMPTY; 1024];
-        let mut e = Engine::new(&mut records);
-        let mut io = Io::default();
-        start(&mut e, sinusoidal(), 0, &mut io);
-        for elapsed in 1..1000 {
-            waveform_poll(&mut e, &mut io, elapsed);
-        }
-        io.tracked = true;
-        io.clock = e.started_ms + 1000;
-        waveform_poll(&mut e, &mut io, 1000);
-        assert_eq!(e.final_return.theoretical_counts, -100);
-        assert!(sine_velocity(7800, 1000, 1000).abs() < 1e-9);
-        assert_eq!(e.final_return.stop.queued, Some(io.clock));
-        waveform_poll(&mut e, &mut io, 1001);
-        assert_eq!(io.targets.len(), 1);
-        io.complete_one(e.started_ms + 1002);
-        io.clock = e.started_ms + 1002;
-        waveform_poll(&mut e, &mut io, 1002); // SSPD return speed
-        assert_eq!(e.final_return.stop.completed, Some(e.started_ms + 1002));
-        assert_eq!(io.targets.len(), 1);
-        waveform_poll(&mut e, &mut io, 1003);
-        assert_eq!(io.targets.len(), 1);
-        io.complete_one(e.started_ms + 1004);
-        io.clock = e.started_ms + 1004;
-        waveform_poll(&mut e, &mut io, 1004); // DPOS accepted exactly once
-        let events = io.events.len();
-        waveform_poll(&mut e, &mut io, 1005);
-        assert_eq!(io.events.len(), events);
-        assert_eq!(io.targets.len(), 2);
-        assert_eq!(e.final_return.dpos.queued, Some(e.started_ms + 1004));
-        assert!(!e.data_ready()); // even a reached test snapshot cannot beat TX drain
-        io.complete_one(e.started_ms + 1006);
-        let now = e.started_ms + 1006;
-        let (t, p) = feedback(now, 0, true);
-        e.poll(now, &t, p, &mut io);
-        assert_eq!(e.outcome, "completed");
-        assert_eq!(e.final_return.dpos.completed, Some(e.started_ms + 1006));
-        assert_eq!(e.final_return.finished, Some(e.started_ms + 1006));
-        assert_eq!(e.final_return.last[2].ms, e.started_ms + 1006);
-        assert_eq!(io.targets.len(), 2);
-        assert!(io.events[events..].iter().all(|event| event == "STOP\n"));
-    }
-
-    #[test]
-    fn final_return_speed_is_reasserted_even_if_stop_discarded_cached_speed() {
-        let mut records = [Record::EMPTY; 1024];
-        let mut e = Engine::new(&mut records);
-        let mut io = Io::default();
-        start(&mut e, sinusoidal(), 0, &mut io);
-        for elapsed in 1..=1000 {
-            waveform_poll(&mut e, &mut io, elapsed);
-        }
-        let speed = xeryon_motion::ScanCommand::Speed(49);
-        e.scan.commit(speed); // accepted before STOP; execution is not established
-        let sent = io.scans.len();
-        waveform_poll(&mut e, &mut io, 1001);
-        assert_eq!(io.scans.len(), sent + 1);
-        assert_eq!(io.scans.last(), Some(&speed));
-        assert_eq!(io.targets.len(), 1);
-        waveform_poll(&mut e, &mut io, 1002);
-        assert_eq!(io.targets.len(), 2);
     }
 
     #[test]
@@ -1484,66 +1414,36 @@ mod tests {
         assert_eq!(e.max_lateness_ms, 9);
     }
     #[test]
-    fn exact_cycles_stop_then_drain_then_return_and_confirm_center() {
-        let mut records = [Record::EMPTY; CAPACITY];
-        let mut e = Engine::new(&mut records);
-        let mut io = Io::default();
-        start(
-            &mut e,
-            ExperimentConfig::Sinusoidal {
+    fn exact_cycles_stop_at_starting_extremum_without_center_return() {
+        for (frequency_mhz, cycles) in [(1000, 1), (1300, 2), (3000, 3)] {
+            let mut records = [Record::EMPTY; CAPACITY];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            let config = ExperimentConfig::Sinusoidal {
                 center_nm: 780,
                 amplitude_nm: 1_000_000,
-                frequency_mhz: 1300,
-                cycles: 2,
-            },
-            0,
-            &mut io,
-        );
-        let boundary = 1539; // ceil(2 / 1.3 seconds), first representable ms
-        for elapsed in 1..boundary {
-            let now = e.started_ms + elapsed;
-            let (t, p) = feedback(now, 10, true);
-            e.poll(now, &t, p, &mut io);
-            assert_eq!(io.stops, 0);
+                frequency_mhz,
+                cycles,
+            };
+            start(&mut e, config, 0, &mut io);
+            let boundary = (cycles * 1_000_000).div_ceil(frequency_mhz);
+            for elapsed in 1..boundary {
+                waveform_poll(&mut e, &mut io, elapsed);
+                assert_eq!(io.stops, 0);
+                assert_eq!(io.targets.len(), 1);
+            }
+            let sent = io.scans.len();
+            waveform_poll(&mut e, &mut io, boundary);
+            assert_eq!(io.stops, 1);
+            assert_eq!(io.events.last().unwrap(), "STOP\n");
+            assert_eq!(e.final_return.target, config.start().unwrap());
+            assert_eq!(e.target, config.start().unwrap());
+            waveform_poll(&mut e, &mut io, boundary + 1);
+            assert_eq!(e.outcome, "completed");
+            assert_eq!(io.stops, 1);
             assert_eq!(io.targets.len(), 1);
+            assert_eq!(io.scans.len(), sent);
         }
-        let now = e.started_ms + boundary;
-        let (mut t, mut p) = feedback(now, 10, true);
-        e.poll(now, &t, p, &mut io);
-        assert_eq!(io.stops, 1);
-        assert_eq!(io.events.last().unwrap(), "STOP\n");
-        assert_eq!(e.state, State::Running);
-        io.busy = true;
-        t.record(b"STAT", 0, now); // STOP may leave closed loop inactive
-        e.poll(now + 1, &t, p, &mut io);
-        assert_eq!(io.targets.len(), 1);
-        io.busy = false;
-        e.poll(now + 2, &t, p, &mut io);
-        assert_eq!(
-            io.scans.last(),
-            Some(&xeryon_motion::ScanCommand::Speed(8168))
-        );
-        io.busy = true;
-        e.poll(now + 3, &t, p, &mut io);
-        assert_eq!(io.targets.len(), 1);
-        io.busy = false;
-        e.poll(now + 4, &t, p, &mut io);
-        assert_eq!(io.targets.last(), Some(&(10, now + 4, true)));
-        t.xeryon_motion.as_mut().unwrap().state = 1;
-        t.record(b"STAT", 1 << 6, now + 5);
-        e.poll(now + 5, &t, p, &mut io);
-        assert!(!e.data_ready());
-        t.xeryon_motion.as_mut().unwrap().state = 2;
-        t.xeryon_motion.as_mut().unwrap().target = Some(11);
-        e.poll(now + 6, &t, p, &mut io);
-        assert!(!e.data_ready());
-        t.xeryon_motion.as_mut().unwrap().target = Some(10);
-        t.record(b"STAT", (1 << 6) | (1 << 10), now + 7);
-        p.ms = now + 7;
-        e.poll(now + 7, &t, p, &mut io);
-        assert_eq!(e.outcome, "completed");
-        assert_eq!(io.stops, 2);
-        assert_eq!(io.targets.len(), 2);
     }
 
     #[test]
@@ -1580,8 +1480,8 @@ mod tests {
         assert_eq!(io.stops, 1);
     }
     #[test]
-    fn waveform_send_failure_and_return_timeout_attempt_stop() {
-        for failure in ["send", "stop", "return"] {
+    fn waveform_send_failure_and_stop_timeout_attempt_stop() {
+        for failure in ["send", "stop", "drain"] {
             let mut records = [Record::EMPTY; 1024];
             let mut e = Engine::new(&mut records);
             let mut io = Io::default();
@@ -1592,6 +1492,9 @@ mod tests {
                 if (failure == "send" && elapsed == 30) || (failure == "stop" && elapsed == 1000) {
                     io.fail = true;
                 }
+                if failure == "drain" && elapsed >= 1000 {
+                    io.busy = true;
+                }
                 e.poll(now, &t, p, &mut io);
                 if e.data_ready() {
                     break;
@@ -1599,13 +1502,13 @@ mod tests {
             }
             assert_eq!(e.outcome, "faulted");
             assert_eq!(io.events.last().unwrap(), "STOP\n");
-            assert_eq!(e.stop_queued, failure == "return");
+            assert_eq!(e.stop_queued, failure == "drain");
             assert_eq!(
                 e.reason,
                 match failure {
                     "send" => "scan transmit failure",
                     "stop" => "stop failure",
-                    _ => "Final center move deadline",
+                    _ => "Final STOP deadline",
                 }
             );
         }

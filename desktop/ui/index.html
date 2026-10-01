@@ -33,7 +33,7 @@
       <div id="experiment-sweep-fields" hidden>
         <h3 class="sweep-heading"><label for="experiment-sweep-enabled"><input id="experiment-sweep-enabled" type="checkbox"><span>Frequency sweep</span></label></h3>
         <label>Frequencies (Hz, in run order)<input id="experiment-frequencies" type="text" value="0.1, 0.5, 1, 2, 5, 10" placeholder="0.1, 0.5, 1, 2, 5, 10" disabled></label>
-        <p class="pressure-detail">Same center, amplitude and cycle count at each frequency (up to 100 runs). Each run returns to center and downloads before the next starts. Keep the app connected; ABORT cancels the remaining sweep.</p>
+        <p class="pressure-detail">Same center, amplitude and cycle count at each frequency (up to 100 runs). Each run stops at center − amplitude and downloads before the next starts. Keep the app connected; ABORT cancels the remaining sweep.</p>
       </div>
       <button id="experiment-start-button" type="submit" class="primary" aria-describedby="experiment-start-reason" disabled>START</button>
     </form>
@@ -43,7 +43,7 @@
       <p id="experiment-sweep-status" role="status"></p>
     </div>
     <p id="experiment-start-reason" class="pressure-detail" role="status" hidden></p>
-    <p class="pressure-detail">50 Hz recording · up to 81.9 s. Quasi-static reserves travel time with settling margin (at least 10 s per move), plus each hold; sinusoidal reserves 10 s for final center arrival. Start positions use the current encoder reference. Sinusoidal frequency: 0.1–10 Hz with adaptive 4–10 ms control updates; tracking depends on the controller and load. Position resolution: 0.078 µm.</p>
+    <p class="pressure-detail">50 Hz recording · up to 81.9 s. Quasi-static reserves travel time with settling margin (at least 10 s per move), plus each hold; sinusoidal reserves 10 s for final STOP transmission. Start positions use the current encoder reference. Sinusoidal frequency: 0.1–10 Hz with adaptive 4–10 ms control updates; tracking depends on the controller and load. Position resolution: 0.078 µm.</p>
     <p id="experiment-motion-detail" class="pressure-detail"></p>
   </section>
   <section id="experiment-data-panel" class="panel" aria-labelledby="experiment-data-title" hidden>
