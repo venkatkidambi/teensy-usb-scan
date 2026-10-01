@@ -11,8 +11,7 @@ node_modules/
 /desktop/dist/
 /desktop/gen/
 
-# Local upload settings (use -TeensyLoader or PATH on Windows)
-/upload.config.json
+# Local environment settings
 .env
 .env.*
 !.env.example

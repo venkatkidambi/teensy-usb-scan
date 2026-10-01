@@ -55,10 +55,19 @@ On Windows, install the Rust MSVC/C++ build tools and Windows ARM GNU tools, the
 .\upload.cmd -TeensyLoader 'C:\Tools\Teensy\teensy_loader_cli.exe'
 ```
 
-An optional, local `upload.config.json` can contain
-`{"TeensyLoader":"C:\\Tools\\Teensy\\teensy_loader_cli.exe"}`. An explicit argument
-overrides this file, then PATH is the fallback. The launcher scopes its PowerShell
-execution-policy bypass to that process.
+The version-controlled `upload.config.json` points to
+`C:\msys64\home\vek19004\teensy_loader_cli\teensy_loader_cli.exe`.
+Edit that file if the loader moves, or pass `-TeensyLoader` to override it.
+If the config is absent, the script searches PATH.
+
+Both `upload.cmd` and `dev.cmd` run the upload through
+`powershell.exe -NoProfile -ExecutionPolicy Bypass`, so no persistent execution-policy
+change is needed. Use these `.cmd` launchers when PowerShell blocks `.ps1` files.
+To invoke the PowerShell script directly with the same process-scoped bypass:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\upload.ps1
+```
 
 On macOS/Linux with Bash and the tools on PATH:
 
