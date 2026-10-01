@@ -1447,9 +1447,50 @@ mod tests {
     }
 
     #[test]
+    fn stopped_scan_status_allows_next_experiment_start() {
+        for config in [
+            sinusoidal(),
+            ExperimentConfig::QuasiStatic {
+                start_nm: 0,
+                step_nm: 780,
+                hold_ms: 100,
+                steps: 1,
+                speed_um_s: 1000,
+            },
+        ] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            let (mut t, p) = feedback(0, -100, false);
+            t.xeryon_motion.as_mut().unwrap().state = 3; // previous STOP
+            t.record(b"STAT", 8513, 0);
+            e.accept(config, &t, p, false, 0).unwrap();
+            e.begin(0, &mut io);
+            // Cached stopped-scan feedback remains valid during setup/DPOS.
+            e.poll(1, &t, p, &mut io);
+            assert_eq!(e.state, State::MoveToStart);
+            if config == sinusoidal() {
+                assert_eq!(io.targets, [(-100, 0, true)]);
+                t.record(b"STAT", 1344, 2);
+                t.xeryon_motion.as_mut().unwrap().state = 2;
+                e.poll(2, &t, p, &mut io);
+                e.poll(3, &t, p, &mut io);
+                assert_eq!(e.state, State::Running);
+            }
+        }
+        for extra in [1 << 5, (1 << 5) | (1 << 10), 1 << 9, 1 << 12, 1 << 18] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut e = Engine::new(&mut records);
+            let (mut t, p) = feedback(0, -100, true);
+            t.record(b"STAT", 8513 | extra, 0);
+            assert!(e.accept(sinusoidal(), &t, p, false, 0).is_err());
+        }
+    }
+
+    #[test]
     fn scan_status_is_scoped_and_mode_feedback_grace_is_bounded() {
         let (mut t, p) = feedback(0, 0, true);
-        t.record(b"STAT", (1 << 6) | (1 << 13), 0);
+        t.record(b"STAT", (1 << 5) | (1 << 6) | (1 << 13), 0);
         assert!(Engine::healthy(&t, p, 0, true, false).is_err());
         assert!(Engine::healthy(&t, p, 0, true, true).is_ok());
         for bit in [1, 2, 3, 9, 12, 14, 15, 16, 18, 21] {

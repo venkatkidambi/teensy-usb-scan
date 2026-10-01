@@ -85,6 +85,16 @@ pub fn fresh(t: &Telemetry, index: usize, now: u32) -> bool {
     t.samples[index].valid && now.wrapping_sub(t.samples[index].ms) < 3000
 }
 
+pub fn scanning(stat: i64) -> bool {
+    // STOP can leave the scanning-mode bit set (e.g. STAT=8513).
+    // Mode alone does not mean motion: the motor must also be on.
+    stat & (1 << 5) != 0 && stat & (1 << 13) != 0
+}
+
+pub fn moving(stat: i64) -> bool {
+    stat & (1 << 9) != 0 || scanning(stat) || (stat & (1 << 5) != 0 && stat & (1 << 10) == 0)
+}
+
 pub fn target(t: &Telemetry, up: bool, nm: u32, now: u32) -> Result<i32, &'static str> {
     if !ready(t) {
         return Err("Xeryon is not connected");
@@ -96,7 +106,7 @@ pub fn target(t: &Telemetry, up: bool, nm: u32, now: u32) -> Result<i32, &'stati
     if let Some(reason) = controller_fault(stat) {
         return Err(reason);
     }
-    if stat & ((1 << 9) | (1 << 13)) != 0 || (stat & (1 << 5) != 0 && stat & (1 << 10) == 0) {
+    if moving(stat) {
         return Err("Xeryon is already moving");
     }
     if !(78..=MAX_TRAVEL_NM).contains(&nm) {

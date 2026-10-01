@@ -1,6 +1,16 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {NativeSession,parseMessage,statusFlags,elapsed,pressureState,xeryonTravelNm,xeryonMoveCommand} from '../ui/protocol.mjs';
+import {NativeSession,parseMessage,statusFlags,elapsed,pressureState,xeryonTravelNm,xeryonMoveCommand,xeryonMoving} from '../ui/protocol.mjs';
+
+test('stopped scan status permits another move while active scanning and indexing block it',()=>{
+  assert.equal(xeryonMoving(8513),false);
+  assert.equal(xeryonMoving(8513|(1<<5)),true);
+  assert.equal(xeryonMoving(8513|(1<<5)|(1<<10)),true);
+  assert.equal(xeryonMoving(8513|(1<<9)),true);
+  assert.equal(xeryonMoving(1<<5),true);
+  assert.equal(xeryonMoving((1<<5)|(1<<10)),false);
+  assert.equal(statusFlags(8513).some(f=>f.kind==='fault'),false);
+});
 
 test('telemetry schema and status mapping',()=>{
   const m={type:'snapshot',id:0,ms:100,epoch:1,vid:1240,pid:61258,mounted:true,cdc:2,records:3,malformed:0,skipped:0,values:{STAT:{value:1344,ms:99}}};

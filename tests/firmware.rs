@@ -341,7 +341,7 @@ mod xeryon_motion_tests {
         assert!(target(&t, true, 78, 100).is_err());
         t.record(b"EPOS", MIN_POSITION as i64, 100);
         assert!(target(&t, false, 78, 100).is_err());
-        for stat in [1 << 2, 1 << 12, 1 << 9, 1 << 13, 1 << 5] {
+        for stat in [1 << 2, 1 << 12, 1 << 9, (1 << 13) | (1 << 5), 1 << 5] {
             t.record(b"STAT", stat, 100);
             assert!(target(&t, true, 78, 100).is_err());
         }
@@ -351,6 +351,17 @@ mod xeryon_motion_tests {
         t = telemetry(100);
         t.cdc = 1;
         assert!(target(&t, true, 78, 100).is_err());
+    }
+    #[test]
+    fn stopped_scan_allows_manual_moves_but_active_scan_and_faults_still_block() {
+        let mut t = telemetry(100);
+        t.record(b"STAT", 8513, 100);
+        assert_eq!(target(&t, true, 78, 100), Ok(101));
+        assert_eq!(target(&t, false, 78, 100), Ok(99));
+        for extra in [1 << 5, (1 << 5) | (1 << 10), 1 << 9, 1 << 12, 1 << 18] {
+            t.record(b"STAT", 8513 | extra, 100);
+            assert!(target(&t, true, 78, 100).is_err());
+        }
     }
     #[test]
     fn completion_requires_echo_then_new_status() {

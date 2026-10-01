@@ -200,9 +200,10 @@ impl<'a> Engine<'a> {
         if let Some(reason) = xeryon_motion::controller_fault(t.samples[2].value) {
             return Err(reason);
         }
-        let incompatible =
-            (1 << 1) | (1 << 14) | (1 << 15) | (1 << 9) | if allow_scan { 0 } else { 1 << 13 };
-        if t.samples[2].value & incompatible != 0 {
+        let incompatible = (1 << 1) | (1 << 14) | (1 << 15) | (1 << 9);
+        if t.samples[2].value & incompatible != 0
+            || (!allow_scan && xeryon_motion::scanning(t.samples[2].value))
+        {
             return Err("Xeryon limit or incompatible motion");
         }
         // STAT bit 8 means the index reference is known, not encoder health.
@@ -242,7 +243,7 @@ impl<'a> Engine<'a> {
             Self::healthy(t, p, now, false, false)?;
             if plunger_running
                 || t.xeryon_motion.is_some_and(|m| m.state == 1)
-                || (t.samples[2].value & (1 << 5) != 0 && t.samples[2].value & (1 << 10) == 0)
+                || xeryon_motion::moving(t.samples[2].value)
             {
                 return Err("Stop manual motion before START");
             }

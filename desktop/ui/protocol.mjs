@@ -2,6 +2,10 @@ export const FLAGS = ['Amplifiers enabled (XRTA only)','End stop','Thermal prote
 const faults = new Set([2,3,12,16,18,21]);
 export const statusFlags = word => FLAGS.flatMap((name,bit) => word & (1<<bit) ? [{name,bit,kind:faults.has(bit)?'fault':bit>=19?'special':''}] : []);
 export const elapsed = (now,before) => (now-before)>>>0;
+export function xeryonMoving(stat) {
+  // STOP can retain scanning mode with Motor on clear (STAT=8513).
+  return !!(stat&(1<<9)) || (!!(stat&(1<<5)) && (!!(stat&(1<<13)) || !(stat&(1<<10))));
+}
 const u32 = n => Number.isInteger(n) && n>=0 && n<=0xffffffff;
 const object = v => v!==null && typeof v==='object' && !Array.isArray(v);
 const xeryonPosition = n => Number.isInteger(n) && n>=-33554432 && n<=33554431;

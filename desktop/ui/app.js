@@ -1,5 +1,5 @@
 import {setupExperiments,experimentControls,experimentMessage} from './experiment.js';
-import {NativeSession,statusFlags,elapsed,pressureState,xeryonMoveCommand} from './protocol.mjs';
+import {NativeSession,statusFlags,elapsed,pressureState,xeryonMoveCommand,xeryonMoving} from './protocol.mjs';
 import {forceMillinewtons,forceExtrapolated} from './force.js';
 const $=id=>document.getElementById(id), text=(id,value)=>{const node=$(id),next=String(value);if(node.textContent!==next)node.textContent=next;};
 const invoke=window.__TAURI__?.core.invoke;
@@ -46,7 +46,7 @@ function xeryonBlocked(){
   const stat=v.STAT.value;
   if(stat&((1<<2)|(1<<3)|(1<<12)|(1<<16)|(1<<18)|(1<<21)))return 'Controller fault — check Controller status.';
   if(snapshot.xeryon_motion?.state===1)return 'Moving — waiting for target feedback.';
-  if(stat&((1<<9)|(1<<13))||(stat&(1<<5))&&!(stat&(1<<10)))return 'Actuator is already moving.';
+  if(xeryonMoving(stat))return 'Actuator is already moving.';
   return '';
 }
 function reset(){limitsInitialized=false;pressureHistory=[];lastPressure=null;snapshot=null;hello=null;history=[];epoch=null;lastSample=null;lastPong=0;lastPing=0;streaming=true;text('rtt','—');text('session-label','NO SESSION');render();draw();}

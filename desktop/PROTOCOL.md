@@ -101,6 +101,11 @@ received after the command, followed by STAT with bit 10 set. Overlapping moves
 are rejected. Stop discards unsent queued bytes, but cannot recall an in-flight
 USB packet. USB2 disconnection resets motion state and never replays commands.
 
+STOP can retain scanning mode (STAT bit 13) with Motor on (bit 5) clear, as in
+`STAT=8513`. Manual moves and experiment starts permit this stopped state.
+Scanning with Motor on remains busy even if Position Reached is set; indexing,
+pending tracked moves, stale feedback, and controller faults still block starts.
+
 An active move requests best-effort STOP on USB1 disconnect, 3-second stale
 EPOS/STAT, controller faults, 5-second heartbeat timeout or 60-second deadline.
 Physical stop cannot be guaranteed if USB2 is unavailable. Desktop Stop preempts
