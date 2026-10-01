@@ -3,6 +3,8 @@ use crate::{experiment_data::*, pressure::Reading, protocol::Telemetry, xeryon_m
 
 #[path = "envelope.rs"]
 pub mod envelope;
+#[path = "final_return.rs"]
+mod final_return;
 #[path = "reversal.rs"]
 pub mod reversal;
 #[path = "scheduling.rs"]
@@ -85,6 +87,7 @@ pub struct Engine<'a> {
     epoch: u32,
     transfer_next: usize,
     center_move: CenterMove,
+    final_return: final_return::Diagnostics,
     scan: xeryon_motion::ScanState,
     waveform_tx: waveform_tx::Transport,
     pub scheduling: scheduling::Diagnostics,
@@ -142,6 +145,7 @@ impl<'a> Engine<'a> {
             epoch: 0,
             transfer_next: 0,
             center_move: CenterMove::None,
+            final_return: Default::default(),
             scan: xeryon_motion::ScanState::default(),
             waveform_tx: waveform_tx::Transport::default(),
             scheduling: scheduling::Diagnostics::default(),
@@ -287,6 +291,7 @@ impl<'a> Engine<'a> {
         self.epoch = t.epoch;
         self.step = 0;
         self.center_move = CenterMove::None;
+        self.final_return = Default::default();
         self.scan = xeryon_motion::ScanState::default();
         self.waveform_tx = waveform_tx::Transport::default();
         self.fault_stat = None;
@@ -331,6 +336,9 @@ impl<'a> Engine<'a> {
         }
     }
     fn finish(&mut self, state: State, reason: &'static str, io: &mut impl Actuator) {
+        if self.final_return.boundary.is_some() {
+            self.final_return.finished = Some(self.started_ms.wrapping_add(self.elapsed_ms));
+        }
         self.waveform_tx
             .close_busy(self.elapsed_ms, &mut self.scheduling);
         if self.state == State::Running && self.center_move == CenterMove::None {
@@ -377,6 +385,11 @@ impl<'a> Engine<'a> {
     pub fn poll(&mut self, now: u32, t: &Telemetry, p: Reading, io: &mut impl Actuator) {
         if !self.active() {
             return;
+        }
+        self.final_return.observe(t, io.tx_progress());
+        if self.final_return.boundary.is_some() {
+            self.elapsed_ms = now.wrapping_sub(self.started_ms);
+            self.final_return.expired = now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS;
         }
         if io.tx_failed() {
             if self.state == State::Running {
@@ -696,17 +709,21 @@ impl<'a> Engine<'a> {
                     } else if self.center_move == CenterMove::Stopping && io.tx_idle() {
                         // Never return at the last (possibly zero) waveform speed.
                         // STOP has drained before changing SSPD; DPOS waits too.
-                        self.scan
-                            .set_speed(
-                                velocity_speed(sine_max_velocity(amplitude_nm, frequency_mhz)),
-                                |commands| io.scan(commands),
-                            )
-                            .map(|_| {
-                                self.center_move = CenterMove::SettingSpeed;
-                                false
-                            })
+                        // STOP can discard queued waveform bytes. The scan cache
+                        // describes acceptance, not controller execution, so never
+                        // deduplicate this positioning speed against that cache.
+                        let speed = xeryon_motion::ScanCommand::Speed(velocity_speed(
+                            sine_max_velocity(amplitude_nm, frequency_mhz),
+                        ));
+                        io.scan(&[speed]).map(|_| {
+                            self.scan.commit(speed);
+                            self.center_move = CenterMove::SettingSpeed;
+                            false
+                        })
                     } else if self.center_move == CenterMove::SettingSpeed && io.tx_idle() {
+                        self.final_return.dpos.scheduled = Some(now);
                         io.target(self.target, now, true).map(|_| {
+                            self.final_return.dpos.queued(now, io.tx_progress());
                             self.center_move = CenterMove::Positioning;
                             self.motion_changed_ms = now;
                             false
@@ -717,6 +734,20 @@ impl<'a> Engine<'a> {
                             && self.center_arrived(t))
                     }
                 } else if elapsed >= waveform_ms {
+                    self.final_return = final_return::Diagnostics {
+                        boundary: Some(self.started_ms.wrapping_add(waveform_ms)),
+                        observed: now,
+                        theoretical_counts: self.config.unwrap().start().unwrap(),
+                        target: counts(center_nm).unwrap(),
+                        speed: velocity_speed(sine_max_velocity(amplitude_nm, frequency_mhz)),
+                        waveform_pending: !io.tx_idle(),
+                        intent_pending: self.waveform_tx.intent_pending(),
+                        settings: t.positioning,
+                        deadline: now.wrapping_add(MOVE_TIMEOUT_MS),
+                        ..Default::default()
+                    };
+                    self.final_return.observe(t, io.tx_progress());
+                    self.final_return.boundary_feedback = self.final_return.last;
                     self.waveform_tx.close_busy(elapsed, &mut self.scheduling);
                     self.waveform_tx = waveform_tx::Transport::default();
                     if elapsed - waveform_ms >= TRAJECTORY_MS {
@@ -725,7 +756,9 @@ impl<'a> Engine<'a> {
                         self.target = counts(center_nm).unwrap();
                         self.center_move = CenterMove::Stopping;
                         self.move_started = now;
+                        self.final_return.stop.scheduled = Some(now);
                         io.stop().map(|_| {
+                            self.final_return.stop.queued(now, io.tx_progress());
                             self.scan.stopped();
                             false
                         })
@@ -742,6 +775,7 @@ impl<'a> Engine<'a> {
         }
     }
     /// Use the same tracked DPOS echo/Position Reached confirmation as startup.
+    /// PTOL/PTO2/TOUT/DLAY belong to the controller: never gate on EPOS error.
     fn center_arrived(&self, t: &Telemetry) -> bool {
         let status = t.samples[2];
         let age = status.ms.wrapping_sub(self.motion_changed_ms);
@@ -776,6 +810,7 @@ impl<'a> Engine<'a> {
         {
             self.scheduling.write(out, amplitude_nm, frequency_mhz)?;
         }
+        self.final_return.write(out)?;
         if let Some(stat) = self.fault_stat {
             write!(out, ",\"fault_stat\":{stat}")?;
         }
@@ -954,6 +989,14 @@ mod tests {
         progress: [u32; 6],
     }
     impl Io {
+        fn queued(&mut self) {
+            if self.tracked {
+                self.progress[0] += 1;
+                self.progress[2] = self.progress[3];
+                self.progress[3] = self.clock;
+                self.busy = true;
+            }
+        }
         fn complete_one(&mut self, now: u32) {
             assert!(self.progress[0] > self.progress[1]);
             self.progress[1] += 1;
@@ -1011,6 +1054,8 @@ mod tests {
             if self.fail {
                 return Err("transmit failure");
             }
+            assert!(!self.busy, "DPOS must not overtake unfinished TX");
+            self.queued();
             self.targets.push((target, now, track));
             self.events.push(format!("DPOS={target}\n"));
             Ok(())
@@ -1021,6 +1066,7 @@ mod tests {
             if self.fail {
                 Err("stop failure")
             } else {
+                self.queued();
                 Ok(())
             }
         }
@@ -1205,9 +1251,38 @@ mod tests {
         e.scheduling.max_error = f64::from(MAX_SPEED_UM_S) * 2.0;
         e.scheduling.lateness.add(u32::MAX);
         e.scheduling.reversal_lateness.add(u32::MAX);
-        let mut frame = crate::protocol::FixedFrame::<4096>::new();
+        let sample = crate::protocol::Sample {
+            value: i32::MIN as i64,
+            ms: u32::MAX,
+            valid: true,
+        };
+        e.final_return = final_return::Diagnostics {
+            boundary: Some(u32::MAX),
+            observed: u32::MAX,
+            theoretical_counts: i32::MIN,
+            target: MAX_POSITION,
+            speed: MAX_SPEED_UM_S,
+            waveform_pending: true,
+            intent_pending: true,
+            boundary_feedback: [sample; 4],
+            last: [sample; 4],
+            settings: [sample; 4],
+            echo: sample,
+            status: [sample; 8],
+            status_len: 8,
+            status_dropped: u32::MAX,
+            deadline: u32::MAX,
+            expired: true,
+            finished: Some(u32::MAX),
+            ..Default::default()
+        };
+        for command in [&mut e.final_return.stop, &mut e.final_return.dpos] {
+            command.queued(u32::MAX, reversal::TxProgress([u32::MAX; 6]));
+            command.refresh(reversal::TxProgress([u32::MAX; 6]));
+        }
+        let mut frame = crate::protocol::FixedFrame::<8192>::new();
         e.metadata(&mut frame, u32::MAX).unwrap();
-        assert!(frame.len < 4096);
+        assert!(frame.len < 8192);
     }
     #[test]
     fn ten_hz_runs_complete_with_bounded_downloadable_diagnostics() {
@@ -2276,6 +2351,164 @@ mod tests {
     }
 
     #[test]
+    fn final_return_real_tracker_accepts_controller_tolerance_without_exact_epos() {
+        // Include PTOL/PTO2 edges, both signs and tick rollover. Firmware never
+        // reimplements the controller's tolerance decision from EPOS.
+        for begin in [0, u32::MAX - 1050] {
+            for error in [-10, -2, -1, 0, 1, 2, 10] {
+                let mut records = [Record::EMPTY; 1024];
+                let mut e = Engine::new(&mut records);
+                let mut io = Io::default();
+                start(&mut e, sinusoidal(), begin, &mut io);
+                for elapsed in 1..=1002 {
+                    waveform_poll(&mut e, &mut io, elapsed);
+                }
+                let sent = io.targets.last().unwrap().1;
+                let (mut t, mut p) = feedback(sent, error, false);
+                let mut tracker = xeryon_motion::Motion::new();
+                tracker.start(0, sent);
+                // Cached reached and matching echo belong to the previous move.
+                t.record(b"DPOS", 0, sent.wrapping_sub(1));
+                t.record(b"STAT", 1344, sent.wrapping_sub(1));
+                for offset in 1..=5 {
+                    let now = sent.wrapping_add(offset);
+                    t.record(b"EPOS", i64::from(error), now);
+                    p.ms = now;
+                    match offset {
+                        2 => {
+                            // Fresh reached but wrong echo cannot complete.
+                            t.record(b"DPOS", 1, now);
+                            t.record(b"STAT", 1344, now);
+                        }
+                        3 => t.record(b"DPOS", 0, now), // correct echo, old STAT
+                        4 => t.record(b"STAT", 1344, sent.wrapping_add(3)), // same tick
+                        5 => t.record(b"STAT", 1344, now), // subsequent STAT
+                        _ => {}
+                    }
+                    assert!(!tracker.poll_policy(&t, now, true));
+                    t.xeryon_motion = Some(tracker);
+                    e.poll(now, &t, p, &mut io);
+                    assert_eq!(e.data_ready(), offset == 5);
+                }
+                assert_eq!(e.outcome, "completed");
+                assert_eq!(e.final_return.echo.value, 0);
+                assert_eq!(e.final_return.echo.ms, sent.wrapping_add(3));
+                assert_eq!(e.final_return.last[0].value, i64::from(error));
+                assert_eq!(e.final_return.finished, Some(sent.wrapping_add(5)));
+                assert!(!e.final_return.expired);
+                let mut json = String::new();
+                e.metadata(&mut json, 1).unwrap();
+                assert!(json.contains(&format!("\"error_counts\":{error},")));
+            }
+        }
+    }
+
+    #[test]
+    fn final_return_captures_stop_drain_dpos_identity_and_between_tick_completion() {
+        let mut records = [Record::EMPTY; 1024];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        start(&mut e, sinusoidal(), 0, &mut io);
+        for elapsed in 1..1000 {
+            waveform_poll(&mut e, &mut io, elapsed);
+        }
+        io.tracked = true;
+        io.clock = e.started_ms + 1000;
+        waveform_poll(&mut e, &mut io, 1000);
+        assert_eq!(e.final_return.theoretical_counts, -100);
+        assert!(sine_velocity(7800, 1000, 1000).abs() < 1e-9);
+        assert_eq!(e.final_return.stop.queued, Some(io.clock));
+        waveform_poll(&mut e, &mut io, 1001);
+        assert_eq!(io.targets.len(), 1);
+        io.complete_one(e.started_ms + 1002);
+        io.clock = e.started_ms + 1002;
+        waveform_poll(&mut e, &mut io, 1002); // SSPD return speed
+        assert_eq!(e.final_return.stop.completed, Some(e.started_ms + 1002));
+        assert_eq!(io.targets.len(), 1);
+        waveform_poll(&mut e, &mut io, 1003);
+        assert_eq!(io.targets.len(), 1);
+        io.complete_one(e.started_ms + 1004);
+        io.clock = e.started_ms + 1004;
+        waveform_poll(&mut e, &mut io, 1004); // DPOS accepted exactly once
+        let events = io.events.len();
+        waveform_poll(&mut e, &mut io, 1005);
+        assert_eq!(io.events.len(), events);
+        assert_eq!(io.targets.len(), 2);
+        assert_eq!(e.final_return.dpos.queued, Some(e.started_ms + 1004));
+        assert!(!e.data_ready()); // even a reached test snapshot cannot beat TX drain
+        io.complete_one(e.started_ms + 1006);
+        let now = e.started_ms + 1006;
+        let (t, p) = feedback(now, 0, true);
+        e.poll(now, &t, p, &mut io);
+        assert_eq!(e.outcome, "completed");
+        assert_eq!(e.final_return.dpos.completed, Some(e.started_ms + 1006));
+        assert_eq!(e.final_return.finished, Some(e.started_ms + 1006));
+        assert_eq!(e.final_return.last[2].ms, e.started_ms + 1006);
+        assert_eq!(io.targets.len(), 2);
+        assert!(io.events[events..].iter().all(|event| event == "STOP\n"));
+    }
+
+    #[test]
+    fn final_return_speed_is_reasserted_even_if_stop_discarded_cached_speed() {
+        let mut records = [Record::EMPTY; 1024];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        start(&mut e, sinusoidal(), 0, &mut io);
+        for elapsed in 1..=1000 {
+            waveform_poll(&mut e, &mut io, elapsed);
+        }
+        let speed = xeryon_motion::ScanCommand::Speed(49);
+        e.scan.commit(speed); // accepted before STOP; execution is not established
+        let sent = io.scans.len();
+        waveform_poll(&mut e, &mut io, 1001);
+        assert_eq!(io.scans.len(), sent + 1);
+        assert_eq!(io.scans.last(), Some(&speed));
+        assert_eq!(io.targets.len(), 1);
+        waveform_poll(&mut e, &mut io, 1002);
+        assert_eq!(io.targets.len(), 2);
+    }
+
+    #[test]
+    fn final_return_deadline_fault_retains_dataset_and_diagnostics() {
+        for stuck_tx in [false, true] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            start(&mut e, sinusoidal(), u32::MAX - 1050, &mut io);
+            for elapsed in 1..=1002 {
+                waveform_poll(&mut e, &mut io, elapsed);
+            }
+            io.busy = stuck_tx;
+            for elapsed in 1003..=11000 {
+                let now = e.started_ms.wrapping_add(elapsed);
+                let (mut t, p) = feedback(now, 2, false);
+                t.record(b"DPOS", 0, now);
+                e.poll(now, &t, p, &mut io);
+                if elapsed < 11000 {
+                    assert!(!e.data_ready());
+                }
+            }
+            assert_eq!(e.reason, "Final center move deadline");
+            assert_eq!(e.outcome, "faulted");
+            assert!(e.stop_queued && e.data_ready() && e.final_return.expired);
+            assert_eq!(io.events.last().unwrap(), "STOP\n");
+            assert_eq!(e.len, 551);
+            let len = e.len;
+            let crc = e.checksum();
+            e.transfer(e.run).unwrap();
+            let mut offset = 0;
+            while offset < len {
+                offset += e.chunk(e.run, offset).unwrap().len();
+            }
+            assert_eq!(e.len, len);
+            assert_eq!(e.checksum(), crc);
+            let mut json = String::new();
+            e.metadata(&mut json, 1).unwrap();
+            assert!(json.contains("\"expired\":true"));
+        }
+    }
+
+    #[test]
     fn fixed_jitter_uses_actual_velocity_and_logs_current_theoretical_position() {
         use xeryon_motion::ScanCommand::*;
         let mut records = [Record::EMPTY; 1024];
@@ -2399,8 +2632,8 @@ mod tests {
             for (offset, position, busy, complete) in [
                 (20, 0, true, false),   // DPOS still in flight
                 (40, 0, false, false),  // first fresh center publication
-                (60, 2, false, false),  // outside one encoder count: reset
-                (80, -1, false, false), // first new center confirmation
+                (60, 2, false, false),  // nonzero error still cannot replace STAT
+                (80, -1, false, false), // another near-center sample
                 (100, 0, false, false), // fresh EPOS alone cannot complete
             ] {
                 let now = command_ms.wrapping_add(offset);

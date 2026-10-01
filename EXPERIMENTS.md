@@ -135,8 +135,8 @@ At `ceil(cycles * 1_000_000 / frequency_millihz)` elapsed milliseconds, scanning
 ends with priority `STOP`, independently of the control schedule. This is the first
 representable millisecond at or after the exact requested cycle count. A late
 foreground poll uses actual time; lateness of 10 ms or more faults and stops.
-Firmware waits for STOP's transport to drain, sets SSPD to rounded vmax if it
-changed, waits for that transfer, then sends a tracked `DPOS=<center>`.
+Firmware waits for STOP's transport to drain, unconditionally reasserts SSPD at rounded vmax,
+waits for that transfer, then sends a tracked `DPOS=<center>`.
 The 10 s final-move budget includes these drains; it is a timeout, not a hold.
 After the final command drains, completion requires the tracked DPOS echo and
 Position Reached. Fresh post-command status must show closed loop active,
@@ -425,3 +425,99 @@ Hardware verification (not performed by this change; no hardware was flashed):
    backpressure/error metadata and verify 200 Hz pressure acquisition, ~50 Hz
    EPOS, 50 Hz recording, expected duration and confirmed center return. Repeat
    ABORT during startup, waveform and return, plus one unchanged quasi-static run.
+
+
+## Final center-return investigation
+
+Reproduce the retained run analysis with:
+
+```sh
+python3 tools/analyze_final_return.py tests/fixtures/experiment-1-overshoot.csv --output analysis/experiment-1-final-return.json
+```
+
+The [report](analysis/experiment-1-final-return.json) contains every saved return
+EPOS/STAT/TIME observation and explicitly lists missing evidence. The CSV reports
+`completed`, not a deadline fault. It cannot establish that a software hang
+occurred, nor prove the exact terminal position. This run is five cycles at 1 Hz, amplitude 10 µm, center 1377.948 µm.
+
+| Event | Run-relative evidence |
+| --- | --- |
+| Exact final cycle boundary | 5000 ms; theoretical position 1367.948 µm; velocity zero |
+| Encoder-grid terminal target | 17538 counts = 1367.964 µm |
+| Latest EPOS at boundary | 17528 counts = 1367.184 µm, received at 4985 ms |
+| STOP scheduled/queued/completed | Not retained by this firmware version |
+| Pending waveform TX at STOP | Not retained |
+| Return command | Expected DPOS 17666 = 1377.948 µm, rounded SSPD 63 µm/s |
+| DPOS scheduled/queued/completed and echo | Not retained; logged target is intent, not echo evidence |
+| Scanning status | STAT 8545 at 4983 and 5003 ms; bit 10 clear |
+| Positioning status | STAT 353 first logged with receipt time 5023 ms; bit 10 still clear |
+| Apparent plateau | EPOS progresses slowly in small steps; e.g. 17545 repeats from receipts 5106–5166 ms |
+| Last logged EPOS | 17652 counts at 5849 ms; error −14 counts = −1.092 µm |
+| Last logged STAT / TIME | STAT 353 at 5847 ms; TIME 33781 received at 5851 ms |
+| Completed / DataReady | Metadata elapsed 5868 ms; last logging tick was 5860 ms |
+| Terminal reached transition and exact final error | Missing: occurred, if observed, between logging ticks |
+| Deadline | Existing 10000 ms budget after STOP; metadata does not report expiration |
+
+Do not equate the last logged EPOS with the EPOS at completion, or infer a DPOS
+acknowledgement from the target column. TIME is an independent cached controller
+value, not paired with EPOS. Absolute host times add `started_ms=50921`.
+
+### Completion and command audit
+
+Current `center_arrived` requires drained TX, a tracked matching target in reached
+state, and fresh post-command status with closed loop active, scanning clear and
+index search clear. `Motion::poll_policy` requires a matching post-dispatch DPOS
+echo, followed by a strictly later STAT with bit 10. It rejects stale and same-tick
+feedback, including across timestamp wrap. It does **not** require EPOS equality
+or any software position-error threshold. History (`5981863`) removed an older
+one-count/two-publication shortcut; that shortcut was an alternative to tracked
+Position Reached, not an additional threshold that could block a valid reached
+status. There is no evidence here to justify weakening the current rule.
+
+At the exact terminal phase, theoretical velocity is zero. On the first
+representable boundary poll, firmware discards pending waveform intent and queues
+priority STOP; it does not launch another reversal or a terminal SCAN. STOP clears
+waiting USB bytes; a packet already in flight must finish before STOP. After STOP
+drains, a fresh return SSPD must drain before the one tracked center DPOS is sent.
+Return SSPD is now always sent: the waveform speed cache records acceptance and
+cannot establish what survived STOP's queue discard. This is a defensive ordering
+fix, not a demonstrated explanation of the recorded plateau. Completion tokens
+now skip commands discarded by STOP, rather than incorrectly counting them as
+future completed commands. An actual USB failure, stale feedback, controller fault
+or expired deadline still requests STOP and records a faulted outcome in retained
+DataReady data. `State::Fault` is a transient cleanup state; DataReady exposes the
+failure and its dataset, not experiment success.
+
+### Controller tolerance and deadline
+
+Before motion, firmware now serially queries PTOL, PTO2, TOUT and DLAY after
+establishing INFO/POLI. Each readback must be fresh and 16-bit; unavailable readback
+faults setup before motion. No tuning write or SAVE is issued. Their values in the
+historical run are **unknown** and must not be replaced with manual defaults.
+The controller defines PTOL as the initial symmetric encoder tolerance, PTO2 as
+the fallback tolerance, TOUT as the wait near target before using PTO2, and DLAY
+as the delay before raising reached. See the manufacturer's
+[XD-C manual, sections 4.2–4.3](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.0.pdf).
+These settings explain why a nonzero encoder error may still mean reached.
+TOUT (milliseconds, tolerance relaxation) is distinct from TOU2 (seconds, motor
+safety timeout).
+
+No timeout was increased. Boundary cached distance is 138 counts = 10.764 µm;
+at commanded 63 µm/s nominal return travel is ceil(10764/63) = 171 ms. A useful
+engineering budget is `2*ceil(distance_nm/speed_um_s) + TOUT + DLAY + 1000 ms`
+plus bounded command-drain time. Actual readbacks are needed to evaluate it; the
+historical observed return completed after 868 ms, far inside the existing 10 s
+budget. Slow convergence alone does not justify increasing that budget. If future
+readbacks/travel require a larger budget, derive it from these quantities and
+reserve acquisition storage consistently, instead of inserting a sleep.
+
+The additive `final_return` metadata now captures the boundary and terminal
+feedback (including between-tick completion/fault), STOP/DPOS timing, command
+identities, first matching echo, status transitions, readbacks, signed position
+error and deadline state. Intermediate raw feedback remains in the experiment
+records. See [wire schema](desktop/PROTOCOL.md#final-center-return-evidence).
+Host snapshots can miss multiple publications parsed between foreground polls;
+transition overflow is explicit. This is not an unbounded UART trace. Native tests
+exercise fresh/wrong/stale echoes, tolerance edges ±2/±10 counts, TX ordering,
+STOP cancellation, finite timeout, retained data and wrapping clocks. Hardware
+confirmation with these new diagnostics is still required.

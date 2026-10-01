@@ -200,7 +200,7 @@ chunks (two entries per chunk) and 288 stored entries; `reversal_total` can be
 larger, particularly for the supported 0.1–10 Hz runs. Nothing is streamed during
 RUNNING.
 
-The existing 4096-byte JSON line limit accommodates these headers. Older clients
+The 8192-byte JSON line limit accommodates these headers and final-return metadata. Older clients
 can still decode the sample payload but need updating to retain the new
 diagnostics. See the [reversal record implementation](../src/reversal.rs) for
 fields and timestamp semantics.
@@ -220,3 +220,31 @@ completions remain explicitly counted. These diagnostics are returned only after
 RUNNING, retained by the desktop receiver, and exported in CSV metadata. Legacy
 `trajectory_ms=10` is the fixed baseline/max evaluation interval; it no longer
 describes every default-mode control interval. The sample format is unchanged.
+
+
+### Final center-return evidence
+
+`data_meta.final_return` (version 1, sinusoidal runs that reach the boundary) retains
+host timestamps in wrapping absolute milliseconds. Subtract `started_ms` modulo
+2^32 for run-relative times. `stop` and `dpos` each contain an accepted command
+`token` and `ms=[scheduled, queued, USB-completed]`; null means unobserved. USB
+completion is not a controller acknowledgement. The DPOS `echo` is separate.
+`boundary_feedback` and `final_feedback` contain EPOS, DPOS, STAT, TIME, in that
+order; each entry is `[value, host_receipt_ms]` or null. `ptol_pto2_tout_dlay` uses
+the same representation for read-only pre-motion controller queries.
+`stat_transitions` retains up to eight distinct status words and receipt times;
+bit 10 is Position Reached. Overflow is counted in `stat_transitions_dropped`.
+The 50 Hz binary records retain the intermediate feedback and its ages, while
+`final_feedback` captures completion/failure between logger ticks. No field
+claims to be a synchronized physical measurement. `error_counts` and `error_um`
+are signed EPOS minus the center DPOS target, diagnostic only. `deadline_ms`,
+`expired`, and `finished_ms` distinguish a timeout from successful completion.
+`boundary_ms` is the first representable millisecond at or after the mathematical
+cycle boundary; `observed_ms` is the actual foreground observation. The declared
+zero theoretical velocity belongs to the exact cycle boundary, even when the
+boundary is fractional or observed late. `waveform_tx_pending` reports USB busy;
+`waveform_intent_pending` reports unsent/coalesced/reversal intent discarded at STOP.
+
+The record format and DATA_VERSION remain unchanged. Deploy the updated desktop
+receiver with this firmware because final metadata may exceed the old 4096-byte
+line limit. Dataset CRC still covers binary records, as before.

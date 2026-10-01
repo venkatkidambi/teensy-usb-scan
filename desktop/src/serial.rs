@@ -515,7 +515,7 @@ mod tests {
         };
         feed(b"one\r");
         feed(b"\ntwo\n");
-        feed(&[b'x'; 5000]);
+        feed(&[b'x'; 9000]);
         feed(b"\nthree\n");
         feed(b"\xff\n");
         assert_eq!(&lines[..2], ["one", "two"]);

@@ -29,6 +29,9 @@ pub struct Transport {
     expected_completion: u32,
 }
 impl Transport {
+    pub fn intent_pending(&self) -> bool {
+        self.pending.is_some() || self.phase != Phase::Normal
+    }
     pub fn close_busy(&mut self, elapsed: u32, stats: &mut scheduling::Diagnostics) {
         if let Some(start) = self.busy_since.take() {
             stats.busy_duration.add(elapsed.wrapping_sub(start));

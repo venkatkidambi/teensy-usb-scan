@@ -148,7 +148,7 @@ The separate desktop Cargo.lock pins its dependencies and does not alter firmwar
   native Save As dialog/file writing, and port cleanup on exit.
 - `src/serial.rs`: native port discovery, exclusive connection ownership, bounded
   command validation, and a worker with a 20 ms read timeout. Eight queued commands,
-  32 replies, 32 logs, one latest unsolicited snapshot; lines capped at 4096 bytes.
+  32 replies, 32 logs, one latest unsolicited snapshot; lines capped at 8192 bytes.
   Reply overflow closes the connection explicitly instead of dropping acknowledgments.
   Command parsing uses firmware's `../src/command.rs` and plunger calibration/limits
   from `../src/plunger_config.rs`; native-only dataset requests remain blocked at IPC.

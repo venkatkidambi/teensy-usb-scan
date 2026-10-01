@@ -73,6 +73,8 @@ pub struct Telemetry {
     pub settings: [Sample; 2], // INFO, POLI
     pub setting_updates: [u32; 2],
     pub feedback_before: [Option<i64>; 2],
+    pub positioning: [Sample; 4], // PTOL, PTO2, TOUT, DLAY; read only
+    pub positioning_updates: [u32; 4],
     pub timing_active: bool,
     pub epos_arrivals: ArrivalStats,
     pub transport: TransportStats,
@@ -105,6 +107,12 @@ impl Telemetry {
             }; 2],
             setting_updates: [0; 2],
             feedback_before: [None; 2],
+            positioning: [Sample {
+                value: 0,
+                ms: 0,
+                valid: false,
+            }; 4],
+            positioning_updates: [0; 4],
             timing_active: false,
             epos_arrivals: ArrivalStats {
                 count: 0,
@@ -174,6 +182,17 @@ impl Telemetry {
                 valid: true,
             };
             self.setting_updates[i] = self.setting_updates[i].wrapping_add(1);
+        }
+        if let Some(i) = [b"PTOL", b"PTO2", b"TOUT", b"DLAY"]
+            .iter()
+            .position(|s| *s == tag)
+        {
+            self.positioning[i] = Sample {
+                value,
+                ms: now,
+                valid: true,
+            };
+            self.positioning_updates[i] = self.positioning_updates[i].wrapping_add(1);
         }
         if tag == b"SSPD" {
             self.speed = Sample {

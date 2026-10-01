@@ -33,8 +33,32 @@ impl FeedbackSetup {
         mut send: impl FnMut(&[u8]) -> Result<(), &'static str>,
     ) -> Result<bool, &'static str> {
         use core::fmt::Write;
-        if self.step == 6 {
+        if self.step == 10 {
             return Ok(true);
+        }
+        // Capture the controller's completion policy without changing tuning.
+        if self.step >= 6 {
+            let i = usize::from(self.step - 6);
+            if self.pending {
+                if idle && t.positioning_updates[i] != self.generation && t.positioning[i].valid {
+                    if !(0..=65535).contains(&t.positioning[i].value) {
+                        return Err("Invalid Xeryon positioning setting");
+                    }
+                    self.step += 1;
+                    self.pending = false;
+                } else if now.wrapping_sub(self.started) >= 1500 {
+                    return Err("Xeryon positioning settings readback timeout");
+                }
+                return Ok(self.step == 10);
+            }
+            if !idle {
+                return Err("Xeryon previous transmit incomplete");
+            }
+            send([b"PTOL=?\n", b"PTO2=?\n", b"TOUT=?\n", b"DLAY=?\n"][i])?;
+            self.generation = t.positioning_updates[i];
+            self.started = now;
+            self.pending = true;
+            return Ok(false);
         }
         let index = usize::from(self.step % 2);
         let query = self.step < 2 || self.step >= 4;
@@ -67,7 +91,7 @@ impl FeedbackSetup {
                     return Err("Xeryon feedback setup timeout");
                 }
             }
-            return Ok(self.step == 6);
+            return Ok(false);
         }
         if !idle {
             return Err("Xeryon previous transmit incomplete");
@@ -187,6 +211,10 @@ mod tests {
             "POLI=20\n",
             "INFO=?\n",
             "POLI=?\n",
+            "PTOL=?\n",
+            "PTO2=?\n",
+            "TOUT=?\n",
+            "DLAY=?\n",
         ];
         for (step, command) in expected.iter().enumerate() {
             let now = step as u32 * 20;
@@ -219,13 +247,17 @@ mod tests {
                 } else {
                     20
                 };
-                t.record(if i == 0 { b"INFO" } else { b"POLI" }, value, now + 3);
+                if step < 6 {
+                    t.record(if i == 0 { b"INFO" } else { b"POLI" }, value, now + 3);
+                } else {
+                    t.record([b"PTOL", b"PTO2", b"TOUT", b"DLAY"][step - 6], 2, now + 3);
+                }
             }
             assert_eq!(
                 setup
                     .poll(now + 4, &t, true, |_| panic!("send before drain"))
                     .unwrap(),
-                step == 5
+                step == 9
             );
         }
         assert_eq!(setup.before, [Some(2), Some(97)]);
@@ -234,6 +266,28 @@ mod tests {
                 .poll(999, &t, true, |_| panic!("already ready"))
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn positioning_readback_rejects_stale_invalid_and_missing_values() {
+        for index in 0..4 {
+            let tag = [b"PTOL", b"PTO2", b"TOUT", b"DLAY"][index];
+            let mut t = crate::protocol::Telemetry::new();
+            t.record(tag, 2, 1);
+            let mut s = FeedbackSetup::new();
+            s.step = 6 + index as u8;
+            s.poll(10, &t, true, |_| Ok(())).unwrap();
+            assert!(!s.poll(11, &t, true, |_| panic!()).unwrap());
+            assert_eq!(
+                s.poll(1510, &t, true, |_| panic!()),
+                Err("Xeryon positioning settings readback timeout")
+            );
+            t.record(tag, 65536, 1511);
+            assert_eq!(
+                s.poll(1511, &t, true, |_| panic!()),
+                Err("Invalid Xeryon positioning setting")
+            );
+        }
     }
 
     #[test]

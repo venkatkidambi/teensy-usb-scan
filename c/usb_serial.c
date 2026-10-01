@@ -17,6 +17,7 @@ static uintptr_t generation;
 static bool timing;
 // RUNNING-only ordered command timestamps, not controller acknowledgements.
 static uint32_t tx_queued, tx_completed, queued_ms[2], completed_ms[2];
+static uint32_t active_token; // submitted packet; queued commands may be discarded by STOP
 void usb_serial_progress(uint32_t *values) {
   values[0] = tx_queued; values[1] = tx_completed;
   values[2] = queued_ms[0]; values[3] = queued_ms[1];
@@ -30,7 +31,7 @@ bool usb_serial_rx_pending(void) {
 void usb_serial_timing(bool on) {
   timing = on;
   if (on) {
-    tx_queued = tx_completed = 0;
+    tx_queued = tx_completed = active_token = 0;
     queued_ms[0] = queued_ms[1] = completed_ms[0] = completed_ms[1] = 0;
   }
   rx_peak = rx_backlog = service_gap = tx_max = 0;
@@ -65,7 +66,10 @@ void tuh_cdc_tx_complete_cb(uint8_t idx) {
   if (state != READY || idx != cdc_index || !tx_pending) return;
   observe_tx(tusb_time_millis_api());
   if (timing) {
-    ++tx_completed;
+    tx_completed = active_token;
+    // The callback precedes the next FIFO flush. STOP may have replaced a
+    // queued command, so completion identities cannot be a callback count.
+    active_token = tx_queued;
     completed_ms[0] = completed_ms[1];
     completed_ms[1] = tusb_time_millis_api();
   }
@@ -84,6 +88,7 @@ bool usb_serial_send(const uint8_t *data, uint32_t len, bool stop) {
   if (transfer_failed && !stop) return false;
   if (stop) tuh_cdc_write_clear(cdc_index);
   if (tuh_cdc_write_available(cdc_index) < len) return false;
+  const bool was_pending = tx_pending;
   if (!tx_pending) tx_started = tusb_time_millis_api();
   tx_pending = true;
   if (tuh_cdc_write(cdc_index, data, len) != len) {
@@ -93,6 +98,7 @@ bool usb_serial_send(const uint8_t *data, uint32_t len, bool stop) {
   }
   if (timing) {
     ++tx_queued;
+    if (!was_pending) active_token = tx_queued;
     queued_ms[0] = queued_ms[1];
     queued_ms[1] = tusb_time_millis_api();
   }

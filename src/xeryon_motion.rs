@@ -42,6 +42,7 @@ impl ScanState {
     pub fn stopped(&mut self) {
         self.direction = Some(0);
     }
+    #[cfg(test)]
     pub fn set_speed(
         &mut self,
         speed: u32,

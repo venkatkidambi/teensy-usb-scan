@@ -9,6 +9,8 @@ static tuh_xfer_cb_t pending;
 static uintptr_t token;
 static uint32_t available = 512, writes, flushes, clears;
 static char transmitted[33];
+static char packets[64][33];
+static unsigned packet_count;
 static bool in_flight;
 static bool burst;
 static uint32_t rx_bytes;
@@ -24,7 +26,11 @@ uint32_t tuh_cdc_write_flush(uint8_t idx) {
   ++flushes;
   if (in_flight) return 0;
   uint32_t count = 512 - available;
-  if (count) { available = 512; in_flight = true; }
+  if (count) {
+    assert(packet_count < 64);
+    strcpy(packets[packet_count++], transmitted);
+    available = 512; in_flight = true;
+  }
   return count;
 }
 bool tuh_cdc_write_clear(uint8_t idx) { assert(idx == 0); ++clears; available = 512; return true; }
@@ -230,12 +236,38 @@ int main(void) {
   tuh_cdc_tx_complete_cb(0);
   usb_serial_progress(progress);
   assert(progress[0] == 3 && progress[1] == 3 && progress[5] == 1);
+  // Final STOP discards a waiting waveform speed. The submitted old packet
+  // may finish first, but no historical SSPD may be flushed after STOP.
+  unsigned first_packet = packet_count;
+  assert(usb_serial_send((const uint8_t *)"SSPD=4\n", 7, false));
+  assert(usb_serial_send((const uint8_t *)"SSPD=2\n", 7, false));
+  now = 3;
+  assert(usb_serial_send((const uint8_t *)"STOP\n", 5, true));
+  now = 4;
+  complete_tx();
+  assert(!usb_serial_tx_idle());
+  assert(strcmp(packets[first_packet], "SSPD=4\n") == 0);
+  assert(strcmp(packets[first_packet + 1], "STOP\n") == 0);
+  now = 5;
+  complete_tx();
+  assert(usb_serial_tx_idle());
+  usb_serial_progress(progress);
+  assert(progress[0] == 6 && progress[1] == 6); // token 5 was discarded
+  assert(progress[3] == 3 && progress[5] == 5);
+  assert(packet_count == first_packet + 2);
+  assert(usb_serial_send(target, sizeof(target)-1, false));
+  assert(!usb_serial_tx_idle());
+  assert(strcmp(packets[first_packet + 2], (const char *)target) == 0);
+  now = 6;
+  complete_tx();
+  usb_serial_progress(progress);
+  assert(usb_serial_tx_idle() && progress[0] == 7 && progress[1] == 7);
   usb_serial_timing(false);
   assert(usb_serial_send((const uint8_t *)"STOP\n", 5, true));
   now = 2;
   complete_tx();
   usb_serial_progress(progress);
-  assert(progress[0] == 3 && progress[1] == 3 && progress[5] == 1);
+  assert(progress[0] == 7 && progress[1] == 7 && progress[5] == 6);
   // Real transfer errors are latched separately from ordinary backpressure.
   assert(!usb_serial_tx_failed());
   tuh_cdc_xfer_error_cb(1, 1, XFER_RESULT_FAILED);

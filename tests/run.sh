@@ -11,3 +11,4 @@ done
 rustc --edition=2024 --test tests/firmware.rs -o target/tests/firmware-test
 target/tests/firmware-test
 python3 tests/analyze_reversals_test.py
+python3 tests/analyze_final_return_test.py

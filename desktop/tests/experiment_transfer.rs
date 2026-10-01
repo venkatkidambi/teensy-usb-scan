@@ -24,6 +24,52 @@ use experiment_data::*;
 use serde_json::{Value, json};
 
 struct Io;
+
+#[test]
+fn final_return_metadata_above_old_line_limit_survives_download_and_csv() {
+    let record = Record {
+        elapsed_ms: 20,
+        ..Record::EMPTY
+    };
+    let bytes = record.encode();
+    let mut metadata = meta(8, &bytes);
+    metadata["final_return"] = json!({
+        "version": 1, "error_counts": -2, "error_um": -0.156,
+        "echo": [17666, 55940], "final_feedback": [[17664, 56789], [17666, 56770], [1345, 56789], null],
+        "expired": false
+    });
+    // Additional diagnostics already carried by firmware can fill the old limit.
+    metadata["padding"] = json!("x".repeat(4500));
+    let wire = format!("{metadata}\n");
+    assert!(wire.len() > 4096 && wire.len() < 8192);
+    let mut decoder = receiver::Decoder::default();
+    let mut parsed = None;
+    for byte in wire.bytes() {
+        if let Some(receiver::Event::Line(value)) = decoder.push(byte).unwrap() {
+            parsed = Some(serde_json::from_str(&value).unwrap());
+        }
+    }
+    let mut download = receiver::Download::default();
+    download.begin(8);
+    download.metadata(parsed.unwrap()).unwrap();
+    download
+        .chunk(
+            json!({"id":receiver::DOWNLOAD_ID,"run":8,"offset":0,"bytes":bytes.len()}),
+            &bytes,
+        )
+        .unwrap();
+    let dataset = download.next().unwrap().1.unwrap();
+    assert_eq!(dataset.metadata["final_return"], metadata["final_return"]);
+    assert!(dataset.csv().contains("\"\"error_counts\"\":-2"));
+    // Oversize frames still fail boundedly and recover at the next newline.
+    for byte in "x".repeat(8193).bytes() {
+        decoder.push(byte).unwrap();
+    }
+    assert!(
+        matches!(decoder.push(b'\n').unwrap(), Some(receiver::Event::Line(line)) if line.contains("Oversized"))
+    );
+}
+
 impl engine::Actuator for Io {
     fn scan(&mut self, _: &[xeryon_motion::ScanCommand]) -> Result<(), &'static str> {
         Ok(())
@@ -180,11 +226,11 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         .unwrap();
     e.begin(0, &mut Io);
     e.poll(1, &telemetry(1), pressure(1), &mut Io);
-    for now in 2..=512 {
+    for now in 2..=1012 {
         e.poll(now, &telemetry(now), pressure(now), &mut Io);
     }
     e.abort(&mut Io);
-    assert_eq!(e.len, 26);
+    assert_eq!(e.len, 51);
     let mut d = receiver::Download::default();
     assert!(d.begin(e.run).starts_with("GET_DATA "));
     e.transfer(e.run).unwrap();
@@ -236,7 +282,7 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         }
     }
     let dataset = dataset.unwrap();
-    assert_eq!(dataset.samples.len(), 26);
+    assert_eq!(dataset.samples.len(), 51);
     assert_eq!(dataset.samples[0][1], -123);
     assert_eq!(dataset.samples[0][7], -10); // negative extremum at rest
     assert_eq!(dataset.samples[12][7], -1); // approaching center at t=240 ms
@@ -253,6 +299,11 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         Some("-0.780")
     );
     assert_eq!(dataset.metadata["outcome"], "aborted");
+    assert_eq!(dataset.metadata["final_return"]["error_counts"], -123);
+    assert_eq!(dataset.metadata["final_return"]["error_um"], -9.594);
+    assert_eq!(dataset.metadata["final_return"]["finished_ms"], 1012);
+    assert_eq!(dataset.metadata["final_return"]["expired"], false);
+    assert!(dataset.csv().contains("final_feedback"));
     assert_eq!(dataset.metadata["reversal_count"], 1);
     assert_eq!(dataset.metadata["reversals"][0]["crossing_ms"], 500);
     assert_eq!(dataset.metadata["reversals"][0]["commands"][3][0], 1);

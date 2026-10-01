@@ -47,7 +47,7 @@ pub struct Console {
     rx: [u8; 512],
     rx_len: usize,
     rx_pos: usize,
-    tx: crate::protocol::FixedFrame<4096>,
+    tx: crate::protocol::FixedFrame<8192>,
     announce: bool,
     notified: bool,
     urgent: Option<(u32, bool)>,

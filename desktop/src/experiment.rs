@@ -83,7 +83,7 @@ impl Decoder {
         }
         if byte != b'\n' {
             if !self.dropping {
-                if self.line.len() == 4096 {
+                if self.line.len() == 8192 {
                     self.line.clear();
                     self.dropping = true;
                 } else {
