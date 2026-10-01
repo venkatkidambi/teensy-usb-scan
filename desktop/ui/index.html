@@ -37,7 +37,11 @@
       </div>
       <button id="experiment-start-button" type="submit" class="primary" aria-describedby="experiment-start-reason" disabled>START</button>
     </form>
-    <p id="experiment-sweep-status" role="status"></p>
+    <div id="experiment-sweep-progress" class="sweep-progress" hidden>
+      <div class="sweep-progress-heading"><strong>Frequency sweep</strong><span id="experiment-sweep-count"></span></div>
+      <progress id="experiment-sweep-bar" max="1" value="0" aria-label="Frequency sweep completed runs" aria-describedby="experiment-sweep-status"></progress>
+      <p id="experiment-sweep-status" role="status"></p>
+    </div>
     <p id="experiment-start-reason" class="pressure-detail" role="status" hidden></p>
     <p class="pressure-detail">50 Hz recording · up to 81.9 s. Quasi-static reserves travel time with settling margin (at least 10 s per move), plus each hold; sinusoidal reserves 10 s for final center arrival. Start positions use the current encoder reference. Sinusoidal frequency: 0.1–10 Hz with adaptive 4–10 ms control updates; tracking depends on the controller and load. Position resolution: 0.078 µm.</p>
     <p id="experiment-motion-detail" class="pressure-detail"></p>

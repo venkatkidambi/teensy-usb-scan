@@ -35,7 +35,12 @@ test('sweep prevalidates every frequency, waits for download and release, and ex
     await h.submit();
     assert.deepEqual(h.ipc.find(c=>c[0]==='experiment_validate')[1].configs.map(c=>c.timing),[1,5,10]);
     assert.equal(h.calls.length,1);assert.equal(h.node('experiment-start-button').disabled,true);
+    assert.equal(h.node('experiment-sweep-progress').hidden,false);
+    assert.equal(h.node('experiment-sweep-bar').max,3);
+    assert.equal(h.node('experiment-sweep-bar').value,0);
     h.result(1);await tick();assert.equal(h.calls.length,1);
+    assert.equal(h.node('experiment-sweep-bar').value,1);
+    assert.match(h.node('experiment-sweep-count').textContent,/1 of 3 completed · 33%/);
     assert.equal(h.node('experiment-panel').hidden,false);
     assert.equal(h.node('experiment-data-panel').hidden,true);
     assert.equal(h.node('tab-data').disabled,true);
@@ -47,6 +52,8 @@ test('sweep prevalidates every frequency, waits for download and release, and ex
     h.result(2);await tick();assert.equal(h.calls.length,3);
     h.result(3);h.release();await tick();
     assert.match(h.node('experiment-sweep-status').textContent,/Sweep complete: 3/);
+    assert.equal(h.node('experiment-sweep-bar').value,3);
+    assert.match(h.node('experiment-sweep-count').textContent,/100%/);
     assert.equal(h.node('experiment-data-panel').hidden,false);
     assert.equal(h.node('experiment-panel').hidden,true);
     assert.equal(h.node('tab-data').disabled,false);
@@ -73,6 +80,8 @@ test('new sweeps and single runs replace the previous experiment in the result p
     h.node('experiment-frequencies').value='20';await h.submit();
     assert.equal(h.node('experiment-run').children.length,2);
     h.node('experiment-frequencies').value='5, 10';await h.submit();
+    assert.equal(h.node('experiment-sweep-bar').value,0);
+    assert.equal(h.node('experiment-sweep-bar').max,2);
     h.result(3);h.release();await tick();
     assert.equal(h.node('experiment-run').children.length,1);
     assert.match(h.node('experiment-run').children[0].textContent,/Run 3/);
@@ -83,6 +92,7 @@ test('new sweeps and single runs replace the previous experiment in the result p
 
     h.node('experiment-sweep-enabled').checked=false;
     await h.submit();h.result(5);h.release();await tick();
+    assert.equal(h.node('experiment-sweep-progress').hidden,true);
     assert.equal(h.node('experiment-run').children.length,1);
     assert.match(h.node('experiment-run').children[0].textContent,/Run 5/);
     await h.node('experiment-save').onclick();
@@ -105,6 +115,7 @@ test('abort, fault, disconnect and failed START each cancel remaining frequencie
       if(stop!=='start_failure'){h.result(1);h.release();}
       await tick();
       assert.equal(h.calls.filter(c=>typeof c==='object').length,stop==='start_failure'?0:1);
+      assert.equal(h.node('experiment-sweep-bar').value,0);
       if(stop==='abort')assert.equal(h.calls.at(-1),'ABORT');
     }finally{h.restore();}
   }

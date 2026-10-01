@@ -28,11 +28,19 @@ function startStatus(message) {
   $('experiment-state').textContent=message;
   context.activity?.(message);
 }
+function sweepProgress(message,state='active') {
+  const {completed,configs}=sweep;
+  $('experiment-sweep-progress').setAttribute('data-state',state);
+  $('experiment-sweep-bar').max=configs.length;
+  $('experiment-sweep-bar').value=completed;
+  text('experiment-sweep-count',`${completed} of ${configs.length} completed · ${Math.round(completed/configs.length*100)}%`);
+  text('experiment-sweep-status',message);
+}
 export function experimentControls() {
   if(!context)return;
   const {session,connected,hello,snapshot,experimentUnresolved}=context.state();
   if(sweep&&(!connected||session!==sweep.session)){
-    sweep=null;text('experiment-sweep-status','Sweep stopped after disconnect. Recover the current run before starting another sweep.');
+    sweepProgress('Sweep stopped after disconnect. Recover the current run before starting another sweep.','stopped');sweep=null;
   }
   const owned=!!sweep||starting||!!session?.experimentOwned||experimentUnresolved;
   for(const name of modes) $(`tab-${name}`).disabled=owned;
@@ -40,6 +48,7 @@ export function experimentControls() {
   for(const control of $('experiment-form').elements)control.disabled=owned;
   $('experiment-speed').disabled=owned||mode!=='quasi_static';
   const sweeping=mode==='sinusoidal'&&$('experiment-sweep-enabled').checked;
+  $('experiment-sweep-progress').hidden=!sweeping||!$('experiment-sweep-status').textContent;
   $('experiment-frequencies').disabled=owned||!sweeping;
   $('experiment-timing').disabled=owned||sweeping;
   $('experiment-sweep-fields').hidden=mode!=='sinusoidal';
@@ -105,8 +114,12 @@ export function experimentMessage(message) {
     const available=sweepPhases.filter(point=>!point.reason).length;
     text('experiment-sweep-phase-summary',`${available} of ${sweepPhases.length} runs plotted${available<sweepPhases.length?' · unavailable fits omitted':''}`);
     if(sweep&&dataset.metadata.run===sweep.run){
-      if(dataset.metadata.outcome==='completed')sweep.received=true;
-      else {text('experiment-sweep-status',`Sweep stopped: run ${sweep.index} ${dataset.metadata.outcome}. Results retained.`);sweep=null;}
+      if(dataset.metadata.outcome==='completed'){
+        if(!sweep.received)sweep.completed++;
+        sweep.received=true;
+        sweepProgress(`Sweep ${sweep.index}/${sweep.configs.length} · ${sweep.configs[sweep.index-1].timing} Hz verified. Waiting for hardware release…`);
+      }
+      else {sweepProgress(`Sweep stopped: run ${sweep.index} ${dataset.metadata.outcome}. Results retained.`,'stopped');sweep=null;}
     }
     const m=dataset.metadata;
     if(!message.restored&&view!=='data'&&mode!==m.config.kind)tab(m.config.kind);
@@ -249,18 +262,19 @@ async function nextSweepRun() {
   const current=sweep,state=context.state();
   if(!current||starting||!state.connected||state.session!==current.session||state.session.experimentOwned||state.session.pending||state.experimentUnresolved)return;
   if(current.index===current.configs.length){
-    text('experiment-sweep-status',`Sweep complete: ${current.index} runs. Select a run to view or save its CSV.`);sweep=null;experimentControls();return;
+    sweepProgress(`Sweep complete: ${current.index} runs. Select a run to view or save its CSV.`,'complete');sweep=null;experimentControls();return;
   }
   current.received=false;starting=true;
   const config=current.configs[current.index++];
-  text('experiment-sweep-status',`Sweep ${current.index}/${current.configs.length} · ${config.timing} Hz`);
+  sweepProgress(`Sweep ${current.index}/${current.configs.length} · ${config.timing} Hz`);
   experimentControls();
   try {const ack=await current.session.startExperiment(config,current.index>1);if(sweep===current)current.run=ack.run;}
-  catch(e){if(sweep===current)sweep=null;text('experiment-sweep-status',`Sweep stopped: ${e.message??e}. Results retained.`);}
+  catch(e){if(sweep===current){sweepProgress(`Sweep stopped: ${e.message??e}. Results retained.`,'stopped');sweep=null;}}
   finally {starting=false;context.controls();}
 }
 export function setupExperiments(api) {
   context=api;historyLoading=!!api.invoke;validationCancelled=false;clearTimeout(sweepTimer);sweepTimer=null;sweep=null;history=[];selectedIndex=null;dataset=null;starting=false;saving=false;mode='dashboard';view='dashboard';showResults=false;
+  text('experiment-sweep-status','');
   $('experiment-results').hidden=true;
   $('experiment-data-empty').hidden=false;
   phaseCache=new WeakMap();sweepPhases=[];
@@ -309,7 +323,8 @@ export function setupExperiments(api) {
         await api.invoke('experiment_validate',{configs});
         if(validationCancelled)throw Error('Sweep cancelled.');
         if(api.state().session!==state.session||!api.state().connected)throw Error('Connection changed during validation.');
-        sweep={configs,index:0,session:state.session,received:false,run:null};
+        sweep={configs,index:0,completed:0,session:state.session,received:false,run:null};
+        sweepProgress('Sweep ready. Waiting to start…');
       }catch(e){startStatus(`Sweep validation failed: ${e.message??e}`);}
       finally{starting=false;}
       if(sweep)await nextSweepRun();
@@ -324,7 +339,7 @@ export function setupExperiments(api) {
   };
   $('experiment-abort').onclick=async()=>{
     validationCancelled=true;
-    if(sweep){sweep=null;text('experiment-sweep-status','Sweep cancelled. No further frequencies will start.');}
+    if(sweep){sweepProgress('Sweep cancelled. No further frequencies will start.','stopped');sweep=null;}
     if(!api.state().session?.experimentOwned&&!api.state().experimentUnresolved){api.controls();return;}
     try{await api.state().session.request('ABORT');}
     catch(e){$('experiment-state').textContent=`ABORT not acknowledged: ${e.message}. Autonomous operation can continue after PC disconnect. Reconnect and retry ABORT.`;}
