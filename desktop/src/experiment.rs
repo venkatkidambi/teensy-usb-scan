@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Write;
 
+#[path = "force_calibration.rs"]
+mod force_calibration;
+
 // IDs reserved for native download requests; frontend IDs stay below this range.
 pub const DOWNLOAD_ID: u32 = 0xf000_0000;
 
@@ -169,18 +172,22 @@ pub struct Dataset {
 impl Dataset {
     pub fn csv(&self) -> String {
         let mut csv = String::new();
+        let calibration = force_calibration::Calibration::load();
+        let mut metadata = self.metadata.clone();
+        metadata["force_calibration"] =
+            serde_json::to_value(&calibration).expect("embedded force calibration must serialize");
         // Metadata is quoted as one CSV field, including fault/abort information.
         let _ = writeln!(
             csv,
             "metadata,\"{}\"",
-            self.metadata.to_string().replace('"', "\"\"")
+            metadata.to_string().replace('"', "\"\"")
         );
-        csv.push_str("time_s,position_um,pressure_raw,stat,epos_age_ms,pressure_age_ms,stat_age_ms,target_um,controller_ticks,controller_age_ms,epos_counts,target_counts,epos_host_receipt_s,epos_generation,pressure_generation,epos_new,pressure_new\n");
+        csv.push_str("time_s,position_um,pressure_raw,stat,epos_age_ms,pressure_age_ms,stat_age_ms,target_um,controller_ticks,controller_age_ms,epos_counts,target_counts,epos_host_receipt_s,epos_generation,pressure_generation,epos_new,pressure_new,force_n,force_mn,force_extrapolated\n");
         let mut previous: Option<&[i64; RECORD_FIELDS]> = None;
         for s in &self.samples {
             let _ = writeln!(
                 csv,
-                "{:.3},{:.3},{},{},{},{},{},{:.3},{},{},{},{},{:.3},{},{},{},{}",
+                "{:.3},{:.3},{},{},{},{},{},{:.3},{},{},{},{},{:.3},{},{},{},{},{:.9},{:.6},{}",
                 s[0] as f64 / 1000.0,
                 s[1] as f64 * 0.078,
                 s[2],
@@ -198,6 +205,9 @@ impl Dataset {
                 s[11],
                 u8::from(previous.is_none_or(|p| p[10] != s[10])),
                 u8::from(previous.is_none_or(|p| p[11] != s[11])),
+                calibration.newtons(s[2]),
+                calibration.newtons(s[2]) * 1000.0,
+                calibration.extrapolated(s[2]),
             );
             previous = Some(s);
         }

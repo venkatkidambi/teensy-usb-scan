@@ -98,8 +98,10 @@ run on or link into the Teensy firmware.
 
 The dashboard includes positions, decoded status flags, a 60-second
 plot, sample ages, a bounded activity log, and Ping / Read snapshot / Pause stream.
-Pause only stops USB1 snapshots; actuator reception continues. The I²C pressure input shows raw ADC counts, a 16-sample average,
-and a 60-second plot. The wired plunger has Up/Down, Stop, and Zero controls; Xeryon USB has distance-based Up/Down and Stop controls. **Preview demo**
+Pause only stops USB1 snapshots; actuator reception continues. The LPS input shows
+probe-calibrated force in mN, a 16-sample force average, raw counts for reference,
+and a 60-second force plot. See [force calibration](desktop/README.md#lps-to-force-calibration)
+for the conversion and supported range. The wired plunger has Up/Down, Stop, and Zero controls; Xeryon USB has distance-based Up/Down and Stop controls. **Preview demo**
 renders simulated readings without opening a serial port.
 
 The desktop serial worker has a 20 ms read timeout, bounded command/response/log
@@ -382,8 +384,10 @@ and retries initialization after one second. Bus failures also reset LPI2C1.
 A physically stuck bus may require hardware intervention.
 
 Pressure is sign-extended 24-bit data at **4096 counts/hPa**; temperature is signed
-16-bit data at **100 counts/°C**. The dashboard and CSV retain raw pressure counts;
-the dashboard temperature diagnostic uses °C. The 16-entry average remains
+16-bit data at **100 counts/°C**. The dashboard and CSV retain raw pressure counts
+and apply the [probe-derived force calibration](desktop/README.md#lps-to-force-calibration)
+for force readings and plots in mN; CSV includes force in N and mN.
+The dashboard temperature diagnostic uses °C. The 16-entry average remains
 zero-filled at startup and now spans about **80 ms** at 200 Hz. Experiments
 continue recording the latest raw value at **50 Hz**; dashboard snapshots remain
 10 Hz. Both retain pressure age independently of the faster acquisition.

@@ -6,7 +6,7 @@ recorded-run picker, CSV export, run details, and sinusoidal phase delays. It
 opens automatically after results arrive and the experiment releases the hardware
 (after the last run for a sweep). Configuration stays in the experiment tabs.
 Sinusoidal results also include a **Frequency sweep phase delay** plot of position
-at host receipt → pressure delay versus frequency (Hz). Choose milliseconds or
+at host receipt → force delay versus frequency (Hz). Choose milliseconds or
 degrees; each reliable run is a point, and a ring marks the selected run. Repeated
 frequencies remain separate points. Unavailable fits are omitted and counted.
 The plot uses only the current experiment's runs and resets with the run history.
@@ -51,10 +51,10 @@ selectable under **Recorded run**, with individual CSV exports. A new experiment
 first verified result replaces the previous single run or sweep. Results remain
 available across reconnects and page reloads until replaced or the app exits.
 
-Results calculate command-to-received-position and received-position-to-pressure
+Results calculate command-to-received-position and received-position-to-force
 phase delays in ms and degrees. Positive means lag, wrapped to ±half a cycle.
 Fits use the waveform interval, receipt timestamps for position, and plotted
-recording timestamps for pressure; weak or insufficient signals show a reason
+recording timestamps for force; weak or insufficient signals show a reason
 instead of a value. See [phase and sweep details](../EXPERIMENTS.md#phase-delay-and-frequency-sweeps).
 Rebuild both desktop and firmware to use the increased limit.
 Hardware tracking and drift still need verification under the intended load.
@@ -186,12 +186,60 @@ opens the real desktop window, exercises native IPC/port listing and demo render
 then exits with a success/failure status. It never opens a physical serial device.
 Normal launchers do not enable it.
 
-The pressure panel shows LPS22HHTR raw counts, a 16-sample average, sample age,
-WHO_AM_I, temperature in °C, errors, and a 60-second signal plot. Pressure counts
-convert to hPa by dividing by 4096. Firmware acquires fresh conversions at the
+The LPS force panel shows calibrated force in **mN**, a calibrated 16-sample
+average, raw LPS counts for reference, sample age, WHO_AM_I, temperature in °C,
+errors, and a 60-second force plot. Experiment plots and PNG exports use mN too.
+Firmware acquires fresh conversions at the
 sensor's nominal 200 Hz output rate over 400 kHz I²C; the dashboard receives
 10 Hz snapshots and experiments record at 50 Hz. Acquisition continues independently
 of Xeryon enumeration or stream pause. Update firmware and desktop together.
 See the root README for [plunger wiring and behavior](../README.md#wired-plunger)
 and [pressure wiring and acquisition](../README.md#i²c-pressure-input), and
 [PROTOCOL.md](PROTOCOL.md) for capabilities and units.
+
+## LPS-to-force calibration
+
+The desktop converts LPS counts directly to force using the supplied
+`results_calibration.xlsx` and `Probe sensitivity.xlsx`. The probe is an
+intermediary in the calibration only; no live probe connection is required.
+Both the UI and native CSV export read [the same calibration](calibration/lps-force.json),
+which retains the input observations, workbook hashes, coefficients and fit diagnostics.
+
+1. Fit all 50 paired readings in `results!E2:F51`: `com6_value` is the LPS
+   reading and `com8_value` is the probe reading. Ordinary least squares gives
+   `probe = 0.3394054512188749 × LPS − 1327247.3554892824` (R² = 0.9943507363).
+2. Use the probe workbook's slope/intercept in `Sheet1!C17:C18`, checked against
+   its 11 reading/force points in `A2:A12` and `D2:D12`:
+   `force_N = 2.5482777817727844e-7 × probe − 0.012633005479567819`.
+3. Compose these into the direct conversion:
+   **`force_N = 8.648993703536255e-8 × LPS − 0.35085250017057007`**.
+   Multiply by 1000 for mN. For example, **4,200,000 counts → 12.405235 mN**.
+
+The LPS/probe dataset spans **4,163,833–4,363,631 LPS counts**, but the probe's
+force calibration spans only **49,100–126,000 probe counts** (0–19.7113665 mN
+in its measured table). Under the fitted LPS-to-probe mapping, both stages are
+within their measured ranges only at **4,163,833–4,281,744.298 LPS counts**.
+The dashboard marks extrapolation when either the instantaneous or averaged
+reading is outside that interval. Experiment plots report the number of
+extrapolated samples, and the label is included in PNG exports. Negative and
+out-of-range force estimates are retained; there is no automatic tare or clamp.
+The paired LPS fit has a residual RMS equivalent to **0.383635 mN**; this measures
+fit residuals, not total force uncertainty. No unloaded LPS point was supplied.
+
+CSV retains every existing column and appends `force_n`, `force_mn`, and
+`force_extrapolated` (`true`/`false`). Its metadata includes `force_calibration`
+with the model and source observations. Serial telemetry, binary records and
+firmware continue carrying raw counts. Positive affine calibration preserves
+phase, so phase fitting uses raw counts with the existing quality thresholds.
+The firmware's zero-filled average can briefly extrapolate during startup.
+This calibration change requires rebuilding the desktop app only.
+
+To regenerate the calibration from the original workbooks, from the repository root:
+
+```sh
+python3 tools/calibrate_force.py /path/to/results_calibration.xlsx '/path/to/Probe sensitivity.xlsx'
+```
+
+The script reads numeric XLSX cells with Python's standard library and never
+executes workbook formulas or macros. It verifies the cached probe coefficients
+against the table before writing the shared calibration JSON.

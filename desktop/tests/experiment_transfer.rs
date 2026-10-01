@@ -26,6 +26,74 @@ use serde_json::{Value, json};
 struct Io;
 
 #[test]
+fn csv_exports_direct_force_with_raw_counts_ranges_and_calibration_provenance() {
+    let counts = [
+        4_200_000, 4_300_000, 4_163_833, 4_163_832, 4_281_744, 4_281_745, 0,
+    ];
+    let dataset = receiver::Dataset {
+        archive_index: None,
+        metadata: json!({"run": 1, "outcome": "completed"}),
+        samples: counts
+            .iter()
+            .map(|&raw| {
+                let mut sample = [0; RECORD_FIELDS];
+                sample[2] = raw;
+                sample
+            })
+            .collect(),
+    };
+    let csv = dataset.csv();
+    let lines: Vec<_> = csv.lines().collect();
+    assert_eq!(lines.len(), counts.len() + 2);
+    let metadata: Value = serde_json::from_str(
+        &lines[0]
+            .strip_prefix("metadata,\"")
+            .unwrap()
+            .strip_suffix('"')
+            .unwrap()
+            .replace("\"\"", "\""),
+    )
+    .unwrap();
+    assert_eq!(
+        metadata["force_calibration"]["id"],
+        "lps-probe-force-2026-08-27-v1"
+    );
+    assert_eq!(
+        metadata["force_calibration"]["observations"]["lps_counts_probe_counts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        50
+    );
+    assert!(dataset.metadata.get("force_calibration").is_none());
+    let header: Vec<_> = lines[1].split(',').collect();
+    assert_eq!(
+        &header[17..],
+        &["force_n", "force_mn", "force_extrapolated"]
+    );
+    for (i, expected) in [false, true, false, true, false, true, true]
+        .iter()
+        .enumerate()
+    {
+        let row: Vec<_> = lines[i + 2].split(',').collect();
+        assert_eq!(row.len(), header.len());
+        assert_eq!(row[2].parse::<i64>().unwrap(), counts[i]);
+        assert_eq!(row[19], expected.to_string());
+        let force_n = row[17].parse::<f64>().unwrap();
+        let force_mn = row[18].parse::<f64>().unwrap();
+        assert!((force_n * 1000.0 - force_mn).abs() < 0.000001);
+    }
+    assert!(lines[2].ends_with(",0.012405235,12.405235,false"));
+    assert!(lines[3].ends_with(",0.021054229,21.054229,true"));
+    assert!(
+        lines
+            .last()
+            .unwrap()
+            .ends_with(",-0.350852500,-350.852500,true")
+    );
+}
+
+#[test]
 fn final_return_metadata_above_old_line_limit_survives_download_and_csv() {
     let record = Record {
         elapsed_ms: 20,
@@ -204,9 +272,18 @@ fn independent_signal_times_and_identities_round_trip_into_csv() {
     let lines: Vec<_> = csv.lines().collect();
     assert!(lines[1].contains("epos_host_receipt_s,epos_generation"));
     assert!(!lines[1].contains("pressure_i2c_completion_s"));
-    assert!(lines[2].ends_with(",-0.017,4294967295,1,1,1"));
-    assert!(lines[3].ends_with(",-0.017,4294967295,2,0,1"));
-    assert!(lines[4].ends_with(",0.095,0,3,1,1"));
+    assert_eq!(
+        &lines[2].split(',').collect::<Vec<_>>()[12..17],
+        &["-0.017", "4294967295", "1", "1", "1"]
+    );
+    assert_eq!(
+        &lines[3].split(',').collect::<Vec<_>>()[12..17],
+        &["-0.017", "4294967295", "2", "0", "1"]
+    );
+    assert_eq!(
+        &lines[4].split(',').collect::<Vec<_>>()[12..17],
+        &["0.095", "0", "3", "1", "1"]
+    );
     let mut legacy = meta(8, &bytes);
     legacy["version"] = json!(1);
     assert!(d.metadata(legacy).is_err());

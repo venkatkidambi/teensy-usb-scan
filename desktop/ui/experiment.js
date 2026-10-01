@@ -1,5 +1,6 @@
 import {phaseDelays,parseFrequencies} from './phase.js';
 import {plotPng} from './plot-export.js';
+import {forceMillinewtons,forceRangeLabel} from './force.js';
 // UI only: native Rust validates configuration, receives binary data and builds CSV.
 const $=id=>document.getElementById(id);
 const text=(id,value)=>{const node=$(id);if(node.textContent!==value)node.textContent=value;};
@@ -129,6 +130,7 @@ export function experimentMessage(message) {
     $('experiment-phase').hidden=m.config.kind!=='sinusoidal';
     text('experiment-data-status','');
     text('experiment-data-summary',`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s`);
+    text('experiment-force-calibration',dataset.samples.length?forceRangeLabel(dataset.samples.map(s=>s[2])):'No force samples');
     $('experiment-result-summary').textContent=`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.reason} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s · CRC verified · missed samples ${m.missed_samples} · max logging lateness ${m.max_lateness_ms} ms${m.stop_queued?'':' · STOP could not be queued'}`;
     if(m.fault_stat!==undefined)$('experiment-result-summary').textContent+=` · Fault STAT ${m.fault_stat}`;
     if(m.timing){const t=m.timing;
@@ -169,7 +171,12 @@ export function signalPoints(samples, field, scale=1) {
   return samples.filter(s=>{const fresh=s[generation]!==previous;previous=s[generation];return fresh;})
     .map(s=>[s[0]-s[age],s[field]*scale]);
 }
+export function forcePoints(samples) {
+  return samples.map(s=>[s[0],forceMillinewtons(s[2])]);
+}
 function datasetPhases(result) {
+  // Positive affine calibration preserves phase. Fit raw counts to keep the
+  // existing signal-quality thresholds independent of force display units.
   if(!phaseCache.has(result))phaseCache.set(result,phaseDelays(result,signalPoints(result.samples,1),signalPoints(result.samples,2)));
   return phaseCache.get(result);
 }
@@ -189,7 +196,7 @@ function drawPlot(id,field,scale) {
   if(canvas.height!==height)canvas.height=height;
   ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,rect.width,rect.height);
   const samples=dataset.samples,l=65,r=rect.width-16,t=15,b=rect.height-30;
-  const points=signalPoints(samples,field,scale);
+  const points=field===2?forcePoints(samples):signalPoints(samples,field,scale);
   const command=field===1?samples.map(s=>[s[0],s[7]*scale]):[];
   let lo=Infinity,hi=-Infinity;for(const [,value] of [...points,...command]){lo=Math.min(lo,value);hi=Math.max(hi,value);}
   if(!samples.length){ctx.fillText('No samples acquired',l,40);return;}
@@ -198,7 +205,7 @@ function drawPlot(id,field,scale) {
   const x=ms=>l+(ms-start)/(end-start)*(r-l),y=value=>b-(value-lo)/(hi-lo)*(b-t);
   ctx.font='10px system-ui';ctx.fillStyle='#646b65';
   for(let i=0;i<=4;i++){
-    const y=t+(b-t)*i/4;ctx.strokeStyle='#e0e3e0';ctx.beginPath();ctx.moveTo(l,y);ctx.lineTo(r,y);ctx.stroke();ctx.textAlign='right';ctx.fillText((hi-(hi-lo)*i/4).toFixed(field===1?3:0),l-6,y+3);
+    const y=t+(b-t)*i/4;ctx.strokeStyle='#e0e3e0';ctx.beginPath();ctx.moveTo(l,y);ctx.lineTo(r,y);ctx.stroke();ctx.textAlign='right';ctx.fillText((hi-(hi-lo)*i/4).toFixed(3),l-6,y+3);
     ctx.textAlign='center';ctx.fillText(((start+(end-start)*i/4)/1000).toFixed(2),l+(r-l)*i/4,rect.height-8);
   }
   ctx.strokeStyle='#919b96';ctx.lineWidth=1;ctx.beginPath();

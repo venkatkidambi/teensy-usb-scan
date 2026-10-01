@@ -11,7 +11,7 @@
     <div class="devices" aria-label="Hardware status">
       <div class="device"><h3>Teensy 4.1 <span id="board-state" class="tag">Offline</span></h3><p id="firmware">USB1 · waiting for connection</p><small id="uptime">Bare-metal firmware</small></div>
       <div class="device"><h3>Xeryon XD-C <span id="actuator-state" class="tag">Unknown</span></h3><p id="actuator-detail">USB2 host · 04d8:ef4a</p><small id="serial">Serial number —</small></div>
-      <div class="device"><h3>Pressure input <span id="pressure-state" class="tag">Offline</span></h3><p id="pressure-sensor">LPS22HHTR · I²C 0x5C · 200 Hz</p><small>Raw pressure · 4096 counts/hPa</small></div>
+      <div class="device"><h3>LPS force input <span id="pressure-state" class="tag">Offline</span></h3><p id="pressure-sensor">LPS22HHTR · I²C 0x5C · 200 Hz</p><small>Probe-calibrated force · mN</small></div>
     </div>
     <div class="controller-status"><div class="controller-heading"><h3>Controller status</h3><p id="stat-word">Waiting for STAT</p></div><div id="flags" class="flags"><p class="empty-copy">Active status flags appear with XD-C feedback.</p></div><div id="stat-age" class="status-age">No status received</div></div>
   </section>
@@ -47,7 +47,7 @@
     <p id="experiment-motion-detail" class="pressure-detail"></p>
   </section>
   <section id="experiment-data-panel" class="panel" aria-labelledby="experiment-data-title" hidden>
-    <div class="panel-heading"><div><h2 id="experiment-data-title">Experiment Data</h2><p>Recorded position and pressure from quasi-static and sinusoidal experiments.</p></div><button id="experiment-save" disabled>Save CSV</button></div>
+    <div class="panel-heading"><div><h2 id="experiment-data-title">Experiment Data</h2><p>Recorded position and calibrated force from quasi-static and sinusoidal experiments.</p></div><button id="experiment-save" disabled>Save CSV</button></div>
     <p id="experiment-data-status" class="pressure-detail" role="status"></p>
     <div id="experiment-data-empty" class="experiment-data-empty"><h3>No experiment data yet</h3><p>Run a quasi-static or sinusoidal experiment to view its plots here.</p></div>
     <div id="experiment-results" hidden>
@@ -55,24 +55,24 @@
       <p id="experiment-data-summary" class="pressure-detail"></p>
       <div class="main-grid experiment-plots">
         <section id="experiment-position-card" class="panel"><div class="panel-heading"><div><h3>Actuator position</h3><p>Microns (µm) · time (s)</p></div><button id="experiment-position-png" class="plot-export" disabled>Save PNG</button></div><div class="plot-wrap"><canvas id="experiment-position-plot" role="img" aria-label="Experiment position versus time"></canvas></div><div class="panel-foot"><span class="legend">● Position at host receipt &nbsp; <span>━ Commanded trajectory</span></span></div></section>
-        <section id="experiment-pressure-card" class="panel"><div class="panel-heading"><div><h3>Pressure signal</h3><p>Raw counts · time (s)</p></div><button id="experiment-pressure-png" class="plot-export" disabled>Save PNG</button></div><div class="plot-wrap"><canvas id="experiment-pressure-plot" role="img" aria-label="Experiment pressure versus time"></canvas></div><div class="panel-foot"><span class="legend">━ Recorded pressure</span></div></section>
+        <section id="experiment-pressure-card" class="panel"><div class="panel-heading"><div><h3>LPS force</h3><p>Force (mN) · time (s)</p></div><button id="experiment-pressure-png" class="plot-export" disabled>Save PNG</button></div><div class="plot-wrap"><canvas id="experiment-pressure-plot" role="img" aria-label="Experiment calibrated force in millinewtons versus time"></canvas></div><div class="panel-foot"><span class="legend">━ Calibrated force</span><span id="experiment-force-calibration">Probe-calibrated force</span></div></section>
       </div>
       <div id="experiment-sweep-results" class="experiment-plots" hidden>
         <div class="sweep-plot-controls"><label for="experiment-phase-unit">Phase delay units</label><select id="experiment-phase-unit"><option value="ms">Milliseconds (ms)</option><option value="degrees">Degrees (°)</option><option value="radians">Radians (rad)</option></select></div>
         <section id="experiment-sweep-phase-card" class="panel">
-          <div class="panel-heading"><div><h3>Frequency sweep phase delay</h3><p>Position at host receipt → pressure signal</p></div><button id="experiment-sweep-phase-png" class="plot-export" disabled>Save PNG</button></div>
-          <div class="plot-wrap"><canvas id="experiment-sweep-phase-plot" role="img" aria-label="Position at host receipt to pressure phase delay versus frequency"></canvas></div>
+          <div class="panel-heading"><div><h3>Frequency sweep phase delay</h3><p>Position at host receipt → force signal</p></div><button id="experiment-sweep-phase-png" class="plot-export" disabled>Save PNG</button></div>
+          <div class="plot-wrap"><canvas id="experiment-sweep-phase-plot" role="img" aria-label="Position at host receipt to force phase delay versus frequency"></canvas></div>
           <div class="panel-foot"><span class="legend">● Recorded run · ring: selected run</span><span id="experiment-sweep-phase-summary"></span></div>
-          <div class="panel-foot"><span>Positive = pressure lags position. Signed delay wraps to ±half a period (±180°).</span></div>
+          <div class="panel-foot"><span>Positive = force lags position. Signed delay wraps to ±half a period (±180°).</span></div>
         </section>
       </div>
       <section id="experiment-phase" class="experiment-phase" aria-labelledby="experiment-phase-title" hidden>
         <h3 id="experiment-phase-title">Phase delays</h3>
         <dl class="phase-delays">
           <dt>Commanded trajectory → position at host receipt</dt><dd id="experiment-phase-command">Awaiting results</dd>
-          <dt>Position at host receipt → pressure signal</dt><dd id="experiment-phase-pressure">Awaiting results</dd>
+          <dt>Position at host receipt → force signal</dt><dd id="experiment-phase-pressure">Awaiting results</dd>
         </dl>
-        <p class="empty-copy">Sinusoidal fit during the waveform only. Positive delay means the second signal lags; signed phase is wrapped to ±180° or ±π radians (±half a period). Host receipt means the Teensy USB host. Pressure uses the plotted recording time. These include motion, transport and sampling effects; fit R² measures sinusoidal agreement.</p>
+        <p class="empty-copy">Sinusoidal fit during the waveform only. Positive delay means the second signal lags; signed phase is wrapped to ±180° or ±π radians (±half a period). Host receipt means the Teensy USB host. Force uses the plotted recording time. These include motion, transport and sampling effects; fit R² measures sinusoidal agreement.</p>
       </section>
       <details class="experiment-run-details"><summary>Run details</summary><p id="experiment-result-summary" class="pressure-detail"></p></details>
       <div class="panel-foot"><span>Results are replaced by the first verified dataset of a new experiment. Sweep runs stay together.</span></div>
@@ -95,12 +95,13 @@
   </section>
   <div class="main-grid">
     <section class="panel"><div class="panel-heading"><div><h2>Position over time</h2><p>Microns (µm) · last 60 seconds</p></div><span id="stream-state" class="tag">NO DATA</span></div><div class="plot-wrap"><canvas id="plot" role="img" aria-label="Encoder and target position in microns over time"></canvas><div id="empty"><strong>No position data</strong><p>Position feedback will appear here.</p></div></div><div class="panel-foot"><span class="legend">━ Encoder &nbsp; <span>┄ Target</span></span><span id="samples">0 samples</span></div></section>
-    <section class="panel pressure-panel" aria-label="Pressure readings">
-      <div class="panel-heading"><div><h2>Pressure signal</h2><p>Raw counts · last 60 seconds</p></div><span id="pressure-age" class="tag">NO DATA</span></div>
+    <section class="panel pressure-panel" aria-label="Calibrated LPS force readings">
+      <div class="panel-heading"><div><h2>LPS force</h2><p>Force (mN) · last 60 seconds</p></div><span id="pressure-age" class="tag">NO DATA</span></div>
       <p id="pressure-detail" class="pressure-detail">LPS22HHTR readings appear when the sensor responds.</p>
-      <div class="pressure-readings"><span>Raw <strong id="pressure-raw">—</strong></span><span>Average <strong id="pressure-average">—</strong></span><span>Samples <strong id="pressure-samples">0</strong></span></div>
-      <div class="plot-wrap"><canvas id="pressure-plot" role="img" aria-label="Raw and averaged pressure counts over time"></canvas></div>
-      <div class="panel-foot"><span class="legend">━ Average &nbsp; <span>┄ Raw</span></span><span>16-sample average · uncalibrated</span></div>
+      <div class="pressure-readings"><span>Force <strong id="pressure-raw">—</strong> mN</span><span>Average <strong id="pressure-average">—</strong> mN</span><span>Samples <strong id="pressure-samples">0</strong></span></div>
+      <p id="pressure-counts" class="pressure-detail">LPS counts: —</p>
+      <div class="plot-wrap"><canvas id="pressure-plot" role="img" aria-label="Instantaneous and averaged calibrated force in millinewtons over time"></canvas></div>
+      <div class="panel-foot"><span class="legend">━ 16-sample average &nbsp; <span>┄ Instantaneous</span></span><span id="pressure-calibration">Probe-calibrated force</span></div>
     </section>
   </div>
   <section class="panel plunger-panel" aria-label="Plunger motor">

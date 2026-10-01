@@ -136,6 +136,13 @@ values only when fresh. Acquisition continues while streaming is paused.
 Dashboard snapshots remain 10 Hz and experiment recording remains 50 Hz.
 Update firmware and desktop together for this sensor-specific pressure schema.
 
+Force calibration is a desktop presentation/export conversion; wire units remain
+raw LPS counts. The dashboard and experiment plots display mN using the
+[probe-derived calibration](README.md#lps-to-force-calibration). CSV appends
+`force_n`, `force_mn` and `force_extrapolated` to the existing columns, preserving
+`pressure_raw`. The CSV metadata adds `force_calibration` with the coefficients,
+supported range, source hashes and source observations used for the export.
+
 `plunger_io` remains unchanged: physical pad readbacks `standby`, `ain1`, `ain2`,
 2-bit `encoder`, signed 16-bit `pwm_count`/`pwm_compare`, and boolean
 `pwm_running`/`pwm_enabled`. Read snapshot records hardware diagnostics in the UI log.

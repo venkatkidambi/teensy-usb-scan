@@ -1,8 +1,10 @@
 import {setupExperiments,experimentControls,experimentMessage} from './experiment.js';
 import {NativeSession,statusFlags,elapsed,pressureState,xeryonMoveCommand} from './protocol.mjs';
+import {forceMillinewtons,forceExtrapolated} from './force.js';
 const $=id=>document.getElementById(id), text=(id,value)=>{const node=$(id),next=String(value);if(node.textContent!==next)node.textContent=next;};
 const invoke=window.__TAURI__?.core.invoke;
 const number=new Intl.NumberFormat(undefined,{maximumFractionDigits:0});
+const forceNumber=new Intl.NumberFormat(undefined,{minimumFractionDigits:3,maximumFractionDigits:3});
 const micronsPerCount=0.078;
 const positionNumber=new Intl.NumberFormat(undefined,{minimumFractionDigits:3,maximumFractionDigits:3});
 const position=counts=>positionNumber.format(counts*micronsPerCount);
@@ -90,7 +92,7 @@ function accept(m){
     }
     const p=m.pressure;
     if(p?.valid&&elapsed(m.ms,p.ms)<1000&&p.ms!==lastPressure){
-      pressureHistory.push({time:now,raw:p.raw,average:p.average});lastPressure=p.ms;
+      pressureHistory.push({time:now,raw:forceMillinewtons(p.raw),average:forceMillinewtons(p.average)});lastPressure=p.ms;
       if(pressureHistory.length>1200)pressureHistory.shift();
     }
     pressureHistory=pressureHistory.filter(p=>now-p.time<=60000);
@@ -181,8 +183,11 @@ function render(){
   }
   const pressure=snapshot?.pressure,pressureAge=pressure?elapsed(snapshot.ms,pressure.ms)+performance.now()-received:Infinity;
   const pressureValid=pressure?.valid,pressureFresh=pressureValid&&pressureAge<1000;
-  text('pressure-raw',pressureValid?number.format(pressure.raw):'—');
-  text('pressure-average',pressureValid?number.format(pressure.average):'—');
+  text('pressure-raw',pressureValid?forceNumber.format(forceMillinewtons(pressure.raw)):'—');
+  text('pressure-average',pressureValid?forceNumber.format(forceMillinewtons(pressure.average)):'—');
+  text('pressure-counts',pressureValid?`LPS counts: ${number.format(pressure.raw)} · average ${number.format(pressure.average)}`:'LPS counts: —');
+  const extrapolated=pressureValid&&(forceExtrapolated(pressure.raw)||forceExtrapolated(pressure.average));
+  text('pressure-calibration',!pressureValid?'Probe-calibrated force':extrapolated?'Extrapolated force · outside calibration range':'Within calibration range');
   text('pressure-samples',number.format(pressure?.samples??0));
   text('pressure-state',demo?'Simulated':!connected?'Offline':!hello?.pressure?'Unavailable':!pressureValid?pressureState(pressure):!pressureFresh?'Stale':'Receiving');
   text('pressure-age',pressureValid?`${pressureFresh?'Updated':'Stale'} · ${(pressureAge/1000).toFixed(1)}s ago`:'NO DATA');
@@ -249,13 +254,13 @@ function draw(){
   if($('dashboard-panel').hidden)return;
   const now=performance.now();
   drawSeries('plot',history.filter(p=>now-p.time<=60000),[['d','#b3bda5',[5,4]],['e','#4a8962',[]]],position);
-  drawSeries('pressure-plot',pressureHistory.filter(p=>now-p.time<=60000),[['raw','#b3bda5',[5,4]],['average','#4a8962',[]]],number.format);
+  drawSeries('pressure-plot',pressureHistory.filter(p=>now-p.time<=60000),[['raw','#b3bda5',[5,4]],['average','#4a8962',[]]],forceNumber.format);
 }
 const plotResize=new ResizeObserver(draw);
 for(const id of ['plot','pressure-plot'])plotResize.observe($(id).parentElement);
 $('demo').addEventListener('click',()=>{
   if(session||busy)return;reset();demo=true;const start=performance.now();hello={firmware:'preview',protocol:1,pressure:true,motion:false};epoch=1;
-  const make=ms=>({type:'snapshot',id:0,ms,epoch:1,vid:0x04d8,pid:0xef4a,mounted:true,cdc:2,records:Math.floor(ms/10),malformed:0,skipped:0,pressure:{sensor:'lps22hh',address:92,odr_hz:200,who:179,temperature:2500,state:2,errors:0,raw:Math.round(100000+15000*Math.sin(ms/1800)),average:Math.round(100000+12000*Math.sin(ms/1800-.4)),ms,samples:Math.floor(ms/5),valid:true},values:Object.fromEntries(Object.entries({EPOS:Math.round(1200+180*Math.sin(ms/6000)),DPOS:1200,STAT:352,SRNO:12345,SOFT:20103}).map(([tag,value])=>[tag,{value,ms}]))});
+  const make=ms=>({type:'snapshot',id:0,ms,epoch:1,vid:0x04d8,pid:0xef4a,mounted:true,cdc:2,records:Math.floor(ms/10),malformed:0,skipped:0,pressure:{sensor:'lps22hh',address:92,odr_hz:200,who:179,temperature:2500,state:2,errors:0,raw:Math.round(4220000+40000*Math.sin(ms/1800)),average:Math.round(4220000+32000*Math.sin(ms/1800-.4)),ms,samples:Math.floor(ms/5),valid:true},values:Object.fromEntries(Object.entries({EPOS:Math.round(1200+180*Math.sin(ms/6000)),DPOS:1200,STAT:352,SRNO:12345,SOFT:20103}).map(([tag,value])=>[tag,{value,ms}]))});
   for(let i=0;i<600;i++)history.push({time:start-60000+i*100,e:make(i*100).values.EPOS.value,d:1200});
   accept(make(60000));text('session-label','SIMULATED SESSION');notice('Demo mode — all readings are simulated. No serial port is open.');controls();
   demoTimer=setInterval(()=>accept(make(Math.floor(performance.now()-start)+60000)),100);
