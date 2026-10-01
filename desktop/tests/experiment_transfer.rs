@@ -54,7 +54,7 @@ fn telemetry(now: u32) -> protocol::Telemetry {
         t.record(tag, value, now);
     }
     let mut m = xeryon_motion::Motion::new();
-    m.start(0, now);
+    m.start(-10, now);
     m.state = 2;
     t.xeryon_motion = Some(m);
     t
@@ -238,12 +238,23 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     let dataset = dataset.unwrap();
     assert_eq!(dataset.samples.len(), 26);
     assert_eq!(dataset.samples[0][1], -123);
-    assert_eq!(dataset.samples[12][7], 10); // theoretical near +amplitude at t=240 ms
-    assert_eq!(dataset.samples[25][7], 0); // center at half-cycle, still scanning
+    assert_eq!(dataset.samples[0][7], -10); // negative extremum at rest
+    assert_eq!(dataset.samples[12][7], -1); // approaching center at t=240 ms
+    assert_eq!(dataset.samples[25][7], 10); // positive extremum at half-cycle
     assert!(dataset.csv().contains("-9.594,1193046"));
+    assert_eq!(
+        dataset.metadata["sine_initialization"],
+        "negative_extremum_zero_velocity"
+    );
+    let csv = dataset.csv();
+    assert!(csv.contains("negative_extremum_zero_velocity"));
+    assert_eq!(
+        csv.lines().nth(2).unwrap().split(',').nth(7),
+        Some("-0.780")
+    );
     assert_eq!(dataset.metadata["outcome"], "aborted");
     assert_eq!(dataset.metadata["reversal_count"], 1);
-    assert_eq!(dataset.metadata["reversals"][0]["crossing_ms"], 250);
+    assert_eq!(dataset.metadata["reversals"][0]["crossing_ms"], 500);
     assert_eq!(dataset.metadata["reversals"][0]["commands"][3][0], 1);
     assert_eq!(dataset.metadata["reversals"][0]["commands"][3][1], 0);
     assert_eq!(dataset.metadata["reversals"][0]["commands"][4][1], -1);

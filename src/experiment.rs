@@ -9,7 +9,6 @@ pub mod scheduling;
 mod waveform_tx;
 
 const MODE_FEEDBACK_GRACE_MS: u32 = 100;
-const CENTER_TOLERANCE_COUNTS: u64 = 1; // 0.078 um encoder resolution
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -84,8 +83,6 @@ pub struct Engine<'a> {
     epoch: u32,
     transfer_next: usize,
     center_move: CenterMove,
-    center_epos_generation: u32,
-    center_confirmations: u8,
     scan: xeryon_motion::ScanState,
     waveform_tx: waveform_tx::Transport,
     pub scheduling: scheduling::Diagnostics,
@@ -142,8 +139,6 @@ impl<'a> Engine<'a> {
             epoch: 0,
             transfer_next: 0,
             center_move: CenterMove::None,
-            center_epos_generation: 0,
-            center_confirmations: 0,
             scan: xeryon_motion::ScanState::default(),
             waveform_tx: waveform_tx::Transport::default(),
             scheduling: scheduling::Diagnostics::default(),
@@ -287,8 +282,6 @@ impl<'a> Engine<'a> {
         self.epoch = t.epoch;
         self.step = 0;
         self.center_move = CenterMove::None;
-        self.center_epos_generation = t.epos_generation;
-        self.center_confirmations = 0;
         self.scan = xeryon_motion::ScanState::default();
         self.waveform_tx = waveform_tx::Transport::default();
         self.fault_stat = None;
@@ -546,6 +539,14 @@ impl<'a> Engine<'a> {
             return;
         }
         if self.state == State::Armed {
+            // Drain positioning traffic before t=0 so the first waveform command
+            // is exactly SSPD=0 followed by SCAN=+1, never a delayed nonzero retry.
+            if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) && !io.tx_idle() {
+                if now.wrapping_sub(self.move_started) >= self.move_timeout {
+                    self.finish(State::Fault, "Start move deadline", io);
+                }
+                return;
+            }
             io.start_timing();
             self.last_pressure = p.samples;
             self.malformed_start = t.malformed;
@@ -580,8 +581,11 @@ impl<'a> Engine<'a> {
             && (elapsed >= self.next_sample
                 || (self.center_move == CenterMove::None && elapsed >= self.next_target))
         {
-            self.target = if elapsed >= self.duration_ms - MOVE_TIMEOUT_MS {
+            self.target = if self.center_move != CenterMove::None {
                 counts(center_nm).unwrap()
+            } else if elapsed >= self.duration_ms - MOVE_TIMEOUT_MS {
+                // Clamp the terminal sample to the exact endpoint before STOP.
+                self.config.unwrap().start().unwrap()
             } else {
                 sine_target(center_nm, amplitude_nm, frequency_mhz, elapsed)
             };
@@ -692,8 +696,6 @@ impl<'a> Engine<'a> {
                         io.target(self.target, now, true).map(|_| {
                             self.center_move = CenterMove::Positioning;
                             self.motion_changed_ms = now;
-                            self.center_epos_generation = t.epos_generation;
-                            self.center_confirmations = 0;
                             false
                         })
                     } else {
@@ -725,34 +727,14 @@ impl<'a> Engine<'a> {
             _ => {}
         }
     }
-    /// Final sine return only: do not wait for the controller's settling flag
-    /// once two new encoder publications confirm center. Cached reads do not count.
-    fn center_arrived(&mut self, t: &Telemetry) -> bool {
-        let after_target = |ms: u32| {
-            let elapsed = ms.wrapping_sub(self.motion_changed_ms);
-            elapsed > 0 && elapsed < 0x8000_0000
-        };
+    /// Use the same tracked DPOS echo/Position Reached confirmation as startup.
+    fn center_arrived(&self, t: &Telemetry) -> bool {
         let status = t.samples[2];
-        let positioning =
-            after_target(status.ms) && status.value & ((1 << 6) | (1 << 9) | (1 << 13)) == (1 << 6);
-        if !positioning {
-            self.center_confirmations = 0;
-            self.center_epos_generation = t.epos_generation;
-            return false;
-        }
-        if self.center_epos_generation != t.epos_generation {
-            self.center_epos_generation = t.epos_generation;
-            let epos = t.samples[0];
-            self.center_confirmations = if after_target(epos.ms)
-                && epos.value.abs_diff(i64::from(self.target)) <= CENTER_TOLERANCE_COUNTS
-            {
-                (self.center_confirmations + 1).min(2)
-            } else {
-                0
-            };
-        }
-        self.center_confirmations == 2
-            || t.xeryon_motion
+        let age = status.ms.wrapping_sub(self.motion_changed_ms);
+        age > 0
+            && age < 0x8000_0000
+            && status.value & ((1 << 6) | (1 << 9) | (1 << 13)) == (1 << 6)
+            && t.xeryon_motion
                 .is_some_and(|m| m.state == 2 && m.target == Some(self.target))
     }
     pub fn metadata(&self, out: &mut impl core::fmt::Write, id: u32) -> core::fmt::Result {
@@ -765,7 +747,7 @@ impl<'a> Engine<'a> {
         if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) {
             write!(
                 out,
-                ",\"sine_control\":\"velocity_scan\",\"reversal_count\":{},\"reversal_total\":{},\"reversal_window_ms\":{},\"reversals\":[]",
+                ",\"sine_control\":\"velocity_scan\",\"sine_initialization\":\"negative_extremum_zero_velocity\",\"reversal_count\":{},\"reversal_total\":{},\"reversal_window_ms\":{},\"reversals\":[]",
                 self.transferred_reversals(),
                 self.reversals.total,
                 reversal::WINDOW_MS
@@ -904,15 +886,15 @@ impl<'a> Engine<'a> {
 /// Quantize once, directly to the nearest encoder count (ties away from zero).
 /// Configuration validation bounds the entire trajectory to the encoder range.
 fn sine_target(center_nm: i64, amplitude_nm: u32, frequency_mhz: u32, elapsed: u32) -> i32 {
-    let phase = (u64::from(elapsed) * u64::from(frequency_mhz)) % 1_000_000;
+    let phase = (u64::from(elapsed) * u64::from(frequency_mhz) + 250_000) % 1_000_000;
     let wave = sine(phase as f64 / 1_000_000.0).clamp(-1.0, 1.0);
-    let position = (center_nm as f64 + f64::from(amplitude_nm) * wave) / 78.0;
+    let position = (center_nm as f64 - f64::from(amplitude_nm) * wave) / 78.0;
     (position + if position < 0.0 { -0.5 } else { 0.5 }) as i32
 }
 
-/// v(t) = 2*pi*f*A*cos(2*pi*f*t), in um/s, from actual elapsed milliseconds.
+/// v(t) = 2*pi*f*A*sin(2*pi*f*t), in um/s, from actual elapsed milliseconds.
 fn sine_velocity(amplitude_nm: u32, frequency_mhz: u32, elapsed: u32) -> f64 {
-    let phase = (u64::from(elapsed) * u64::from(frequency_mhz) + 250_000) % 1_000_000;
+    let phase = (u64::from(elapsed) * u64::from(frequency_mhz)) % 1_000_000;
     sine_max_velocity(amplitude_nm, frequency_mhz)
         * sine(phase as f64 / 1_000_000.0).clamp(-1.0, 1.0)
 }
@@ -1235,7 +1217,7 @@ mod tests {
                 e.poll(now, &t, p, &mut io);
             }
             assert_eq!(e.outcome, "completed");
-            assert_eq!(e.reversals.total, cycles * 2);
+            assert_eq!(e.reversals.total, cycles * 2 - 1); // final boundary stops for DPOS return
             let count = e.transferred_reversals();
             assert!(count <= reversal::CAPACITY);
             assert!(count <= e.len.div_ceil(CHUNK_RECORDS) * 2);
@@ -1273,20 +1255,12 @@ mod tests {
         }
         // Final center tracker can confirm independently of the injected EPOS error.
         assert_eq!(e.outcome, "completed");
-        assert_eq!(e.reversals.total, 286);
-        assert_eq!(e.reversals.len, 286);
+        assert_eq!(e.reversals.total, 285);
+        assert_eq!(e.reversals.len, 285);
         assert!(e.len.div_ceil(CHUNK_RECORDS) * 2 >= e.reversals.len);
         for (i, turn) in e.reversals.records[..e.reversals.len].iter().enumerate() {
-            let theoretical_peak_ms = 125 + i as u32 * 250;
-            assert_eq!(
-                turn.crossing_ms,
-                theoretical_peak_ms
-                    + if e.scheduling.mode == scheduling::Mode::Fixed100Hz {
-                        5
-                    } else {
-                        0
-                    }
-            );
+            let theoretical_peak_ms = 250 + i as u32 * 250;
+            assert_eq!(turn.crossing_ms, theoretical_peak_ms);
             assert_eq!(turn.direction, if i % 2 == 0 { -1 } else { 1 });
             assert_eq!(turn.max_error_counts, 7);
         }
@@ -1295,7 +1269,7 @@ mod tests {
                 .iter()
                 .filter(|c| matches!(c, xeryon_motion::ScanCommand::Direction(_)))
                 .count(),
-            287
+            286
         );
         assert!(!io.scans.contains(&xeryon_motion::ScanCommand::Direction(0)));
         assert_eq!(io.stops, 2);
@@ -1397,6 +1371,7 @@ mod tests {
         t.record(b"STAT", 1089, 0);
         e.accept(sinusoidal(), &t, p, false, 0).unwrap();
         e.begin(0, &mut io);
+        t.xeryon_motion.as_mut().unwrap().target = Some(-100);
         e.poll(1, &t, p, &mut io);
         e.poll(2, &t, p, &mut io);
         assert_eq!(e.state, State::Running);
@@ -1646,10 +1621,10 @@ mod tests {
         }
         assert_eq!(e.outcome, "completed");
         assert_eq!(e.len, 51);
-        assert_eq!(io.targets.len(), 2); // initial and final center only
+        assert_eq!(io.targets.len(), 2); // initial extremum and final center only
         for record in &e.samples[..e.len] {
             let elapsed = record.elapsed_ms;
-            let expected = (100.0 * (f64::from(elapsed) * core::f64::consts::TAU / 1000.0).sin())
+            let expected = (-100.0 * (f64::from(elapsed) * core::f64::consts::TAU / 1000.0).cos())
                 .round() as i32;
             assert_eq!(record.target, expected);
         }
@@ -1663,17 +1638,113 @@ mod tests {
         );
         assert_eq!(e.missed_samples, 0);
         assert_eq!(io.stops, 2); // waveform boundary, then terminal cleanup
-        assert_eq!(io.events[..3], ["DPOS=0\n", "SSPD=49\n", "SCAN=1\n"]);
+        assert_eq!(io.events[..3], ["DPOS=-100\n", "SSPD=0\n", "SCAN=1\n"]);
         for i in 0..10000 {
             let phase = i as f64 / 10000.0;
             assert!((sine(phase) - (phase * core::f64::consts::TAU).sin()).abs() < 7e-10);
         }
     }
     #[test]
+    fn extremum_initialization_matches_position_velocity_and_direction() {
+        let center = 15_600;
+        let amplitude = 7_800;
+        let peak = sine_max_velocity(amplitude, 1000);
+        for (ms, position, velocity, direction) in [
+            (0, 100, 0.0, 1),
+            (250, 200, peak, 1),
+            (500, 300, 0.0, -1),
+            (750, 200, -peak, -1),
+            (1000, 100, 0.0, 1),
+        ] {
+            assert_eq!(sine_target(center, amplitude, 1000, ms), position);
+            assert!((sine_velocity(amplitude, 1000, ms) - velocity).abs() < 1e-8);
+            assert_eq!(sine_direction(1000, ms), direction);
+        }
+        assert!(sine_velocity(amplitude, 1000, 1) > 0.0);
+        assert_eq!(sine_velocity(amplitude, 1000, 0), 0.0);
+        for frequency in [100, 333, 1000, 1300, 10_000] {
+            let end = 1_000_000u32.div_ceil(frequency);
+            let mut previous = sine_direction(frequency, 0);
+            let mut crossings = Vec::new();
+            for ms in 1..=end {
+                let direction = sine_direction(frequency, ms);
+                if direction != previous {
+                    crossings.push(ms);
+                }
+                previous = direction;
+            }
+            // Two mathematical reversals per complete cycle, excluding t=0.
+            // At the final one the finite experiment stops for the DPOS return.
+            assert_eq!(crossings, [500_000u32.div_ceil(frequency), end]);
+        }
+    }
+
+    #[test]
+    fn both_sine_extrema_are_validated_before_motion() {
+        for center_nm in [
+            i64::from(MIN_POSITION) * 78,
+            i64::from(MAX_POSITION) * 78,
+            i64::MIN,
+        ] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut e = Engine::new(&mut records);
+            let config = ExperimentConfig::Sinusoidal {
+                center_nm,
+                amplitude_nm: 7800,
+                frequency_mhz: 1000,
+                cycles: 1,
+            };
+            let (t, p) = feedback(0, 0, true);
+            assert!(e.accept(config, &t, p, false, 0).is_err());
+            assert_eq!(e.state, State::Dashboard);
+            assert!(!e.owns_hardware());
+            assert_eq!(e.run, 0);
+        }
+    }
+
+    #[test]
+    fn move_to_negative_extremum_requires_reached_and_idle_before_zero_time() {
+        use xeryon_motion::ScanCommand::*;
+        for begin in [0, u32::MAX - 50] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            let (t, p) = feedback(begin, 0, true);
+            e.accept(sinusoidal(), &t, p, false, begin).unwrap();
+            e.begin(begin, &mut io);
+            assert_eq!(io.targets, [(-100, begin, true)]);
+            for elapsed in 1..100 {
+                let now = begin.wrapping_add(elapsed);
+                let (t, p) = feedback(now, -100, false);
+                e.poll(now, &t, p, &mut io);
+                assert_eq!(e.state, State::MoveToStart);
+                assert!(io.scans.is_empty());
+                assert_eq!(e.len, 0);
+            }
+            let now = begin.wrapping_add(100);
+            let (t, p) = feedback(now, -100, true);
+            io.busy = true;
+            e.poll(now, &t, p, &mut io);
+            assert_eq!(e.state, State::Armed);
+            e.poll(now.wrapping_add(1), &t, p, &mut io);
+            assert_eq!(e.state, State::Armed);
+            assert!(io.scans.is_empty());
+            io.busy = false;
+            e.poll(now.wrapping_add(2), &t, p, &mut io);
+            assert_eq!(e.started_ms, now.wrapping_add(2));
+            assert_eq!(e.elapsed_ms, 0);
+            assert_eq!(e.samples[0].target, -100);
+            assert_eq!(io.scans, [Speed(0), Direction(1)]);
+            assert_eq!(e.reversals.total, 0);
+            assert_eq!(e.scheduling.reversal_lateness.count, 0);
+        }
+    }
+
+    #[test]
     fn velocity_equation_cardinal_phases_and_peak_speed_validation() {
         let vmax = sine_max_velocity(1_000_000, 1000);
         assert!((vmax - core::f64::consts::TAU * 1000.0).abs() < 1e-9);
-        for (ms, fraction) in [(0, 1.0), (250, 0.0), (500, -1.0), (750, 0.0), (1000, 1.0)] {
+        for (ms, fraction) in [(0, 0.0), (250, 1.0), (500, 0.0), (750, -1.0), (1000, 0.0)] {
             assert!((sine_velocity(1_000_000, 1000, ms) - vmax * fraction).abs() < 1e-8);
         }
         let boundary =
@@ -1739,7 +1810,7 @@ mod tests {
                 ))))
             );
             assert_eq!(e.scheduling.lateness.count, 2);
-            for elapsed in actual + 1..=193 {
+            for elapsed in actual + 1..=385 {
                 let now = e.started_ms.wrapping_add(elapsed);
                 let (t, p) = feedback(now, -123, true);
                 e.poll(now, &t, p, &mut io);
@@ -1748,7 +1819,7 @@ mod tests {
             // Zero is accepted at the crossing; direction waits for the next
             // idle observation, even with this instantly-completing test IO.
             assert_eq!(io.scans.last(), Some(&xeryon_motion::ScanCommand::Speed(0)));
-            let now = e.started_ms.wrapping_add(194);
+            let now = e.started_ms.wrapping_add(386);
             let (t, p) = feedback(now, -123, true);
             e.poll(now, &t, p, &mut io);
             assert_eq!(
@@ -1761,7 +1832,7 @@ mod tests {
             assert_eq!(e.scheduling.reversal_lateness.count, 1);
             assert_eq!(
                 e.next_target,
-                scheduling::next(scheduling::Mode::Adaptive, amplitude_nm, 1300, 193, 0.0)
+                scheduling::next(scheduling::Mode::Adaptive, amplitude_nm, 1300, 385, 0.0)
             );
             assert_eq!(io.targets.len(), 1); // no waveform DPOS despite arbitrary EPOS
             e.abort(&mut io);
@@ -1779,7 +1850,7 @@ mod tests {
     #[test]
     fn busy_updates_coalesce_and_send_current_time_without_phase_drift_or_fifo() {
         use xeryon_motion::ScanCommand::Speed;
-        for begin in [0, u32::MAX - 105] {
+        for begin in [0, u32::MAX - 230] {
             let mut records = [Record::EMPTY; 1024];
             let mut e = Engine::new(&mut records);
             e.scheduling.mode = scheduling::Mode::Adaptive;
@@ -1795,13 +1866,13 @@ mod tests {
                 begin,
                 &mut io,
             );
-            for elapsed in 1..100 {
+            for elapsed in 1..225 {
                 waveform_poll(&mut e, &mut io, elapsed);
             }
-            e.next_target = 100;
+            e.next_target = 225;
             let before = io.scans.len();
             io.busy = true;
-            for elapsed in 100..109 {
+            for elapsed in 225..234 {
                 waveform_poll(&mut e, &mut io, elapsed);
                 assert_eq!(e.state, State::Running);
                 assert_eq!(io.scans.len(), before); // no transport FIFO submissions
@@ -1809,19 +1880,19 @@ mod tests {
             assert!(e.scheduling.busy_due >= 2);
             assert!(e.scheduling.max_coalesced >= 2);
             io.busy = false;
-            waveform_poll(&mut e, &mut io, 109); // not a historical evaluation time
+            waveform_poll(&mut e, &mut io, 234); // not a historical evaluation time
             assert_eq!(io.scans.len(), before + 1);
             assert_eq!(
                 io.scans.last(),
-                Some(&Speed(velocity_speed(sine_velocity(1_000_000, 2000, 109))))
+                Some(&Speed(velocity_speed(sine_velocity(1_000_000, 2000, 234))))
             );
             assert_ne!(
                 io.scans.last(),
-                Some(&Speed(velocity_speed(sine_velocity(1_000_000, 2000, 108))))
+                Some(&Speed(velocity_speed(sine_velocity(1_000_000, 2000, 233))))
             );
-            waveform_poll(&mut e, &mut io, 110);
-            assert_eq!(io.scans.len(), before + 1); // no replay of 100/104/108
-            for elapsed in 111..=125 {
+            waveform_poll(&mut e, &mut io, 235);
+            assert_eq!(io.scans.len(), before + 1); // no replay of 225/229/233
+            for elapsed in 236..=250 {
                 waveform_poll(&mut e, &mut io, elapsed);
             }
             assert_eq!(io.scans.last(), Some(&Speed(0))); // original absolute crossing
@@ -1871,7 +1942,7 @@ mod tests {
         assert_eq!(e.scheduling.backpressure_faults, 0);
         assert_eq!(e.scheduling.usb_faults, 0);
         assert_eq!(e.scheduling.queue_peak, 1);
-        assert_eq!(e.scheduling.reversal_resume.count, 4);
+        assert_eq!(e.scheduling.reversal_resume.count, 3);
         assert_eq!(e.missed_samples, 0);
         assert_eq!(e.epos_arrivals.count, 49);
         assert_eq!(e.max_epos_age, 19);
@@ -1881,8 +1952,8 @@ mod tests {
             meta.contains("\"min\":9,\"mean\":9.000,\"max\":9"),
             "{meta}"
         );
-        // All four independent direction and resume packets complete in order.
-        for turn in &e.reversals.records[..4] {
+        // All three independent direction and resume packets complete in order.
+        for turn in &e.reversals.records[..3] {
             let mut text = String::new();
             turn.write(&mut text).unwrap();
             assert!(!text.contains("null"), "{text}");
@@ -1897,42 +1968,42 @@ mod tests {
         let mut e = Engine::new(&mut records).with_reversals(&mut turns);
         let mut io = Io::default();
         start(&mut e, sinusoidal(), 0, &mut io);
-        for elapsed in 1..250 {
+        for elapsed in 1..500 {
             waveform_poll(&mut e, &mut io, elapsed);
         }
         let before = io.scans.len();
         io.busy = true; // ordinary command still completing at the crossing
-        for elapsed in 250..255 {
+        for elapsed in 500..505 {
             waveform_poll(&mut e, &mut io, elapsed);
         }
         assert_eq!(io.scans.len(), before);
         io.busy = false;
-        waveform_poll(&mut e, &mut io, 255);
+        waveform_poll(&mut e, &mut io, 505);
         assert_eq!(&io.scans[before..], &[Speed(0)]);
         io.busy = true;
-        for elapsed in 256..263 {
+        for elapsed in 506..513 {
             waveform_poll(&mut e, &mut io, elapsed);
         }
         assert_eq!(&io.scans[before..], &[Speed(0)]); // zero cannot disappear
         io.busy = false;
-        waveform_poll(&mut e, &mut io, 263);
+        waveform_poll(&mut e, &mut io, 513);
         assert_eq!(&io.scans[before..], &[Speed(0), Direction(-1)]);
         io.busy = true;
-        for elapsed in 264..271 {
+        for elapsed in 514..521 {
             waveform_poll(&mut e, &mut io, elapsed);
         }
         assert_eq!(&io.scans[before..], &[Speed(0), Direction(-1)]);
         io.busy = false;
-        waveform_poll(&mut e, &mut io, 271);
+        waveform_poll(&mut e, &mut io, 521);
         assert_eq!(
             &io.scans[before..],
             &[
                 Speed(0),
                 Direction(-1),
-                Speed(velocity_speed(sine_velocity(7800, 1000, 271)))
+                Speed(velocity_speed(sine_velocity(7800, 1000, 521)))
             ]
         );
-        waveform_poll(&mut e, &mut io, 272);
+        waveform_poll(&mut e, &mut io, 522);
         assert_eq!(e.reversals.total, 1);
         assert_eq!(e.scheduling.reversal_zero.count, 1);
         assert_eq!(e.scheduling.reversal_direction.count, 1);
@@ -1940,7 +2011,7 @@ mod tests {
         let mut text = String::new();
         e.reversals.records[0].write(&mut text).unwrap();
         assert!(
-            text.contains("[1,0,255,null],[2,-1,263,null],[1,6,271,null]"),
+            text.contains("[1,0,505,null],[2,-1,513,null],[1,6,521,null]"),
             "{text}"
         );
         assert_eq!(e.state, State::Running);
@@ -1952,8 +2023,8 @@ mod tests {
             let mut records = [Record::EMPTY; 1024];
             let mut e = Engine::new(&mut records);
             let mut io = Io::default();
-            start(&mut e, sinusoidal(), u32::MAX - 270, &mut io);
-            let start_busy = if reversal { 250 } else { 50 };
+            start(&mut e, sinusoidal(), u32::MAX - 520, &mut io);
+            let start_busy = if reversal { 500 } else { 50 };
             for elapsed in 1..start_busy {
                 waveform_poll(&mut e, &mut io, elapsed);
             }
@@ -1961,7 +2032,7 @@ mod tests {
             for elapsed in start_busy..=start_busy + 40 {
                 // Let zero complete partway through. Per-transfer busy durations
                 // stay under 40 ms; the whole reversal must still hit its bound.
-                io.busy = !(reversal && (elapsed == 250 || elapsed == 270));
+                io.busy = !(reversal && (elapsed == 500 || elapsed == 520));
                 waveform_poll(&mut e, &mut io, elapsed);
                 if e.data_ready() {
                     fault_at = elapsed;
@@ -1970,7 +2041,7 @@ mod tests {
             }
             assert_ne!(fault_at, 0);
             if reversal {
-                assert_eq!(fault_at, 290);
+                assert_eq!(fault_at, 540);
                 assert_eq!(e.reason, "Xeryon reversal backpressure deadline");
             } else {
                 assert_eq!(e.reason, "Xeryon excessive transmit backpressure");
@@ -2023,7 +2094,7 @@ mod tests {
 
     #[test]
     fn abort_and_real_usb_failure_override_every_reversal_stage_and_ordinary_tx() {
-        for phase in [100, 250, 251, 252] {
+        for phase in [100, 500, 501, 502] {
             for abort in [false, true] {
                 let mut records = [Record::EMPTY; 1024];
                 let mut e = Engine::new(&mut records);
@@ -2091,7 +2162,7 @@ mod tests {
             cycles: 1,
         };
         start(&mut e, config, 0, &mut io);
-        assert_eq!(io.scans, [Speed(6283), Direction(1)]);
+        assert_eq!(io.scans, [Speed(0), Direction(1)]);
         for elapsed in [13, 29, 31, 43, 53] {
             let now = e.started_ms + elapsed;
             let (mut t, p) = feedback(now, 12345, false); // no EPOS correction
@@ -2099,7 +2170,7 @@ mod tests {
             e.poll(now, &t, p, &mut io);
             let expected = (core::f64::consts::TAU
                 * 1000.0
-                * (core::f64::consts::TAU * f64::from(elapsed) / 1000.0).cos())
+                * (core::f64::consts::TAU * f64::from(elapsed) / 1000.0).sin())
             .round() as u32;
             assert_eq!(io.scans.last(), Some(&Speed(expected)));
             assert_eq!(e.state, State::Running);
@@ -2180,7 +2251,7 @@ mod tests {
         assert_eq!(io.targets.len(), 2);
     }
     #[test]
-    fn sine_finishes_on_fresh_center_feedback_without_waiting_for_reached_flag() {
+    fn sine_waits_for_position_reached_despite_fresh_center_feedback() {
         for begin in [0, u32::MAX - 1100] {
             let mut records = [Record::EMPTY; 1024];
             let mut e = Engine::new(&mut records);
@@ -2203,7 +2274,7 @@ mod tests {
                 (40, 0, false, false),  // first fresh center publication
                 (60, 2, false, false),  // outside one encoder count: reset
                 (80, -1, false, false), // first new center confirmation
-                (100, 0, false, true),  // second: finish immediately, no dwell
+                (100, 0, false, false), // fresh EPOS alone cannot complete
             ] {
                 let now = command_ms.wrapping_add(offset);
                 io.busy = busy;
@@ -2219,8 +2290,11 @@ mod tests {
                     }
                 }
             }
+            let now = command_ms.wrapping_add(120);
+            let (t, p) = feedback(now, 0, true);
+            e.poll(now, &t, p, &mut io);
             assert_eq!(e.outcome, "completed");
-            assert_eq!(e.elapsed_ms, 1102);
+            assert_eq!(e.elapsed_ms, 1122);
             assert_eq!(io.stops, 2);
             assert_eq!(io.targets.len(), 2);
             let count = e.len;
@@ -2231,7 +2305,7 @@ mod tests {
 
     #[test]
     fn reversal_and_return_exits_always_stop_and_keep_partial_data() {
-        for exit_phase in [250, 260, 1000, 1001, 1002] {
+        for exit_phase in [500, 510, 1000, 1001, 1002] {
             for abort in [true, false] {
                 let mut records = [Record::EMPTY; 1024];
                 let mut e = Engine::new(&mut records);
@@ -2278,19 +2352,19 @@ mod tests {
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         start(&mut e, sinusoidal(), 0, &mut io);
-        for elapsed in 1..=251 {
+        for elapsed in 1..=501 {
             let now = e.started_ms + elapsed;
             let (mut t, p) = feedback(now, e.target, true);
             // A zero-speed reversal stays in SCAN: it must not renew the
             // initial mode-entry grace or suppress closed-loop safety.
-            let stat = if elapsed >= 251 {
+            let stat = if elapsed >= 501 {
                 0
             } else {
                 (1 << 6) | (1 << 13)
             };
             t.record(b"STAT", stat, now);
             e.poll(now, &t, p, &mut io);
-            if elapsed < 251 {
+            if elapsed < 501 {
                 assert_eq!(e.state, State::Running);
             }
         }

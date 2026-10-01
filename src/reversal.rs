@@ -32,7 +32,7 @@ mod tests {
             cycles: 2,
         };
         let mut t = Telemetry::new();
-        for ms in 200..=300 {
+        for ms in 450..=550 {
             if ms % 20 == 0 {
                 t.record(
                     b"EPOS",
@@ -41,12 +41,12 @@ mod tests {
                 );
                 t.record(b"STAT", 8256, ms);
             }
-            if ms == 240 {
+            if ms == 490 {
                 t.transport.rx_backlog_polls += 1;
             }
-            d.observe(config, ms, ms, &t, ms == 252);
+            d.observe(config, ms, ms, &t, ms == 502);
             if ms % 10 == 0 {
-                d.tick(ms, ms, &t, if ms < 250 { 1 } else { -1 }, ms == 250);
+                d.tick(ms, ms, &t, if ms < 500 { 1 } else { -1 }, ms == 500);
             }
         }
         assert_eq!(d.records[0].max_error_counts, 9);
@@ -355,8 +355,13 @@ impl<'a> Diagnostics<'a> {
             return;
         };
         let phase = u64::from(elapsed) * u64::from(frequency_mhz);
-        let window = phase / 500_000;
-        let peak = window * 500_000 + 250_000;
+        // Nearest nonzero half-cycle crossing; startup is not a reversal.
+        let crossing = (phase + 250_000) / 500_000;
+        if crossing == 0 {
+            return;
+        }
+        let window = crossing - 1;
+        let peak = crossing * 500_000;
         if phase.abs_diff(peak) > u64::from(WINDOW_MS * frequency_mhz) {
             return;
         }

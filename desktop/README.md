@@ -38,8 +38,10 @@ and flash matching firmware; older firmware cannot run this mode from the new UI
 Sinusoidal motion uses **adaptive SSPD/SCAN velocity and direction control (4–10 ms)** and
 records at 50 Hz. Firmware advertises `sine_velocity: true` and retains the legacy
 `sine_position` UI gate. Actual elapsed Teensy time determines waveform phase;
-theoretical position is logged at 0.078 µm resolution. Initial and final center
-positioning use tracked DPOS moves. Speed is changed by the waveform and remains
+theoretical position `center - A cos(2πft)` is logged at 0.078 µm resolution.
+Initial DPOS positioning reaches center − amplitude before starting at zero
+velocity with positive SCAN direction. Final DPOS returns to center. Both moves
+require Position Reached. Speed is changed by the waveform and remains
 at its final setting afterward; travel limits remain configured as before.
 Sinusoidal frequencies accept 0.1–10 Hz. Enable **Frequency sweep** and enter
 frequencies in run order to repeat the same center, amplitude and cycle count.

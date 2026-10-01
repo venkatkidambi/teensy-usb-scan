@@ -29,6 +29,7 @@ test('START explains blockers, validates fields, submits once, and reports failu
     }};
     setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls,activity:message=>logs.push(message)});
     node('tab-sinusoidal').onclick();
+    assert.match(node('experiment-motion-detail').textContent, /Starts from rest at center − amplitude/);
     const submit=()=>node('experiment-form').onsubmit({preventDefault(){}});
     for(const [object,key,value,expected] of [
       [state,'connected',false,/Connect the Teensy/],

@@ -146,17 +146,18 @@ Firmware with `plunger_limits: true` in HELLO enforces potentiometer bounds and 
 
 HELLO adds `sine_velocity: true` and retains `sine_position: true` as the legacy UI
 gate for desired sinusoidal position. START S keeps the same parameters; velocity
-is `2π f A cos(2π f t)` using actual elapsed Teensy time. Changed integer SSPD
+is `2π f A sin(2π f t)` using actual elapsed Teensy time. Changed integer SSPD
 magnitudes use bounded adaptive 4–10 ms updates by default; theoretical sign
 crossings are mandatory events. Ordinary busy updates coalesce and recompute
 velocity at actual send time. Reversals wait for each USB completion: SSPD=0,
 then SCAN=new sign, then current theoretical speed. Waveform TX and the full
 reversal each have a 40 ms fault/STOP bound. No waveform DPOS or feedback drift
 correction is used.
-Initial and final center positioning use finite DPOS moves. Final arrival accepts
-the tracked Position Reached confirmation or two fresh encoder publications within
-one count of center, with fresh closed-loop/non-scanning/non-indexing status after
-the command. The run ends on arrival without a center dwell. The waveform
+Initial DPOS targets `center - amplitude`; final DPOS targets center. Both require
+tracked Position Reached. RUNNING starts with SSPD=0 then SCAN=1 at t=0 after
+initial positioning drains. Position follows `center - A cos(2π f t)`. Final
+arrival requires fresh closed-loop/non-scanning/non-indexing status after the
+command. The run ends on arrival without a center dwell. The waveform
 ends with STOP before the final center move. ABORT/fault paths request STOP and
 retain samples. SSPD is changed during the waveform and remains at the last setting.
 
@@ -168,9 +169,11 @@ position identities are suppressed in the plot, without interpolation. Pressure
 plots every logger sample as a continuous line against experiment elapsed time
 (`time_s` in CSV); no I²C completion time column is exported. Both identities and
 per-signal new flags remain in CSV. During the sine waveform, `target` is the
-theoretical position at actual logging time; after the waveform it is center.
+theoretical position at actual logging time; the terminal sample at STOP is the
+negative extremum, and during the return it is center.
 Quasi-static retains its last commanded DPOS target. Metadata adds
-`sine_control: "velocity_scan"` for sinusoidal runs and retains `trajectory_ms: 10`
+`sine_control: "velocity_scan"` and
+`sine_initialization: "negative_extremum_zero_velocity"` for sinusoidal runs and retains `trajectory_ms: 10`
 and `sample_ms: 20`. Signed theoretical velocity can be calculated from saved
 configuration and elapsed time during the waveform; no age field is replaced.
 Controller faults include a specific `reason` and, when observed by the engine,

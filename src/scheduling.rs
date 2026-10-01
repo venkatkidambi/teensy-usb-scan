@@ -24,11 +24,7 @@ pub fn tolerance(amplitude: u32, frequency: u32) -> f64 {
 }
 pub fn crossing_after(frequency: u32, elapsed: u32) -> u32 {
     let phase = u64::from(frequency) * u64::from(elapsed);
-    let crossing = if phase < 250_000 {
-        250_000
-    } else {
-        ((phase - 250_000) / 500_000 + 1) * 500_000 + 250_000
-    };
+    let crossing = (phase / 500_000 + 1) * 500_000;
     crossing.div_ceil(u64::from(frequency)) as u32
 }
 /// Continuous-time maximum, including any velocity extrema between endpoints.
@@ -37,8 +33,14 @@ pub fn held_error(amplitude: u32, frequency: u32, held: f64, from: u32, to: u32)
     let mut error = (held - sine_velocity(amplitude, frequency, from))
         .abs()
         .max((held - sine_velocity(amplitude, frequency, to)).abs());
-    let first = (u64::from(from) * u64::from(frequency)).div_ceil(500_000);
-    let last = u64::from(to) * u64::from(frequency) / 500_000;
+    // Velocity extrema are at quarter + k half cycles in the new phase.
+    let from_phase = u64::from(from) * u64::from(frequency);
+    let to_phase = u64::from(to) * u64::from(frequency);
+    if to_phase < 250_000 {
+        return error;
+    }
+    let first = from_phase.saturating_sub(250_000).div_ceil(500_000);
+    let last = (to_phase - 250_000) / 500_000;
     // At most two extrema are needed even for a missed, multi-cycle poll.
     for k in first..=last.min(first + 1) {
         let peak = sine_max_velocity(amplitude, frequency) * if k % 2 == 0 { 1.0 } else { -1.0 };
@@ -307,9 +309,9 @@ mod tests {
         let a = 1_000_000;
         let f = 2000;
         let at = |t| next(Mode::Adaptive, a, f, t, sine_velocity(a, f, t)) - t;
-        assert_eq!(at(0), MAX_CONTROL_INTERVAL); // position center, velocity maximum
-        assert!(at(110) < at(0)); // approaching position extremum, large acceleration
-        assert_eq!(next(Mode::Adaptive, a, f, 123, 0.0), 125); // priority crossing < minimum
+        assert_eq!(at(125), MAX_CONTROL_INTERVAL); // position center, velocity maximum
+        assert!(at(0) < at(125)); // approaching position extremum, large acceleration
+        assert_eq!(next(Mode::Adaptive, a, f, 248, 0.0), 250); // priority crossing < minimum
         for t in 0..500 {
             let dt = at(t);
             assert!(dt <= MAX_CONTROL_INTERVAL);
@@ -355,11 +357,11 @@ mod tests {
             let to = next(mode, a, f, time, held).min(end);
             error = error.max(held_error(a, f, held, time, to));
             if mode == Mode::Adaptive {
-                // Independent dense sampling of the analytic cosine, including sub-ms times.
+                // Independent dense sampling of the analytic sine, including sub-ms times.
                 for tenth in time * 10..=to * 10 {
                     let v = sine_max_velocity(a, f)
                         * (core::f64::consts::TAU * f64::from(f) * f64::from(tenth) / 10_000_000.0)
-                            .cos();
+                            .sin();
                     assert!(
                         (held - v).abs() <= tolerance(a, f) + 1e-6,
                         "a={a} f={f} t={tenth} error={} tolerance={}",
@@ -370,7 +372,7 @@ mod tests {
             }
             time = to;
         }
-        assert_eq!(turns, 4);
+        assert_eq!(turns, 3); // terminal crossing stops, without another SCAN reversal
         (error, sent, f64::from(sent) * 1000.0 / f64::from(end))
     }
 
@@ -431,7 +433,7 @@ mod tests {
     #[test]
     fn error_includes_hidden_velocity_extrema_and_late_poll_violations() {
         let peak = sine_max_velocity(1_000_000, 2000);
-        assert_eq!(held_error(1_000_000, 2000, 0.0, 200, 300), peak);
+        assert_eq!(held_error(1_000_000, 2000, 0.0, 100, 150), peak);
         let mut d = Diagnostics::default();
         d.held = Some(0.0);
         d.observe(1_000_000, 2000, 500);

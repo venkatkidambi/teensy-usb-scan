@@ -7,7 +7,7 @@ function synthetic(frequency,positionDelay,pressureDelay) {
   const duration=4000/frequency,samples=[];
   for(let ms=0;ms<=duration+1000;ms+=20){
     const age=3+(ms/20)%7,receipt=ms-age;
-    const sine=(t,delay)=>Math.sin(2*Math.PI*frequency*(t-delay)/1000);
+    const sine=(t,delay)=>-Math.cos(2*Math.PI*frequency*(t-delay)/1000);
     samples.push([ms,100+20*sine(receipt,positionDelay),100000+40*sine(ms,positionDelay+pressureDelay),0,age,2,0,ms<duration?20*sine(ms,0):0,0,0,ms/20,ms/20]);
   }
   return {metadata:{config:{kind:'sinusoidal',frequency_mhz:frequency*1000,cycles:4},elapsed_ms:duration+1000},samples};

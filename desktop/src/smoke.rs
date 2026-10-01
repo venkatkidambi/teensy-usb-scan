@@ -49,7 +49,7 @@ pub const SCRIPT: &str = r#"
     for(const [index,frequency] of [1,5].entries()){
       const samples=[],duration=3000/frequency;
       for(let ms=0;ms<=duration;ms+=20){
-        const sine=delay=>Math.sin(2*Math.PI*frequency*(ms-delay)/1000);
+        const sine=delay=>-Math.cos(2*Math.PI*frequency*(ms-delay)/1000);
         samples.push([ms,100+20*sine(0),100000+40*sine(20),0,0,0,0,100+20*sine(0),0,0,ms/20,ms/20]);
       }
       experimentMessage({type:'experiment_dataset',dataset:{archive_index:index,metadata:{run:index+2,config:{kind:'sinusoidal',frequency_mhz:frequency*1000,cycles:3},outcome:'completed',reason:'none',count:samples.length,elapsed_ms:duration},samples}});

@@ -145,13 +145,13 @@ mod tests {
                 let mut actual_direction = 0;
                 let mut reversals = 0;
                 let mut zero_ms = None;
-                let end = 3_000_000 / frequency;
-                for ms in (0..end).step_by(10) {
+                let end = 3_000_000u32.div_ceil(frequency);
+                for ms in (0..end).step_by(10).chain(core::iter::once(end)) {
                     let direction = sine_direction(frequency, ms);
                     let velocity = peak
                         * (core::f64::consts::TAU * f64::from(frequency) * f64::from(ms)
                             / 1_000_000.0)
-                            .cos();
+                            .sin();
                     let crossing = state.direction.is_some_and(|last| last != direction);
                     let mut commands_this_tick = Vec::new();
                     state

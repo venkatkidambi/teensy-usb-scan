@@ -81,10 +81,12 @@ The engine enforces these deadlines instead of the manual motion tracker's
 60 s deadline. TOU3, ELIM, acceleration and travel protections remain unchanged;
 the speed/readback checks cannot guarantee fault-free motion under every load.
 
-For sinusoidal, initial positioning is to center. Phase is calculated from actual
+For sinusoidal, initial positioning is to `center - amplitude`, using tracked DPOS
+and confirmed Position Reached with SCAN inactive. Armed waits for idle transport;
+RUNNING establishes t=0 and sends `SSPD=0` followed by `SCAN=1`. Phase is calculated from actual
 elapsed Teensy milliseconds, not from loop counts. After the requested cycles,
 continuous scanning is stopped, then an exact center target is sent and confirmed
-by fresh arrival feedback. The run finishes immediately on confirmed center arrival;
+by tracked Position Reached. The run finishes immediately on confirmed center arrival;
 there is no center hold. The return is bounded by 10 s.
 All terminal paths request STOP; metadata says whether it could be queued.
 
@@ -94,8 +96,8 @@ See the [scheduler implementation](src/scheduling.rs) for the error budget and
 the [waveform transport implementation](src/waveform_tx.rs) for crossing deadlines.
 
 After confirmed initial positioning, the Teensy evaluates the desired position
-`x(t) = center + A * sin(2π f t)` and commands its derivative
-`v(t) = 2π f A * cos(2π f t)`. A is in µm, f in Hz, and v in µm/s.
+`x(t) = center - A * cos(2π f t)` and commands its derivative
+`v(t) = 2π f A * sin(2π f t)`. A is in µm, f in Hz, and v in µm/s.
 With wire units, `vmax = 2π * frequency_millihz * amplitude_nm / 1_000_000`.
 Phase uses actual elapsed monotonic milliseconds, reduced modulo one cycle using
 integer arithmetic; no loop-count phase integration or catch-up bursts occur.
@@ -136,13 +138,10 @@ foreground poll uses actual time; lateness of 10 ms or more faults and stops.
 Firmware waits for STOP's transport to drain, sets SSPD to rounded vmax if it
 changed, waits for that transfer, then sends a tracked `DPOS=<center>`.
 The 10 s final-move budget includes these drains; it is a timeout, not a hold.
-After the final command drains, completion accepts either the tracked DPOS echo
-and Position Reached, or two distinct new encoder publications within one count
-(0.078 µm) of center. Fresh post-command status must show closed loop active,
-searching index clear and scanning clear. Cached encoder reads do not count; an
-out-of-tolerance publication resets confirmation. This lets the run finish at
-center without waiting for a delayed controller settling flag. Initial positioning
-and quasi-static arrival/hold handling retain their existing confirmation rules.
+After the final command drains, completion requires the tracked DPOS echo and
+Position Reached. Fresh post-command status must show closed loop active,
+searching index clear and scanning clear. EPOS proximity alone cannot complete
+this move. Quasi-static arrival/hold handling retains its existing rules.
 Terminal cleanup requests STOP again and retains the dataset. The last selected
 SSPD remains configured afterward; there is no SAVE or speed restoration.
 
@@ -194,7 +193,7 @@ never silently shortened. An 81.9 s bound reserves all 4,096 records.
 | 16 | epos_age_ms | u32, logging time minus EPOS reception time |
 | 20 | pressure_age_ms | u32, logging time minus pressure publication time |
 | 24 | stat_age_ms | u32, logging time minus STAT reception time |
-| 28 | target | i32, theoretical sine position at actual logging time (center after waveform); last DPOS target for quasi-static |
+| 28 | target | i32, theoretical negative-cosine position at actual logging time (endpoint at STOP, center during return); last DPOS target for quasi-static |
 | 32 | controller_ticks | u32, latest raw XD-C TIME, 0.1 ms units |
 | 36 | controller_age_ms | u32, TIME reception age; UINT32_MAX means unavailable |
 | 40 | epos_generation | u32, increments for each parsed EPOS publication, even if value is unchanged |
@@ -375,3 +374,54 @@ all acquired position/pressure records still transfer. Control and recording
 intervals remain unchanged. The 4 ms minimum can exceed the scheduler’s 7%
 velocity-error target at high frequencies; high-frequency tracking needs hardware
 validation.
+
+## Zero-velocity initialization and hardware A/B check
+
+The center parameter remains the oscillation center. Both `center ± amplitude`
+are validated against the existing encoder travel range before motion. The old
+phase was `x=C+A sin(ωt), v=Aω cos(ωt)` and started at C with peak velocity.
+The current phase is `x=C-A cos(ωt), v=Aω sin(ωt)` and starts at C−A at rest.
+No feedback correction, waveform DPOS, velocity ramp or phase compensation is used.
+The adaptive error tolerance, 4–10 ms bounds and transport deadlines are unchanged;
+only the analytic extrema/crossing locations move with the phase origin.
+
+One cycle remains 1/f, with no discarded or extra cycle. Mathematical direction
+crossings are at T/2 and T, with none at t=0. A continuing waveform has two per
+cycle; the finite N-cycle run has `2N−1` SCAN reversal sequences because the final
+boundary at N/f stops and returns to center by DPOS. Reversal metadata counts
+only SCAN sequences, not that terminal DPOS turnaround. The existing 1 ms clock
+ends at ceil(N/f in ms). A sample on that boundary records the exact negative
+extremum; later samples record the center return target. Raw EPOS is unchanged.
+Metadata `sine_initialization: "negative_extremum_zero_velocity"` identifies the
+new phase in downloaded datasets and CSV. Desktop commanded plots and phase fits
+use recorded targets, so old datasets keep their original phase too.
+
+Hardware verification (not performed by this change; no hardware was flashed):
+
+1. Use the exact center C and amplitude A from the previously repeatable slipping
+   run, with the same encoder reference, load, orientation, controller settings,
+   initial DPOS speed and pressure setup. Keep those values fixed for both builds.
+   Compare the pre-change revision (A) and this revision (B), both with the default
+   adaptive scheduler. Arrange firmware installation separately.
+2. At 1.0 Hz, request 5 cycles for 5 repetitions per build, alternating builds
+   A/B between repetitions. Repeat at 2.0 Hz for another 5 repetitions per build.
+   If the original slip occurred at another frequency, repeat there too. Return
+   to C and use the same 5 s rest before each START. Save every run's full CSV.
+3. For B, verify initial DPOS is C−A and Position Reached precedes RUNNING; first
+   waveform packets are SSPD=0 then SCAN=1. At 1 Hz, commanded positions at
+   0/250/500/750/1000 ms are C−A/C/C+A/C/C−A. SCAN reversals occur at
+   500,1000,...,4500 ms; STOP is at 5000 ms, followed by DPOS=C and Position
+   Reached. At 2 Hz, halve all these times. Cycle 1 must be retained.
+4. Compare cycle 1 with cycles 2–5 within each build, using each build's own
+   theoretical phase. Plot raw unique EPOS at its recorded host receipt time,
+   without filtering or shifting it. For 0≤t<T and separately 0≤t<T/4, report
+   max |EPOS−x(t)| and RMS error in µm, peak-to-peak travel, and any visible
+   startup stall/jump. Also overlay cycles 1–5 at their own cycle-relative time;
+   compare first-cycle residual against the later-cycle median at matching
+   receipt-time bins. Do not interpret ordinary transport lag as slip removal.
+5. Report all 5 paired trials at each frequency. Startup slip is eliminated only
+   if B's first cycle no longer shows the repeatable stall/jump and falls within
+   the later-cycle repeatability envelope, while A still reproduces it. Retain
+   backpressure/error metadata and verify 200 Hz pressure acquisition, ~50 Hz
+   EPOS, 50 Hz recording, expected duration and confirmed center return. Repeat
+   ABORT during startup, waveform and return, plus one unchanged quasi-static run.

@@ -150,8 +150,7 @@ impl Engine<'_> {
             && self.scan.direction.is_some_and(|last| last != direction);
         if crossing {
             let phase = u64::from(elapsed) * u64::from(frequency);
-            let event = ((phase - 250_000) / 500_000 * 500_000 + 250_000)
-                .div_ceil(u64::from(frequency)) as u32;
+            let event = (phase / 500_000 * 500_000).div_ceil(u64::from(frequency)) as u32;
             self.scheduling.reversal_lateness.add(elapsed - event);
             self.waveform_tx.phase = Phase::NeedZero;
             self.waveform_tx.reversal_started = event;
