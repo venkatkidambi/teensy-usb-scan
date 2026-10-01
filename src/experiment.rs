@@ -1,6 +1,8 @@
 //! Foreground-only autonomous controller. Hardware IO stays behind a Rust trait.
 use crate::{experiment_data::*, pressure::Reading, protocol::Telemetry, xeryon_motion};
 
+#[path = "envelope.rs"]
+pub mod envelope;
 #[path = "reversal.rs"]
 pub mod reversal;
 #[path = "scheduling.rs"]
@@ -87,6 +89,7 @@ pub struct Engine<'a> {
     waveform_tx: waveform_tx::Transport,
     pub scheduling: scheduling::Diagnostics,
     pub reversals: reversal::Diagnostics<'a>,
+    pub envelope: envelope::Envelope,
     motion_changed_ms: u32,
     fault_stat: Option<u32>,
     feedback_pending: bool,
@@ -143,6 +146,7 @@ impl<'a> Engine<'a> {
             waveform_tx: waveform_tx::Transport::default(),
             scheduling: scheduling::Diagnostics::default(),
             reversals: reversal::Diagnostics::new(&mut []),
+            envelope: envelope::Envelope::configured(),
             motion_changed_ms: 0,
             fault_stat: None,
             feedback_pending: false,
@@ -262,6 +266,7 @@ impl<'a> Engine<'a> {
         self.required_samples = required;
         self.len = 0;
         self.reversals.reset();
+        self.envelope.reset(t.epos_generation);
         let mode = self.scheduling.mode;
         self.scheduling = scheduling::Diagnostics::default();
         self.scheduling.mode = mode;
@@ -346,6 +351,7 @@ impl<'a> Engine<'a> {
             self.scheduling.refresh(io.tx_progress());
         }
         self.reversals.refresh(io.tx_progress(), self.started_ms);
+        self.waveform_tx = waveform_tx::Transport::default();
         io.end_timing();
         #[cfg(not(test))]
         crate::fault::mark(5);
@@ -555,6 +561,7 @@ impl<'a> Engine<'a> {
             self.max_epos_age = now.wrapping_sub(t.samples[0].ms);
             self.max_pressure_age = now.wrapping_sub(p.ms);
             self.started_ms = now;
+            self.envelope.reset(t.epos_generation);
             self.next_sample = 0;
             self.next_target = 0;
             self.scan = xeryon_motion::ScanState::default();
@@ -565,6 +572,12 @@ impl<'a> Engine<'a> {
         }
         let elapsed = now.wrapping_sub(self.started_ms);
         self.elapsed_ms = elapsed;
+        if self.center_move == CenterMove::None
+            && self.envelope.exceeded(self.config.unwrap(), t, now)
+        {
+            self.finish(State::Fault, "Sinusoidal trajectory envelope exceeded", io);
+            return;
+        }
         // A deadline is also a hard bound on storage. Never synthesize catch-up samples.
         if elapsed > self.duration_ms {
             self.finish(State::Fault, "Acquisition deadline missed", io);
@@ -705,6 +718,7 @@ impl<'a> Engine<'a> {
                     }
                 } else if elapsed >= waveform_ms {
                     self.waveform_tx.close_busy(elapsed, &mut self.scheduling);
+                    self.waveform_tx = waveform_tx::Transport::default();
                     if elapsed - waveform_ms >= TRAJECTORY_MS {
                         Err("Trajectory deadline missed")
                     } else {
@@ -744,10 +758,11 @@ impl<'a> Engine<'a> {
             self.run
         )?;
         self.config.unwrap().write_json(out)?;
+        self.envelope.write(out)?;
         if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) {
             write!(
                 out,
-                ",\"sine_control\":\"velocity_scan\",\"sine_initialization\":\"negative_extremum_zero_velocity\",\"reversal_count\":{},\"reversal_total\":{},\"reversal_window_ms\":{},\"reversals\":[]",
+                ",\"sine_control\":\"velocity_scan\",\"sine_initialization\":\"negative_extremum_zero_velocity\",\"reversal_count\":{},\"reversal_total\":{},\"reversal_diagnostic_version\":2,\"reversal_window_ms\":{},\"reversals\":[]",
                 self.transferred_reversals(),
                 self.reversals.total,
                 reversal::WINDOW_MS
@@ -826,13 +841,11 @@ impl<'a> Engine<'a> {
         self.transfer_next = 0;
         Ok(())
     }
-    // At higher frequencies there can be more reversals than diagnostic slots
-    // in the sample transfer. Advertise only what the bounded transfer can send;
-    // reversal_total still reports every observed crossing.
+    // One diagnostic per two samples covers all supported reversal frequencies.
     fn transferred_reversals(&self) -> usize {
-        self.reversals.len.min(self.len.div_ceil(CHUNK_RECORDS) * 2)
+        self.reversals.len.min(self.len.div_ceil(CHUNK_RECORDS))
     }
-    /// Two bounded diagnostics per existing 16-record chunk. Kept out of RUNNING
+    /// One bounded diagnostic per two-record chunk. Kept out of RUNNING
     /// traffic; the desktop collects them in metadata for raw CSV export.
     pub fn chunk_header(
         &self,
@@ -845,10 +858,10 @@ impl<'a> Engine<'a> {
         write!(
             out,
             "{{\"type\":\"data_chunk\",\"id\":{id},\"run\":{run},\"offset\":{offset},\"bytes\":{bytes},\"reversal_offset\":{},\"reversals\":[",
-            (offset / CHUNK_RECORDS * 2).min(self.transferred_reversals())
+            (offset / CHUNK_RECORDS).min(self.transferred_reversals())
         )?;
-        let first = offset / CHUNK_RECORDS * 2;
-        for i in first..(first + 2).min(self.transferred_reversals()) {
+        let first = offset / CHUNK_RECORDS;
+        for i in first..(first + 1).min(self.transferred_reversals()) {
             if i != first {
                 write!(out, ",")?;
             }
@@ -1198,7 +1211,7 @@ mod tests {
     }
     #[test]
     fn ten_hz_runs_complete_with_bounded_downloadable_diagnostics() {
-        for cycles in [1, 10, 719] {
+        for cycles in [1, 10, 144] {
             let mut records = [Record::EMPTY; CAPACITY];
             let mut turns = [reversal::Reversal::EMPTY; reversal::CAPACITY];
             let mut e = Engine::new(&mut records).with_reversals(&mut turns);
@@ -1220,7 +1233,7 @@ mod tests {
             assert_eq!(e.reversals.total, cycles * 2 - 1); // final boundary stops for DPOS return
             let count = e.transferred_reversals();
             assert!(count <= reversal::CAPACITY);
-            assert!(count <= e.len.div_ceil(CHUNK_RECORDS) * 2);
+            assert_eq!(count, (cycles * 2 - 1) as usize);
             let mut metadata = String::new();
             e.metadata(&mut metadata, 1).unwrap();
             assert!(metadata.contains(&format!("\"reversal_count\":{count},")));
@@ -1845,6 +1858,120 @@ mod tests {
         io.clock = now;
         let (t, p) = feedback(now, 123, true);
         e.poll(now, &t, p, io);
+    }
+
+    #[test]
+    fn completion_identity_rejects_old_future_and_duplicate_progress_at_each_stage() {
+        for stage in 0..3 {
+            for wrong in [0, 2] {
+                let mut records = [Record::EMPTY; 1024];
+                let mut e = Engine::new(&mut records);
+                let mut io = Io::default();
+                start(&mut e, sinusoidal(), 0, &mut io);
+                for elapsed in 1..500 {
+                    waveform_poll(&mut e, &mut io, elapsed);
+                }
+                io.tracked = true;
+                waveform_poll(&mut e, &mut io, 500);
+                for i in 0..stage {
+                    io.complete_one(e.started_ms + 501 + i);
+                    waveform_poll(&mut e, &mut io, 501 + i);
+                }
+                let sent = io.scans.len();
+                let expected = io.progress[0];
+                io.progress[1] = expected - 1 + wrong;
+                io.busy = false; // An idle flag alone is not proof of this command.
+                waveform_poll(&mut e, &mut io, 504 + stage);
+                assert_eq!(e.reason, "Xeryon command completion identity mismatch");
+                assert_eq!(io.scans.len(), sent);
+                assert!(e.stop_queued && e.len > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn abort_disconnect_and_epoch_change_preempt_need_zero_and_every_wait() {
+        for stage in 0..4 {
+            for cause in 0..3 {
+                let mut records = [Record::EMPTY; 1024];
+                let mut e = Engine::new(&mut records);
+                let mut io = Io::default();
+                start(&mut e, sinusoidal(), 0, &mut io);
+                for elapsed in 1..500 {
+                    waveform_poll(&mut e, &mut io, elapsed);
+                }
+                io.busy = stage == 0;
+                waveform_poll(&mut e, &mut io, 500);
+                for i in 1..stage {
+                    waveform_poll(&mut e, &mut io, 500 + i);
+                }
+                let sent = io.scans.len();
+                let now = e.started_ms + 504;
+                let (mut t, p) = feedback(now, 123, true);
+                match cause {
+                    0 => e.abort(&mut io),
+                    1 => t.mounted = false,
+                    _ => t.epoch += 1,
+                }
+                e.poll(now, &t, p, &mut io);
+                assert!(e.data_ready() && e.stop_queued);
+                io.busy = false;
+                waveform_poll(&mut e, &mut io, 505);
+                assert_eq!(io.scans.len(), sent);
+                assert_eq!(io.stops, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn envelope_is_fault_only_fresh_new_generation_and_retains_trigger() {
+        for stale in [false, true] {
+            let mut records = [Record::EMPTY; 1024];
+            let mut e = Engine::new(&mut records);
+            e.envelope.margin_nm = Some(1000);
+            e.envelope.max_receipt_age_ms = 25;
+            let mut io = Io::default();
+            start(&mut e, sinusoidal(), u32::MAX - 100, &mut io);
+            let now = e.started_ms.wrapping_add(30);
+            let (mut t, p) = feedback(now, 500, true);
+            // Duplicate cache, even outside the envelope, never triggers.
+            e.next_sample = 30;
+            e.next_target = 30;
+            e.poll(now, &t, p, &mut io);
+            assert_eq!(e.state, State::Running);
+            t.epos_generation += 1;
+            if stale {
+                t.samples[0].ms = now.wrapping_sub(26);
+            }
+            e.poll(now, &t, p, &mut io);
+            if stale {
+                assert_eq!(e.state, State::Running);
+                assert!(e.envelope.violation.is_none());
+            } else {
+                assert_eq!(e.reason, "Sinusoidal trajectory envelope exceeded");
+                assert_eq!(e.outcome, "faulted");
+                assert!(e.stop_queued && e.len > 0);
+                assert_eq!(e.envelope.violation, Some((500, now, t.epos_generation)));
+                let sent = io.scans.len();
+                waveform_poll(&mut e, &mut io, 31);
+                assert_eq!(io.scans.len(), sent);
+                assert_eq!(io.targets.len(), 1); // never a corrective DPOS
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostics_cover_all_accepted_cycles_and_reject_overflow_before_motion() {
+        let c = ExperimentConfig::Sinusoidal {
+            center_nm: 0,
+            amplitude_nm: 10000,
+            frequency_mhz: 10000,
+            cycles: 145,
+        };
+        assert_eq!(
+            c.validate(),
+            Err("Experiment exceeds fixed reversal diagnostics (144 cycles)")
+        );
     }
 
     #[test]

@@ -158,8 +158,8 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
     assert.equal(node('experiment-data-panel').hidden, false);
     assert.equal(node('experiment-phase').hidden, false);
     assert.match(node('experiment-data-summary').textContent, /COMPLETED · Run 8 · sinusoidal/);
-    assert.match(node('experiment-result-summary').textContent, /positive peak: 1 reversals, 10–10 ms zero→nonzero, max receipt-time error 0.156 µm/);
-    assert.match(node('experiment-result-summary').textContent, /negative peak: 1 reversals, 10–10 ms zero→nonzero, max receipt-time error 0.234 µm/);
+    assert.match(node('experiment-result-summary').textContent, /positive peak: 1 reversals, 10–10 ms zero→resume queued, max receipt-time error 0.156 µm/);
+    assert.match(node('experiment-result-summary').textContent, /negative peak: 1 reversals, 10–10 ms zero→resume queued, max receipt-time error 0.234 µm/);
     assert.equal(node('experiment-save').disabled, false);
     const saving = node('experiment-save').onclick();
     assert.equal(node('experiment-save').disabled, true);

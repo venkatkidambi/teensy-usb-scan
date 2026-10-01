@@ -3,7 +3,8 @@ pub const CAPACITY: usize = 4096;
 pub const RECORD_FIELDS: usize = 12;
 pub const DATA_VERSION: u32 = 2;
 pub const RECORD_BYTES: usize = RECORD_FIELDS * 4;
-pub const CHUNK_RECORDS: usize = 16;
+pub const CHUNK_RECORDS: usize = 2;
+pub const REVERSAL_CAPACITY: usize = 288;
 pub const SAMPLE_MS: u32 = 20; // 50 Hz experiment recording
 pub const TRAJECTORY_MS: u32 = 10; // Fixed-mode period and existing lateness fault bound
 pub const MOVE_TIMEOUT_MS: u32 = 10_000;
@@ -179,6 +180,9 @@ impl ExperimentConfig {
                         .checked_add(i64::from(amplitude_nm))
                         .ok_or("Trajectory overflow")?,
                 )?;
+                if u64::from(cycles) * 2 - 1 > REVERSAL_CAPACITY as u64 {
+                    return Err("Experiment exceeds fixed reversal diagnostics (144 cycles)");
+                }
                 let vmax = sine_max_velocity(amplitude_nm, frequency_mhz);
                 if !vmax.is_finite()
                     || vmax <= 0.0

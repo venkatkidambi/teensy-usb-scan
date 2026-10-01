@@ -60,7 +60,9 @@ void tuh_cdc_xfer_error_cb(uint8_t idx, uint8_t ep_addr, xfer_result_t result) {
 }
 
 void tuh_cdc_tx_complete_cb(uint8_t idx) {
-  if (state != READY || idx != cdc_index) return;
+  // A redundant idle callback must not fabricate a command completion. The
+  // CDC driver contract is one callback per submitted nonempty short packet.
+  if (state != READY || idx != cdc_index || !tx_pending) return;
   observe_tx(tusb_time_millis_api());
   if (timing) {
     ++tx_completed;

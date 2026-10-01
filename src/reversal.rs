@@ -1,9 +1,9 @@
 //! Bounded post-run diagnostics. No additional commands, sampling or allocation.
 use crate::{experiment_data::*, protocol::Telemetry, xeryon_motion::ScanCommand};
 
-// Bounded diagnostic storage. Higher-frequency runs report total crossings
-// separately; transfer retains only the prefix that fits the sample chunks.
-pub const CAPACITY: usize = 288;
+// Configuration reserves every reversal; bounded samples within each window
+// explicitly count truncation. Transport emits one reversal per sample chunk.
+pub const CAPACITY: usize = crate::experiment_data::REVERSAL_CAPACITY;
 pub const WINDOW_MS: u32 = 40;
 
 #[derive(Clone, Copy, Default)]
@@ -139,11 +139,36 @@ mod tests {
         d.records[1].write(&mut text).unwrap();
         assert!(text.contains("[1,0,750,null],null,null"));
         assert_eq!(d.total, 2);
-        assert!(core::mem::size_of::<Reversal>() * CAPACITY <= 61_000);
+        assert!(core::mem::size_of::<Reversal>() * CAPACITY <= 170_000);
     }
 
     #[test]
-    fn worst_case_two_reversals_and_binary_payload_fit_console_and_desktop_frames() {
+    fn rounded_zero_resume_has_identity_and_does_not_capture_later_ordinary_speed() {
+        let mut records = [Reversal::EMPTY; 1];
+        let mut d = Diagnostics::new(&mut records);
+        d.tick(500, 500, &Telemetry::new(), -1, true);
+        for (i, command, crossing) in [
+            (1, ScanCommand::Speed(0), true),
+            (2, ScanCommand::Direction(-1), true),
+            (3, ScanCommand::Speed(0), false),
+            (4, ScanCommand::Speed(7), false),
+        ] {
+            d.sent(
+                &[command],
+                TxProgress([i, i - 1, 0, 499 + i, 0, 0]),
+                0,
+                499 + i,
+                crossing,
+            );
+            d.refresh(TxProgress([i, i, 0, 0, 0, 500 + i]), 0);
+        }
+        assert_eq!(d.records[0].events[5].value, 0);
+        assert_eq!(d.records[0].events[5].sequence, 3);
+        assert_eq!(d.records[0].events[5].done, 504);
+    }
+
+    #[test]
+    fn worst_case_reversal_and_binary_payload_fit_console_and_desktop_frames() {
         let r = Reversal {
             direction: -1,
             crossing_ms: u32::MAX,
@@ -159,6 +184,21 @@ mod tests {
             backlog_polls: u32::MAX,
             busy_polls: u32::MAX,
             stat_or: u32::MAX,
+            detail: Detail {
+                theoretical_ms: u32::MAX,
+                scheduled: [u32::MAX; 3],
+                transitions: [u32::MAX; 5],
+                window: [[u32::MAX; 11]; 6],
+                count: 6,
+                dropped: u32::MAX,
+                excursion: u32::MAX,
+                coalesced: u32::MAX,
+                lateness: u32::MAX,
+                max_busy: u32::MAX,
+                requested: u32::MAX,
+                target: i32::MIN,
+                stat_changes: u32::MAX,
+            },
         };
         let mut samples = [Record::EMPTY; 1];
         let mut records = [r; 2];
@@ -230,6 +270,42 @@ pub struct Reversal {
     pub backlog_polls: u32,
     pub busy_polls: u32,
     pub stat_or: u32,
+    pub detail: Detail,
+}
+
+/// Version 2 extension; raw host observations, never inferred physical timing.
+#[derive(Clone, Copy)]
+pub struct Detail {
+    pub theoretical_ms: u32,
+    pub scheduled: [u32; 3],
+    pub transitions: [u32; 5], // NeedZero, AwaitZero, AwaitDirection, AwaitResume, Normal; +1
+    pub window: [[u32; 11]; 6], // elapsed, EPOS, STAT, ages, generation, TIME, age, RX backlog, RX peak, TX busy
+    pub count: usize,
+    pub dropped: u32,
+    pub excursion: u32,
+    pub coalesced: u32,
+    pub lateness: u32,
+    pub max_busy: u32,
+    pub requested: u32,
+    pub target: i32,
+    pub stat_changes: u32,
+}
+impl Detail {
+    pub const EMPTY: Self = Self {
+        theoretical_ms: 0,
+        scheduled: [0; 3],
+        transitions: [0; 5],
+        window: [[0; 11]; 6],
+        count: 0,
+        dropped: 0,
+        excursion: 0,
+        coalesced: 0,
+        lateness: 0,
+        max_busy: 0,
+        requested: 0,
+        target: 0,
+        stat_changes: 0,
+    };
 }
 impl Reversal {
     pub const EMPTY: Self = Self {
@@ -247,6 +323,7 @@ impl Reversal {
         backlog_polls: 0,
         busy_polls: 0,
         stat_or: 0,
+        detail: Detail::EMPTY,
     };
     pub fn write(&self, out: &mut impl core::fmt::Write) -> core::fmt::Result {
         write!(
@@ -273,7 +350,35 @@ impl Reversal {
         }
         write!(
             out,
-            "],\"max_error_counts\":{},\"rx_backlog_polls\":{},\"tx_busy_polls\":{},\"stat_or\":{}}}",
+            "],\"command_tokens\":{:?}",
+            self.events.map(|e| e.sequence)
+        )?;
+        write!(
+            out,
+            ",\"detail\":{{\"theoretical_ms\":{},\"scheduled\":{:?},\"transitions\":{:?},\"window\":[",
+            self.detail.theoretical_ms, self.detail.scheduled, self.detail.transitions
+        )?;
+        for (i, sample) in self.detail.window[..self.detail.count].iter().enumerate() {
+            if i != 0 {
+                write!(out, ",")?;
+            }
+            write!(out, "{:?}", sample)?;
+        }
+        write!(
+            out,
+            "],\"dropped\":{},\"excursion_counts\":{},\"coalesced\":{},\"lateness_ms\":{},\"max_busy_ms\":{},\"requested_sspd\":{},\"target_counts\":{},\"stat_changes\":{}}}",
+            self.detail.dropped,
+            self.detail.excursion,
+            self.detail.coalesced,
+            self.detail.lateness,
+            self.detail.max_busy,
+            self.detail.requested,
+            self.detail.target,
+            self.detail.stat_changes
+        )?;
+        write!(
+            out,
+            ",\"max_error_counts\":{},\"rx_backlog_polls\":{},\"tx_busy_polls\":{},\"stat_or\":{}}}",
             self.max_error_counts, self.backlog_polls, self.busy_polls, self.stat_or
         )
     }
@@ -293,6 +398,14 @@ pub struct Diagnostics<'a> {
     last_backlog: u32,
     recording: bool,
     error_generation: Option<u32>,
+    pre: [[u32; 11]; 2],
+    pre_len: usize,
+    observed_generation: Option<u32>,
+    busy_start: Option<u32>,
+    max_busy: u32,
+    excursion: u32,
+    stat_changes: u32,
+    last_stat: Option<i64>,
 }
 impl<'a> Diagnostics<'a> {
     pub fn new(records: &'a mut [Reversal]) -> Self {
@@ -310,6 +423,14 @@ impl<'a> Diagnostics<'a> {
             last_backlog: 0,
             recording: false,
             error_generation: None,
+            pre: [[0; 11]; 2],
+            pre_len: 0,
+            observed_generation: None,
+            busy_start: None,
+            max_busy: 0,
+            excursion: 0,
+            stat_changes: 0,
+            last_stat: None,
         }
     }
     pub fn reset(&mut self) {
@@ -320,6 +441,10 @@ impl<'a> Diagnostics<'a> {
         self.window = u64::MAX;
         self.last_backlog = 0;
         self.recording = false;
+        self.pre_len = 0;
+        self.observed_generation = None;
+        self.busy_start = None;
+        self.last_stat = None;
     }
     pub fn refresh(&mut self, progress: TxProgress, start: u32) {
         for event in &mut self.history {
@@ -343,6 +468,39 @@ impl<'a> Diagnostics<'a> {
         t: &Telemetry,
         busy: bool,
     ) {
+        if busy {
+            self.busy_start.get_or_insert(elapsed);
+        }
+        let busy_ms = self
+            .busy_start
+            .map_or(0, |start| elapsed.wrapping_sub(start));
+        if !busy {
+            self.busy_start = None;
+        }
+        let sample = [
+            elapsed,
+            t.samples[0].value as u32,
+            t.samples[2].value as u32,
+            now.wrapping_sub(t.samples[0].ms),
+            now.wrapping_sub(t.samples[2].ms),
+            t.epos_generation,
+            t.samples[6].value as u32,
+            if t.samples[6].valid {
+                now.wrapping_sub(t.samples[6].ms)
+            } else {
+                u32::MAX
+            },
+            t.transport.rx_backlog_polls,
+            t.transport.rx_peak,
+            u32::from(busy),
+        ];
+        let fresh = t.samples[0].valid && self.observed_generation != Some(t.epos_generation);
+        if fresh {
+            self.observed_generation = Some(t.epos_generation);
+            self.pre.rotate_left(1);
+            self.pre[1] = sample;
+            self.pre_len = (self.pre_len + 1).min(2);
+        }
         let delta = t.transport.rx_backlog_polls.wrapping_sub(self.last_backlog);
         self.last_backlog = t.transport.rx_backlog_polls;
         let ExperimentConfig::Sinusoidal {
@@ -372,13 +530,37 @@ impl<'a> Diagnostics<'a> {
             self.backlog = 0;
             self.busy = 0;
             self.stat = 0;
+            self.max_busy = 0;
+            self.excursion = 0;
+            self.stat_changes = 0;
+            self.last_stat = None;
+        }
+        self.max_busy = self.max_busy.max(busy_ms);
+        if t.samples[2].valid {
+            self.stat_changes += u32::from(self.last_stat.is_some_and(|v| v != t.samples[2].value));
+            self.last_stat = Some(t.samples[2].value);
         }
         // Compare raw EPOS with theoretical position at its HOST receipt time.
         // Transit/mechanical delay is not corrected or known.
-        if self.error_generation != Some(t.epos_generation)
+        if t.samples[0].valid
+            && self.error_generation != Some(t.epos_generation)
             && let Some(receipt) = elapsed.checked_sub(now.wrapping_sub(t.samples[0].ms))
+            && (u64::from(receipt) * u64::from(frequency_mhz)).abs_diff(peak)
+                <= u64::from(WINDOW_MS * frequency_mhz)
         {
             self.error_generation = Some(t.epos_generation);
+            let extremum = counts(
+                center_nm
+                    + if crossing % 2 == 1 {
+                        i64::from(amplitude_nm)
+                    } else {
+                        -i64::from(amplitude_nm)
+                    },
+            )
+            .unwrap();
+            let beyond =
+                (t.samples[0].value - i64::from(extremum)) * if crossing % 2 == 1 { 1 } else { -1 };
+            self.excursion = self.excursion.max(beyond.max(0) as u32);
             let target = super::sine_target(center_nm, amplitude_nm, frequency_mhz, receipt);
             self.error = self
                 .error
@@ -396,6 +578,17 @@ impl<'a> Diagnostics<'a> {
             record.backlog_polls = self.backlog;
             record.busy_polls = self.busy;
             record.stat_or = self.stat;
+            record.detail.excursion = self.excursion;
+            record.detail.max_busy = self.max_busy;
+            record.detail.stat_changes = self.stat_changes;
+            if fresh && elapsed > record.crossing_ms {
+                if record.detail.count < record.detail.window.len() {
+                    record.detail.window[record.detail.count] = sample;
+                    record.detail.count += 1;
+                } else {
+                    record.detail.dropped += 1;
+                }
+            }
         }
     }
     pub fn tick(&mut self, elapsed: u32, now: u32, t: &Telemetry, direction: i8, crossing: bool) {
@@ -406,6 +599,11 @@ impl<'a> Diagnostics<'a> {
                 *record = Reversal::EMPTY;
                 record.direction = direction;
                 record.crossing_ms = elapsed;
+                record.detail.window[..self.pre_len].copy_from_slice(&self.pre[2 - self.pre_len..]);
+                record.detail.count = self.pre_len;
+                record.detail.excursion = self.excursion;
+                record.detail.max_busy = self.max_busy;
+                record.detail.stat_changes = self.stat_changes;
                 record.events[..3].copy_from_slice(&self.history);
                 record.feedback[0] = self.previous;
                 record.feedback[1] = Snapshot::new(elapsed, now, t);
@@ -418,6 +616,53 @@ impl<'a> Diagnostics<'a> {
             }
         }
         self.previous = Snapshot::new(elapsed, now, t);
+    }
+    pub fn stage(
+        &mut self,
+        stage: usize,
+        elapsed: u32,
+        theoretical: u32,
+        requested: u32,
+        target: i32,
+    ) {
+        if let Some(r) = self
+            .records
+            .get_mut(self.len.wrapping_sub(1))
+            .filter(|_| self.recording)
+        {
+            r.detail.transitions[stage] = elapsed + 1;
+            r.detail.theoretical_ms = theoretical;
+            if stage == 0 {
+                r.detail.requested = requested;
+                r.detail.target = target;
+            }
+        }
+    }
+    pub fn evaluation(&mut self, late: u32, coalesced: bool) {
+        if let Some(r) = self
+            .records
+            .get_mut(self.len.wrapping_sub(1))
+            .filter(|r| self.recording && r.detail.transitions[4] == 0)
+        {
+            r.detail.lateness = r.detail.lateness.max(late);
+            r.detail.coalesced += u32::from(coalesced);
+        }
+    }
+    pub fn scheduled(&mut self, command: ScanCommand, scheduled: u32, crossing: bool) {
+        if let Some(r) = self
+            .records
+            .get_mut(self.len.wrapping_sub(1))
+            .filter(|_| self.recording)
+        {
+            let index = match command {
+                ScanCommand::Direction(_) => 1,
+                _ if crossing => 0,
+                _ => 2,
+            };
+            if index != 2 || r.events[5].kind == 0 {
+                r.detail.scheduled[index] = scheduled;
+            }
+        }
     }
     pub fn sent(
         &mut self,
@@ -451,7 +696,7 @@ impl<'a> Diagnostics<'a> {
             {
                 if crossing {
                     record.events[if kind == 2 { 4 } else { 3 }] = event;
-                } else if kind == 1 && value > 0 && record.events[5].kind == 0 {
+                } else if kind == 1 && record.events[4].kind != 0 && record.events[5].kind == 0 {
                     record.events[5] = event;
                     record.feedback[2] = self.previous;
                 }

@@ -139,12 +139,18 @@ export function experimentMessage(message) {
         const turns=m.reversals.filter(r=>r.direction===direction);
         if(!turns.length)return `${label} peak: no reversal captured`;
         const durations=turns.filter(r=>r.commands[3]&&r.commands[5]).map(r=>r.commands[5][2]-r.commands[3][2]);
-        const duration=durations.length?`${Math.min(...durations)}–${Math.max(...durations)} ms zero→nonzero`:'resume not captured';
+        const duration=durations.length?`${Math.min(...durations)}–${Math.max(...durations)} ms zero→resume queued`:'resume not captured';
         const error=Math.max(...turns.map(r=>r.max_error_counts))*.078;
         return `${label} peak: ${turns.length} reversals, ${duration}, max receipt-time error ${error.toFixed(3)} µm`;
       });
       $('experiment-result-summary').textContent+=` · ${summary.join(' · ')} · reversal command/feedback details in CSV metadata`;
+      const measured=m.reversals.filter(r=>r.detail);
+      if(measured.length){
+        const worst=measured.reduce((a,b)=>a.detail.excursion_counts>=b.detail.excursion_counts?a:b);
+        $('experiment-result-summary').textContent+=` · largest measured envelope excursion ${(worst.detail.excursion_counts*.078).toFixed(3)} µm near ${(worst.detail.theoretical_ms/1000).toFixed(3)} s (host receipt timing)`;
+      }
     }
+    if(m.envelope&&m.config.kind==='sinusoidal')$('experiment-result-summary').textContent+=m.envelope.enabled?` · envelope STOP margin ${(m.envelope.margin_nm/1000).toFixed(3)} µm`:' · envelope STOP guard disabled';
     if(m.reversal_total>m.reversal_count)$('experiment-result-summary').textContent+=` · reversal details retained for ${m.reversal_count} of ${m.reversal_total} peaks`;
     const delays=datasetPhases(dataset);
     const format=value=>value.reason?`Unavailable: ${value.reason}`:`${value.ms.toFixed(2)} ms (${value.degrees.toFixed(1)}°), fit R² ${value.r2.toFixed(3)}`;

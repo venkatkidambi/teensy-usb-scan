@@ -76,10 +76,19 @@ fn main() -> ! {
     static mut EXPERIMENT_SAMPLES: [experiment_data::Record; experiment_data::CAPACITY] =
         [experiment_data::Record::EMPTY; experiment_data::CAPACITY];
     let samples = unsafe { &mut *core::ptr::addr_of_mut!(EXPERIMENT_SAMPLES) };
-    static mut REVERSALS: [experiment::reversal::Reversal; experiment::reversal::CAPACITY] =
-        [experiment::reversal::Reversal::EMPTY; experiment::reversal::CAPACITY];
-    // SAFETY: same exclusive foreground ownership as the experiment records.
-    let reversals = unsafe { &mut *core::ptr::addr_of_mut!(REVERSALS) };
+    // OCRAM keeps the larger diagnostic windows out of the DTCM stack budget.
+    #[unsafe(link_section = ".uninit.reversals")]
+    static mut REVERSALS: core::mem::MaybeUninit<
+        [experiment::reversal::Reversal; experiment::reversal::CAPACITY],
+    > = core::mem::MaybeUninit::uninit();
+    // SAFETY: entry runs once. Initialize each slot in place, with no large stack copy.
+    let reversals = unsafe {
+        let ptr = core::ptr::addr_of_mut!(REVERSALS).cast::<experiment::reversal::Reversal>();
+        for i in 0..experiment::reversal::CAPACITY {
+            ptr.add(i).write(experiment::reversal::Reversal::EMPTY);
+        }
+        core::slice::from_raw_parts_mut(ptr, experiment::reversal::CAPACITY)
+    };
     let mut experiment = experiment::Engine::new(samples).with_reversals(reversals);
     let mut console = console::Console::new(usb);
     usb_host::init(&mut ccm, &mut ccm_analog, &mut gpio3, &mut iomuxc_gpr);

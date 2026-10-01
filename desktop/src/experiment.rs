@@ -1,7 +1,5 @@
 //! Native experiment configuration, binary reception, integrity checking and CSV.
-use crate::experiment_data::{
-    self as data, CHUNK_RECORDS, ExperimentConfig, RECORD_BYTES, RECORD_FIELDS,
-};
+use crate::experiment_data::{self as data, ExperimentConfig, RECORD_BYTES, RECORD_FIELDS};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Write;
@@ -117,7 +115,7 @@ impl Decoder {
         let value = serde_json::from_str::<Value>(&line).ok();
         if let Some(header) = value.filter(|v| v["type"] == "data_chunk") {
             let bytes = uint(&header, "bytes")? as usize;
-            if bytes == 0 || bytes > CHUNK_RECORDS * RECORD_BYTES || bytes % RECORD_BYTES != 0 {
+            if bytes == 0 || bytes > 16 * RECORD_BYTES || bytes % RECORD_BYTES != 0 {
                 return Err("Invalid binary chunk length".into());
             }
             self.remaining = bytes;

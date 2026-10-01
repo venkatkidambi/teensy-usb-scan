@@ -225,6 +225,11 @@ int main(void) {
   usb_serial_progress(progress);
   assert(progress[1] == 3 && progress[4] == 0 && progress[5] == 1);
   assert(usb_serial_tx_idle());
+  // Regression: duplicate idle callbacks used to invent command completions.
+  tuh_cdc_tx_complete_cb(0);
+  tuh_cdc_tx_complete_cb(0);
+  usb_serial_progress(progress);
+  assert(progress[0] == 3 && progress[1] == 3 && progress[5] == 1);
   usb_serial_timing(false);
   assert(usb_serial_send((const uint8_t *)"STOP\n", 5, true));
   now = 2;

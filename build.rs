@@ -1,6 +1,18 @@
 use std::{env, path::PathBuf};
 
 fn main() {
+    for (name, maximum) in [
+        ("SINE_ENVELOPE_MARGIN_NM", u32::MAX),
+        ("SINE_ENVELOPE_MAX_AGE_MS", 1000),
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+        if let Ok(value) = env::var(name) {
+            assert!(
+                value.parse::<u32>().is_ok_and(|v| v > 0 && v <= maximum),
+                "Invalid {name}"
+            );
+        }
+    }
     println!("cargo:rerun-if-changed=c");
     println!("cargo:rerun-if-changed=vendor/tinyusb");
     println!("cargo:rerun-if-env-changed=ARM_GNU_TOOLCHAIN");

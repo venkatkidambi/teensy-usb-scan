@@ -10,3 +10,4 @@ done
 # rustc defaults to the native host, independent of Cargo's embedded target.
 rustc --edition=2024 --test tests/firmware.rs -o target/tests/firmware-test
 target/tests/firmware-test
+python3 tests/analyze_reversals_test.py

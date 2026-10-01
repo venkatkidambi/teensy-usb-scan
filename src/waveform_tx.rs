@@ -26,6 +26,7 @@ pub struct Transport {
     direction: i8,
     busy_since: Option<u32>,
     consecutive: u32,
+    expected_completion: u32,
 }
 impl Transport {
     pub fn close_busy(&mut self, elapsed: u32, stats: &mut scheduling::Diagnostics) {
@@ -57,7 +58,10 @@ impl Engine<'_> {
         };
         let commands = &commands[..accepted];
         for &command in commands {
-            self.scan.commit(command);
+            // Reversal direction becomes authoritative only on completion.
+            if !matches!(command, ScanCommand::Direction(_)) || !crossing {
+                self.scan.commit(command);
+            }
         }
         self.scheduling.sent(
             commands,
@@ -67,6 +71,9 @@ impl Engine<'_> {
             self.elapsed_ms,
             self.scan.direction.unwrap_or(1),
         );
+        for &command in commands {
+            self.reversals.scheduled(command, scheduled, crossing);
+        }
         self.reversals.sent(
             commands,
             progress,
@@ -75,6 +82,7 @@ impl Engine<'_> {
             crossing,
         );
         if accepted != 0 {
+            self.waveform_tx.expected_completion = progress.0[0];
             self.waveform_tx.busy_since = Some(if progress.0[0] == 0 {
                 self.elapsed_ms
             } else {
@@ -98,6 +106,16 @@ impl Engine<'_> {
         let elapsed = self.elapsed_ms;
         let idle = io.tx_idle();
         let progress = io.tx_progress();
+        // RUNNING has one owner and at most one outstanding reversal line.
+        // A repeated/older completion cannot authorize the next stage. Zero
+        // instrumentation is supported only by synchronous native test doubles.
+        if idle
+            && self.waveform_tx.expected_completion != 0
+            && (progress.0[1] != self.waveform_tx.expected_completion
+                || progress.0[0] != self.waveform_tx.expected_completion)
+        {
+            return Err("Xeryon command completion identity mismatch");
+        }
         let completed = if progress.0[1] == 0 {
             elapsed
         } else {
@@ -155,9 +173,28 @@ impl Engine<'_> {
             self.waveform_tx.phase = Phase::NeedZero;
             self.waveform_tx.reversal_started = event;
             self.waveform_tx.direction = direction;
+            self.waveform_tx.pending = None;
         }
         self.reversals.tick(elapsed, now, t, direction, crossing);
+        if crossing {
+            // A retry can detect a crossing between logger/control deadlines.
+            // Its theoretical position must not reuse the previous log target.
+            let target = match self.config {
+                Some(ExperimentConfig::Sinusoidal { center_nm, .. }) => {
+                    super::sine_target(center_nm, amplitude, frequency, elapsed)
+                }
+                _ => self.target,
+            };
+            self.reversals.stage(
+                0,
+                elapsed,
+                self.waveform_tx.reversal_started,
+                velocity_speed(velocity),
+                target,
+            );
+        }
         if due {
+            self.reversals.evaluation(elapsed - self.next_target, !idle);
             let needed = self.scan.needs_speed(velocity)
                 || self.scan.direction != Some(direction)
                 || self.waveform_tx.phase != Phase::Normal;
@@ -194,6 +231,8 @@ impl Engine<'_> {
                 // Mandatory even when the rounded speed is already zero.
                 self.send_waveform(&[ScanCommand::Speed(0)], reversal, now, true, io)?;
                 self.waveform_tx.phase = Phase::AwaitZero;
+                self.reversals
+                    .stage(1, elapsed, reversal, velocity_speed(velocity), self.target);
                 self.next_target =
                     scheduling::next(self.scheduling.mode, amplitude, frequency, elapsed, 0.0);
                 return Ok(false);
@@ -210,9 +249,13 @@ impl Engine<'_> {
                     io,
                 )?;
                 self.waveform_tx.phase = Phase::AwaitDirection;
+                self.reversals
+                    .stage(2, elapsed, reversal, velocity_speed(velocity), self.target);
                 return Ok(false);
             }
             Phase::AwaitDirection => {
+                self.scan
+                    .commit(ScanCommand::Direction(self.waveform_tx.direction));
                 self.scheduling
                     .reversal_direction
                     .add(completed.wrapping_sub(reversal));
@@ -225,6 +268,8 @@ impl Engine<'_> {
                     io,
                 )?;
                 self.waveform_tx.phase = Phase::AwaitResume;
+                self.reversals
+                    .stage(3, elapsed, reversal, velocity_speed(velocity), self.target);
                 self.waveform_tx.pending = None;
             }
             Phase::AwaitResume => {
@@ -232,7 +277,10 @@ impl Engine<'_> {
                     .reversal_resume
                     .add(completed.wrapping_sub(reversal));
                 self.waveform_tx.phase = Phase::Normal;
-                // A due update can be handled on the next foreground poll.
+                self.reversals
+                    .stage(4, elapsed, reversal, velocity_speed(velocity), self.target);
+                self.waveform_tx.pending = None;
+                self.next_target = elapsed; // recompute from the next actual poll
                 return Ok(false);
             }
             Phase::Normal => {

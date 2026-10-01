@@ -1,0 +1,1347 @@
+{
+  "config": {
+    "amplitude_nm": 10000,
+    "center_nm": 1377948,
+    "cycles": 5,
+    "frequency_mhz": 1000,
+    "kind": "sinusoidal"
+  },
+  "timing_basis": "host receipt and USB transport completion; not actuator timing",
+  "controller_time_basis": "latest independent TIME cache; not paired to EPOS",
+  "peak_commanded_speed_um_s": 62.83185307179586,
+  "reversals": [
+    {
+      "index": 1,
+      "theoretical_crossing_ms": 500.0,
+      "observed_transition_ms": 500,
+      "direction_before": 1,
+      "direction_after": -1,
+      "theoretical_extremum_um": 1387.948,
+      "theoretical_velocity_um_s": 0,
+      "epos_at_exact_extremum": null,
+      "nearest_epos": {
+        "receipt_ms": 503.0,
+        "epos_counts": 17797,
+        "generation": 2543,
+        "receipt_age_ms": 17,
+        "stat": 8545,
+        "stat_age_ms": 19,
+        "controller_ticks": 45928,
+        "controller_age_ms": 15
+      },
+      "nearest_receipt_offset_ms": 3.0,
+      "max_excursion_um": 0.3739999999997963,
+      "peak_sample": {
+        "receipt_ms": 524.0,
+        "epos_counts": 17799,
+        "generation": 2544,
+        "receipt_age_ms": 16,
+        "stat": 8545,
+        "stat_age_ms": 18,
+        "controller_ticks": 46132,
+        "controller_age_ms": 14
+      },
+      "max_receipt_trajectory_error_um": 0.4874825526205768,
+      "command_timeline": [
+        [
+          1,
+          12,
+          470,
+          471
+        ],
+        [
+          1,
+          8,
+          480,
+          481
+        ],
+        [
+          1,
+          4,
+          490,
+          491
+        ],
+        [
+          1,
+          0,
+          500,
+          501
+        ],
+        [
+          2,
+          -1,
+          501,
+          504
+        ],
+        [
+          1,
+          2,
+          504,
+          505
+        ]
+      ],
+      "command_tokens": null,
+      "scheduled_ms": null,
+      "state_transitions_plus_one_ms": null,
+      "queue_to_complete_ms": [
+        1,
+        3,
+        1
+      ],
+      "crossing_to_complete_ms": [
+        1.0,
+        4.0,
+        5.0
+      ],
+      "total_reversal_ms": 5.0,
+      "resumed_speed_um_s": 2,
+      "max_tx_busy_ms": null,
+      "coalesced_updates": null,
+      "rx_backlog_polls": 0,
+      "stat_values": [
+        8545
+      ],
+      "max_receipt_age_ms": 17,
+      "window_dropped": null,
+      "feedback_window": [
+        {
+          "receipt_ms": 464.0,
+          "epos_counts": 17790,
+          "generation": 2541,
+          "receipt_age_ms": 16,
+          "stat": 8545,
+          "stat_age_ms": 18,
+          "controller_ticks": 45530,
+          "controller_age_ms": 14
+        },
+        {
+          "receipt_ms": 483.0,
+          "epos_counts": 17794,
+          "generation": 2542,
+          "receipt_age_ms": 17,
+          "stat": 8545,
+          "stat_age_ms": 19,
+          "controller_ticks": 45727,
+          "controller_age_ms": 15
+        },
+        {
+          "receipt_ms": 503.0,
+          "epos_counts": 17797,
+          "generation": 2543,
+          "receipt_age_ms": 17,
+          "stat": 8545,
+          "stat_age_ms": 19,
+          "controller_ticks": 45928,
+          "controller_age_ms": 15
+        },
+        {
+          "receipt_ms": 524.0,
+          "epos_counts": 17799,
+          "generation": 2544,
+          "receipt_age_ms": 16,
+          "stat": 8545,
+          "stat_age_ms": 18,
+          "controller_ticks": 46132,
+          "controller_age_ms": 14
+        }
+      ],
+      "receipt_intervals_ms": [
+        19.0,
+        20.0,
+        21.0
+      ],
+      "unobserved_generations": 0,
+      "large_receipt_displacements": [],
+      "correlations": [],
+      "classification": "ambiguous"
+    },
+    {
+      "index": 2,
+      "theoretical_crossing_ms": 1000.0,
+      "observed_transition_ms": 1000,
+      "direction_before": -1,
+      "direction_after": 1,
+      "theoretical_extremum_um": 1367.948,
+      "theoretical_velocity_um_s": 0,
+      "epos_at_exact_extremum": null,
+      "nearest_epos": {
+        "receipt_ms": 1006.0,
+        "epos_counts": 17541,
+        "generation": 2568,
+        "receipt_age_ms": 14,
+        "stat": 8545,
+        "stat_age_ms": 16,
+        "controller_ticks": 50948,
+        "controller_age_ms": 12
+      },
+      "nearest_receipt_offset_ms": 6.0,
+      "max_excursion_um": 0,
+      "peak_sample": {
+        "receipt_ms": 1026.0,
+        "epos_counts": 17539,
+        "generation": 2569,
+        "receipt_age_ms": 14,
+        "stat": 8545,
+        "stat_age_ms": 16,
+        "controller_ticks": 51147,
+        "controller_age_ms": 12
+      },
+      "max_receipt_trajectory_error_um": 0.624,
+      "command_timeline": [
+        [
+          1,
+          10,
+          974,
+          975
+        ],
+        [
+          1,
+          6,
+          984,
+          985
+        ],
+        [
+          1,
+          2,
+          994,
+          995
+        ],
+        [
+          1,
+          0,
+          1000,
+          1001
+        ],
+        [
+          2,
+          1,
+          1001,
+          1007
+        ],
+        [
+          1,
+          3,
+          1007,
+          1008
+        ]
+      ],
+      "command_tokens": null,
+      "scheduled_ms": null,
+      "state_transitions_plus_one_ms": null,
+      "queue_to_complete_ms": [
+        1,
+        6,
+        1
+      ],
+      "crossing_to_complete_ms": [
+        1.0,
+        7.0,
+        8.0
+      ],
+      "total_reversal_ms": 8.0,
+      "resumed_speed_um_s": 3,
+      "max_tx_busy_ms": null,
+      "coalesced_updates": null,
+      "rx_backlog_polls": 0,
+      "stat_values": [
+        8545
+      ],
+      "max_receipt_age_ms": 14,
+      "window_dropped": null,
+      "feedback_window": [
+        {
+          "receipt_ms": 966.0,
+          "epos_counts": 17547,
+          "generation": 2566,
+          "receipt_age_ms": 14,
+          "stat": 8545,
+          "stat_age_ms": 16,
+          "controller_ticks": 50545,
+          "controller_age_ms": 12
+        },
+        {
+          "receipt_ms": 986.0,
+          "epos_counts": 17543,
+          "generation": 2567,
+          "receipt_age_ms": 14,
+          "stat": 8545,
+          "stat_age_ms": 16,
+          "controller_ticks": 50745,
+          "controller_age_ms": 12
+        },
+        {
+          "receipt_ms": 1006.0,
+          "epos_counts": 17541,
+          "generation": 2568,
+          "receipt_age_ms": 14,
+          "stat": 8545,
+          "stat_age_ms": 16,
+          "controller_ticks": 50948,
+          "controller_age_ms": 12
+        },
+        {
+          "receipt_ms": 1026.0,
+          "epos_counts": 17539,
+          "generation": 2569,
+          "receipt_age_ms": 14,
+          "stat": 8545,
+          "stat_age_ms": 16,
+          "controller_ticks": 51147,
+          "controller_age_ms": 12
+        }
+      ],
+      "receipt_intervals_ms": [
+        20.0,
+        20.0,
+        20.0
+      ],
+      "unobserved_generations": 0,
+      "large_receipt_displacements": [],
+      "correlations": [
+        "direction completion slower than peers"
+      ],
+      "classification": "ambiguous"
+    },
+    {
+      "index": 3,
+      "theoretical_crossing_ms": 1500.0,
+      "observed_transition_ms": 1500,
+      "direction_before": 1,
+      "direction_after": -1,
+      "theoretical_extremum_um": 1387.948,
+      "theoretical_velocity_um_s": 0,
+      "epos_at_exact_extremum": null,
+      "nearest_epos": {
+        "receipt_ms": 1509.0,
+        "epos_counts": 17796,
+        "generation": 2593,
+        "receipt_age_ms": 11,
+        "stat": 8545,
+        "stat_age_ms": 13,
+        "controller_ticks": 55966,
+        "controller_age_ms": 9
+      },
+      "nearest_receipt_offset_ms": 9.0,
+      "max_excursion_um": 0.2179999999998472,
+      "peak_sample": {
+        "receipt_ms": 1529.0,
+        "epos_counts": 17797,
+        "generation": 2594,
+        "receipt_age_ms": 11,
+        "stat": 8545,
+        "stat_age_ms": 13,
+        "controller_ticks": 56167,
+        "controller_age_ms": 9
+      },
+      "max_receipt_trajectory_error_um": 0.39,
+      "command_timeline": [
+        [
+          1,
+          9,
+          1477,
+          1478
+        ],
+        [
+          1,
+          5,
+          1487,
+          1488
+        ],
+        [
+          1,
+          1,
+          1497,
+          1498
+        ],
+        [
+          1,
+          0,
+          1500,
+          1501
+        ],
+        [
+          2,
+          -1,
+          1501,
+          1502
+        ],
+        [
+          1,
+          1,
+          1502,
+          1503
+        ]
+      ],
+      "command_tokens": null,
+      "scheduled_ms": null,
+      "state_transitions_plus_one_ms": null,
+      "queue_to_complete_ms": [
+        1,
+        1,
+        1
+      ],
+      "crossing_to_complete_ms": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "total_reversal_ms": 3.0,
+      "resumed_speed_um_s": 1,
+      "max_tx_busy_ms": null,
+      "coalesced_updates": null,
+      "rx_backlog_polls": 0,
+      "stat_values": [
+        8545
+      ],
+      "max_receipt_age_ms": 12,
+      "window_dropped": null,
+      "feedback_window": [
+        {
+          "receipt_ms": 1468.0,
+          "epos_counts": 17791,
+          "generation": 2591,
+          "receipt_age_ms": 12,
+          "stat": 8545,
+          "stat_age_ms": 14,
+          "controller_ticks": 55562,
+          "controller_age_ms": 10
+        },
+        {
+          "receipt_ms": 1488.0,
+          "epos_counts": 17794,
+          "generation": 2592,
+          "receipt_age_ms": 12,
+          "stat": 8545,
+          "stat_age_ms": 14,
+          "controller_ticks": 55766,
+          "controller_age_ms": 10
+        },
+        {
+          "receipt_ms": 1509.0,
+          "epos_counts": 17796,
+          "generation": 2593,
+          "receipt_age_ms": 11,
+          "stat": 8545,
+          "stat_age_ms": 13,
+          "controller_ticks": 55966,
+          "controller_age_ms": 9
+        },
+        {
+          "receipt_ms": 1529.0,
+          "epos_counts": 17797,
+          "generation": 2594,
+          "receipt_age_ms": 11,
+          "stat": 8545,
+          "stat_age_ms": 13,
+          "controller_ticks": 56167,
+          "controller_age_ms": 9
+        }
+      ],
+      "receipt_intervals_ms": [
+        20.0,
+        21.0,
+        20.0
+      ],
+      "unobserved_generations": 0,
+      "large_receipt_displacements": [],
+      "correlations": [],
+      "classification": "ambiguous"
+    },
+    {
+      "index": 4,
+      "theoretical_crossing_ms": 2000.0,
+      "observed_transition_ms": 2000,
+      "direction_before": -1,
+      "direction_after": 1,
+      "theoretical_extremum_um": 1367.948,
+      "theoretical_velocity_um_s": 0,
+      "epos_at_exact_extremum": null,
+      "nearest_epos": {
+        "receipt_ms": 1991.0,
+        "epos_counts": 17543,
+        "generation": 2617,
+        "receipt_age_ms": 9,
+        "stat": 8545,
+        "stat_age_ms": 11,
+        "controller_ticks": 60781,
+        "controller_age_ms": 7
+      },
+      "nearest_receipt_offset_ms": -9.0,
+      "max_excursion_um": 0,
+      "peak_sample": {
+        "receipt_ms": 2031.0000000000002,
+        "epos_counts": 17540,
+        "generation": 2619,
+        "receipt_age_ms": 9,
+        "stat": 8545,
+        "stat_age_ms": 11,
+        "controller_ticks": 61184,
+        "controller_age_ms": 7
+      },
+      "max_receipt_trajectory_error_um": 0.624,
+      "command_timeline": [
+        [
+          1,
+          11,
+          1972,
+          1973
+        ],
+        [
+          1,
+          7,
+          1982,
+          1983
+        ],
+        [
+          1,
+          3,
+          1992,
+          1993
+        ],
+        [
+          1,
+          0,
+          2000,
+          2001
+        ],
+        [
+          2,
+          1,
+          2001,
+          2002
+        ],
+        [
+          1,
+          1,
+          2002,
+          2003
+        ]
+      ],
+      "command_tokens": null,
+      "scheduled_ms": null,
+      "state_transitions_plus_one_ms": null,
+      "queue_to_complete_ms": [
+        1,
+        1,
+        1
+      ],
+      "crossing_to_complete_ms": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "total_reversal_ms": 3.0,
+      "resumed_speed_um_s": 1,
+      "max_tx_busy_ms": null,
+      "coalesced_updates": null,
+      "rx_backlog_polls": 0,
+      "stat_values": [
+        8545
+      ],
+      "max_receipt_age_ms": 9,
+      "window_dropped": null,
+      "feedback_window": [
+        {
+          "receipt_ms": 1971.0,
+          "epos_counts": 17546,
+          "generation": 2616,
+          "receipt_age_ms": 9,
+          "stat": 8545,
+          "stat_age_ms": 11,
+          "controller_ticks": 60582,
+          "controller_age_ms": 7
+        },
+        {
+          "receipt_ms": 1991.0,
+          "epos_counts": 17543,
+          "generation": 2617,
+          "receipt_age_ms": 9,
+          "stat": 8545,
+          "stat_age_ms": 11,
+          "controller_ticks": 60781,
+          "controller_age_ms": 7
+        },
+        {
+          "receipt_ms": 2011.0000000000002,
+          "epos_counts": 17541,
+          "generation": 2618,
+          "receipt_age_ms": 9,
+          "stat": 8545,
+          "stat_age_ms": 11,
+          "controller_ticks": 60981,
+          "controller_age_ms": 7
+        },
+        {
+          "receipt_ms": 2031.0000000000002,
+          "epos_counts": 17540,
+          "generation": 2619,
+          "receipt_age_ms": 9,
+          "stat": 8545,
+          "stat_age_ms": 11,
+          "controller_ticks": 61184,
+          "controller_age_ms": 7
+        }
+      ],
+      "receipt_intervals_ms": [
+        20.0,
+        20.000000000000227,
+        20.0
+      ],
+      "unobserved_generations": 0,
+      "large_receipt_displacements": [],
+      "correlations": [],
+      "classification": "ambiguous"
+    },
+    {
+      "index": 5,
+      "theoretical_crossing_ms": 2500.0,
+      "observed_transition_ms": 2500,
+      "direction_before": 1,
+      "direction_after": -1,
+      "theoretical_extremum_um": 1387.948,
+      "theoretical_velocity_um_s": 0,
+      "epos_at_exact_extremum": null,
+      "nearest_epos": {
+        "receipt_ms": 2493.0,
+        "epos_counts": 17785,
+        "generation": 2642,
+        "receipt_age_ms": 7,
+        "stat": 8545,
+        "stat_age_ms": 9,
+        "controller_ticks": 263,
+        "controller_age_ms": 5
+      },
+      "nearest_receipt_offset_ms": -7.0,
+      "max_excursion_um": 0,
+      "peak_sample": {
+        "receipt_ms": 2533.0,
+        "epos_counts": 17788,
+        "generation": 2644,
+        "receipt_age_ms": 7,
+        "stat": 8545,
+        "stat_age_ms": 9,
+        "controller_ticks": 666,
+        "controller_age_ms": 5
+      },
+      "max_receipt_trajectory_error_um": 0.7304459514900827,
+      "command_timeline": [
+        [
+          1,
+          11,
+          2472,
+          2473
+        ],
+        [
+          1,
+          7,
+          2482,
+          2483
+        ],
+        [
+          1,
+          3,
+          2492,
+          2493
+        ],
+        [
+          1,
+          0,
+          2500,
+          2501
+        ],
+        [
+          2,
+          -1,
+          2501,
+          2502
+        ],
+        [
+          1,
+          1,
+          2502,
+          2503
+        ]
+      ],
+      "command_tokens": null,
+      "scheduled_ms": null,
+      "state_transitions_plus_one_ms": null,
+      "queue_to_complete_ms": [
+        1,
+        1,
+        1
+      ],
+      "crossing_to_complete_ms": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "total_reversal_ms": 3.0,
+      "resumed_speed_um_s": 1,
+      "max_tx_busy_ms": null,
+      "coalesced_updates": null,
+      "rx_backlog_polls": 0,
+      "stat_values": [
+        8545
+      ],
+      "max_receipt_age_ms": 7,
+      "window_dropped": null,
+      "feedback_window": [
+        {
+          "receipt_ms": 2473.0,
+          "epos_counts": 17783,
+          "generation": 2641,
+          "receipt_age_ms": 7,
+          "stat": 8545,
+          "stat_age_ms": 9,
+          "controller_ticks": 63,
+          "controller_age_ms": 5
+        },
+        {
+          "receipt_ms": 2493.0,
+          "epos_counts": 17785,
+          "generation": 2642,
+          "receipt_age_ms": 7,
+          "stat": 8545,
+          "stat_age_ms": 9,
+          "controller_ticks": 263,
+          "controller_age_ms": 5
+        },
+        {
+          "receipt_ms": 2513.0,
+          "epos_counts": 17787,
+          "generation": 2643,
+          "receipt_age_ms": 7,
+          "stat": 8545,
+          "stat_age_ms": 9,
+          "controller_ticks": 463,
+          "controller_age_ms": 5
+        },
+        {
+          "receipt_ms": 2533.0,
+          "epos_counts": 17788,
+          "generation": 2644,
+          "receipt_age_ms": 7,
+          "stat": 8545,
+          "stat_age_ms": 9,
+          "controller_ticks": 666,
+          "controller_age_ms": 5
+        }
+      ],
+      "receipt_intervals_ms": [
+        20.0,
+        20.0,
+        20.0
+      ],
+      "unobserved_generations": 0,
+      "large_receipt_displacements": [],
+      "correlations": [],
+      "classification": "ambiguous"
+    },
+    {
+      "index": 6,
+      "theoretical_crossing_ms": 3000.0,
+      "observed_transition_ms": 3000,
+      "direction_before": -1,
+      "direction_after": 1,
+      "theoretical_extremum_um": 1367.948,
+      "theoretical_velocity_um_s": 0,
+      "epos_at_exact_extremum": null,
+      "nearest_epos": {
+        "receipt_ms": 2995.0,
+        "epos_counts": 17530,
+        "generation": 2667,
+        "receipt_age_ms": 5,
+        "stat": 8545,
+        "stat_age_ms": 7,
+        "controller_ticks": 5280,
+        "controller_age_ms": 3
+      },
+      "nearest_receipt_offset_ms": -5.0,
+      "max_excursion_um": 0.7640000000001237,
+      "peak_sample": {
+        "receipt_ms": 3036.0,
+        "epos_counts": 17528,
+        "generation": 2669,
+        "receipt_age_ms": 4,
+        "stat": 8545,
+        "stat_age_ms": 6,
+        "controller_ticks": 5683,
+        "controller_age_ms": 2
+      },
+      "max_receipt_trajectory_error_um": 1.018731272134346,
+      "command_timeline": [
+        [
+          1,
+          11,
+          2972,
+          2973
+        ],
+        [
+          1,
+          7,
+          2982,
+          2983
+        ],
+        [
+          1,
+          3,
+          2992,
+          2993
+        ],
+        [
+          1,
+          0,
+          3000,
+          3001
+        ],
+        [
+          2,
+          1,
+          3001,
+          3002
+        ],
+        [
+          1,
+          1,
+          3002,
+          3003
+        ]
+      ],
+      "command_tokens": null,
+      "scheduled_ms": null,
+      "state_transitions_plus_one_ms": null,
+      "queue_to_complete_ms": [
+        1,
+        1,
+        1
+      ],
+      "crossing_to_complete_ms": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "total_reversal_ms": 3.0,
+      "resumed_speed_um_s": 1,
+      "max_tx_busy_ms": null,
+      "coalesced_updates": null,
+      "rx_backlog_polls": 0,
+      "stat_values": [
+        8545
+      ],
+      "max_receipt_age_ms": 5,
+      "window_dropped": null,
+      "feedback_window": [
+        {
+          "receipt_ms": 2975.0,
+          "epos_counts": 17534,
+          "generation": 2666,
+          "receipt_age_ms": 5,
+          "stat": 8545,
+          "stat_age_ms": 7,
+          "controller_ticks": 5079,
+          "controller_age_ms": 3
+        },
+        {
+          "receipt_ms": 2995.0,
+          "epos_counts": 17530,
+          "generation": 2667,
+          "receipt_age_ms": 5,
+          "stat": 8545,
+          "stat_age_ms": 7,
+          "controller_ticks": 5280,
+          "controller_age_ms": 3
+        },
+        {
+          "receipt_ms": 3015.0,
+          "epos_counts": 17529,
+          "generation": 2668,
+          "receipt_age_ms": 5,
+          "stat": 8545,
+          "stat_age_ms": 7,
+          "controller_ticks": 5480,
+          "controller_age_ms": 3
+        },
+        {
+          "receipt_ms": 3036.0,
+          "epos_counts": 17528,
+          "generation": 2669,
+          "receipt_age_ms": 4,
+          "stat": 8545,
+          "stat_age_ms": 6,
+          "controller_ticks": 5683,
+          "controller_age_ms": 2
+        }
+      ],
+      "receipt_intervals_ms": [
+        20.0,
+        20.0,
+        21.0
+      ],
+      "unobserved_generations": 0,
+      "large_receipt_displacements": [],
+      "correlations": [],
+      "classification": "ambiguous"
+    },
+    {
+      "index": 7,
+      "theoretical_crossing_ms": 3500.0,
+      "observed_transition_ms": 3500,
+      "direction_before": 1,
+      "direction_after": -1,
+      "theoretical_extremum_um": 1387.948,
+      "theoretical_velocity_um_s": 0,
+      "epos_at_exact_extremum": null,
+      "nearest_epos": {
+        "receipt_ms": 3498.0,
+        "epos_counts": 17784,
+        "generation": 2692,
+        "receipt_age_ms": 2,
+        "stat": 8545,
+        "stat_age_ms": 4,
+        "controller_ticks": 10097,
+        "controller_age_ms": 20
+      },
+      "nearest_receipt_offset_ms": -2.0,
+      "max_excursion_um": 17.846000000000004,
+      "peak_sample": {
+        "receipt_ms": 3478.0,
+        "epos_counts": 18023,
+        "generation": 2691,
+        "receipt_age_ms": 2,
+        "stat": 8545,
+        "stat_age_ms": 4,
+        "controller_ticks": 9897,
+        "controller_age_ms": 20
+      },
+      "max_receipt_trajectory_error_um": 17.941385743033607,
+      "command_timeline": [
+        [
+          1,
+          11,
+          3472,
+          3473
+        ],
+        [
+          1,
+          7,
+          3482,
+          3483
+        ],
+        [
+          1,
+          3,
+          3492,
+          3493
+        ],
+        [
+          1,
+          0,
+          3500,
+          3501
+        ],
+        [
+          2,
+          -1,
+          3501,
+          3502
+        ],
+        [
+          1,
+          1,
+          3502,
+          3503
+        ]
+      ],
+      "command_tokens": null,
+      "scheduled_ms": null,
+      "state_transitions_plus_one_ms": null,
+      "queue_to_complete_ms": [
+        1,
+        1,
+        1
+      ],
+      "crossing_to_complete_ms": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "total_reversal_ms": 3.0,
+      "resumed_speed_um_s": 1,
+      "max_tx_busy_ms": null,
+      "coalesced_updates": null,
+      "rx_backlog_polls": 0,
+      "stat_values": [
+        8545
+      ],
+      "max_receipt_age_ms": 2,
+      "window_dropped": null,
+      "feedback_window": [
+        {
+          "receipt_ms": 3478.0,
+          "epos_counts": 18023,
+          "generation": 2691,
+          "receipt_age_ms": 2,
+          "stat": 8545,
+          "stat_age_ms": 4,
+          "controller_ticks": 9897,
+          "controller_age_ms": 20
+        },
+        {
+          "receipt_ms": 3498.0,
+          "epos_counts": 17784,
+          "generation": 2692,
+          "receipt_age_ms": 2,
+          "stat": 8545,
+          "stat_age_ms": 4,
+          "controller_ticks": 10097,
+          "controller_age_ms": 20
+        },
+        {
+          "receipt_ms": 3518.0,
+          "epos_counts": 17782,
+          "generation": 2693,
+          "receipt_age_ms": 2,
+          "stat": 8545,
+          "stat_age_ms": 4,
+          "controller_ticks": 10300,
+          "controller_age_ms": 20
+        },
+        {
+          "receipt_ms": 3538.0,
+          "epos_counts": 17781,
+          "generation": 2694,
+          "receipt_age_ms": 2,
+          "stat": 8545,
+          "stat_age_ms": 4,
+          "controller_ticks": 10500,
+          "controller_age_ms": 20
+        }
+      ],
+      "receipt_intervals_ms": [
+        20.0,
+        20.0,
+        20.0
+      ],
+      "unobserved_generations": 0,
+      "large_receipt_displacements": [
+        {
+          "from_ms": 3458.0,
+          "to_ms": 3478.0,
+          "delta_um": 21.216,
+          "receipt_slope_um_s": 1060.8
+        },
+        {
+          "from_ms": 3478.0,
+          "to_ms": 3498.0,
+          "delta_um": -18.642,
+          "receipt_slope_um_s": -932.1
+        }
+      ],
+      "correlations": [
+        "EPOS changes exceed commanded peak-speed displacement; not proof of physical speed"
+      ],
+      "classification": "ambiguous"
+    },
+    {
+      "index": 8,
+      "theoretical_crossing_ms": 4000.0,
+      "observed_transition_ms": 4000,
+      "direction_before": -1,
+      "direction_after": 1,
+      "theoretical_extremum_um": 1367.948,
+      "theoretical_velocity_um_s": 0,
+      "epos_at_exact_extremum": {
+        "receipt_ms": 4000.0,
+        "epos_counts": 17528,
+        "generation": 2717,
+        "receipt_age_ms": 20,
+        "stat": 8545,
+        "stat_age_ms": 1,
+        "controller_ticks": 15315,
+        "controller_age_ms": 18
+      },
+      "nearest_epos": {
+        "receipt_ms": 4000.0,
+        "epos_counts": 17528,
+        "generation": 2717,
+        "receipt_age_ms": 20,
+        "stat": 8545,
+        "stat_age_ms": 1,
+        "controller_ticks": 15315,
+        "controller_age_ms": 18
+      },
+      "nearest_receipt_offset_ms": 0.0,
+      "max_excursion_um": 0.9200000000000728,
+      "peak_sample": {
+        "receipt_ms": 4021.0,
+        "epos_counts": 17526,
+        "generation": 2718,
+        "receipt_age_ms": 19,
+        "stat": 8545,
+        "stat_age_ms": 1,
+        "controller_ticks": 15518,
+        "controller_age_ms": 17
+      },
+      "max_receipt_trajectory_error_um": 1.014,
+      "command_timeline": [
+        [
+          1,
+          11,
+          3972,
+          3973
+        ],
+        [
+          1,
+          7,
+          3982,
+          3983
+        ],
+        [
+          1,
+          3,
+          3992,
+          3993
+        ],
+        [
+          1,
+          0,
+          4000,
+          4001
+        ],
+        [
+          2,
+          1,
+          4001,
+          4002
+        ],
+        [
+          1,
+          1,
+          4002,
+          4003
+        ]
+      ],
+      "command_tokens": null,
+      "scheduled_ms": null,
+      "state_transitions_plus_one_ms": null,
+      "queue_to_complete_ms": [
+        1,
+        1,
+        1
+      ],
+      "crossing_to_complete_ms": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "total_reversal_ms": 3.0,
+      "resumed_speed_um_s": 1,
+      "max_tx_busy_ms": null,
+      "coalesced_updates": null,
+      "rx_backlog_polls": 0,
+      "stat_values": [
+        8545
+      ],
+      "max_receipt_age_ms": 20,
+      "window_dropped": null,
+      "feedback_window": [
+        {
+          "receipt_ms": 3960.0,
+          "epos_counts": 17534,
+          "generation": 2715,
+          "receipt_age_ms": 20,
+          "stat": 8545,
+          "stat_age_ms": 1,
+          "controller_ticks": 14914,
+          "controller_age_ms": 18
+        },
+        {
+          "receipt_ms": 3981.0,
+          "epos_counts": 17530,
+          "generation": 2716,
+          "receipt_age_ms": 19,
+          "stat": 8545,
+          "stat_age_ms": 2,
+          "controller_ticks": 15118,
+          "controller_age_ms": 17
+        },
+        {
+          "receipt_ms": 4000.0,
+          "epos_counts": 17528,
+          "generation": 2717,
+          "receipt_age_ms": 20,
+          "stat": 8545,
+          "stat_age_ms": 1,
+          "controller_ticks": 15315,
+          "controller_age_ms": 18
+        },
+        {
+          "receipt_ms": 4021.0,
+          "epos_counts": 17526,
+          "generation": 2718,
+          "receipt_age_ms": 19,
+          "stat": 8545,
+          "stat_age_ms": 1,
+          "controller_ticks": 15518,
+          "controller_age_ms": 17
+        }
+      ],
+      "receipt_intervals_ms": [
+        21.0,
+        19.0,
+        21.0
+      ],
+      "unobserved_generations": 0,
+      "large_receipt_displacements": [],
+      "correlations": [],
+      "classification": "ambiguous"
+    },
+    {
+      "index": 9,
+      "theoretical_crossing_ms": 4500.0,
+      "observed_transition_ms": 4500,
+      "direction_before": 1,
+      "direction_after": -1,
+      "theoretical_extremum_um": 1387.948,
+      "theoretical_velocity_um_s": 0,
+      "epos_at_exact_extremum": null,
+      "nearest_epos": {
+        "receipt_ms": 4503.0,
+        "epos_counts": 17782,
+        "generation": 2742,
+        "receipt_age_ms": 17,
+        "stat": 8545,
+        "stat_age_ms": 19,
+        "controller_ticks": 20333,
+        "controller_age_ms": 15
+      },
+      "nearest_receipt_offset_ms": 3.0,
+      "max_excursion_um": 0,
+      "peak_sample": {
+        "receipt_ms": 4523.0,
+        "epos_counts": 17783,
+        "generation": 2743,
+        "receipt_age_ms": 17,
+        "stat": 8545,
+        "stat_age_ms": 19,
+        "controller_ticks": 20537,
+        "controller_age_ms": 15
+      },
+      "max_receipt_trajectory_error_um": 2.028,
+      "command_timeline": [
+        [
+          1,
+          11,
+          4472,
+          4473
+        ],
+        [
+          1,
+          7,
+          4482,
+          4483
+        ],
+        [
+          1,
+          3,
+          4492,
+          4493
+        ],
+        [
+          1,
+          0,
+          4500,
+          4501
+        ],
+        [
+          2,
+          -1,
+          4501,
+          4504
+        ],
+        [
+          1,
+          2,
+          4504,
+          4505
+        ]
+      ],
+      "command_tokens": null,
+      "scheduled_ms": null,
+      "state_transitions_plus_one_ms": null,
+      "queue_to_complete_ms": [
+        1,
+        3,
+        1
+      ],
+      "crossing_to_complete_ms": [
+        1.0,
+        4.0,
+        5.0
+      ],
+      "total_reversal_ms": 5.0,
+      "resumed_speed_um_s": 2,
+      "max_tx_busy_ms": null,
+      "coalesced_updates": null,
+      "rx_backlog_polls": 0,
+      "stat_values": [
+        8545
+      ],
+      "max_receipt_age_ms": 17,
+      "window_dropped": null,
+      "feedback_window": [
+        {
+          "receipt_ms": 4463.0,
+          "epos_counts": 17765,
+          "generation": 2740,
+          "receipt_age_ms": 17,
+          "stat": 8545,
+          "stat_age_ms": 19,
+          "controller_ticks": 19934,
+          "controller_age_ms": 15
+        },
+        {
+          "receipt_ms": 4483.0,
+          "epos_counts": 17776,
+          "generation": 2741,
+          "receipt_age_ms": 17,
+          "stat": 8545,
+          "stat_age_ms": 19,
+          "controller_ticks": 20134,
+          "controller_age_ms": 15
+        },
+        {
+          "receipt_ms": 4503.0,
+          "epos_counts": 17782,
+          "generation": 2742,
+          "receipt_age_ms": 17,
+          "stat": 8545,
+          "stat_age_ms": 19,
+          "controller_ticks": 20333,
+          "controller_age_ms": 15
+        },
+        {
+          "receipt_ms": 4523.0,
+          "epos_counts": 17783,
+          "generation": 2743,
+          "receipt_age_ms": 17,
+          "stat": 8545,
+          "stat_age_ms": 19,
+          "controller_ticks": 20537,
+          "controller_age_ms": 15
+        }
+      ],
+      "receipt_intervals_ms": [
+        20.0,
+        20.0,
+        20.0
+      ],
+      "unobserved_generations": 0,
+      "large_receipt_displacements": [],
+      "correlations": [],
+      "classification": "ambiguous"
+    }
+  ],
+  "worst_excursion_reversal": 7,
+  "source_sha256": "facdda28e3834e8ca03ee7f9630fa1ae2da4dae661594cfc29c797f96dc1edb1"
+}

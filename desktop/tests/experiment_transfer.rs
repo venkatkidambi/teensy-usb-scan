@@ -322,9 +322,7 @@ fn ten_hz_short_run_transfers_available_diagnostics_and_releases_ownership() {
     let mut text = String::new();
     e.metadata(&mut text, receiver::DOWNLOAD_ID).unwrap();
     let metadata: Value = serde_json::from_str(&text).unwrap();
-    assert!(
-        metadata["reversal_total"].as_u64().unwrap() > metadata["reversal_count"].as_u64().unwrap()
-    );
+    assert_eq!(metadata["reversal_total"], metadata["reversal_count"]);
     d.metadata(metadata).unwrap();
     for offset in (0..e.len).step_by(CHUNK_RECORDS) {
         let bytes: Vec<_> = e

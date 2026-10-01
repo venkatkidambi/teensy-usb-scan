@@ -1,5 +1,10 @@
 # Teensy 4.1 USB host scanner
 
+The isolated sinusoidal overshoot investigation, command timeline, diagnostic
+format, configurable envelope STOP guard and hardware acceptance procedure are in
+[OVERSHOOT.md](OVERSHOOT.md). Diagnostic capacity now limits sinusoidal runs to
+144 cycles; the envelope guard is disabled unless explicitly configured at build time.
+
 Firmware/desktop **0.2.0** add autonomous Quasi-static and Sinusoidal experiment
 modes alongside the existing Dashboard. The Teensy owns timing, motion and a
 fixed 192 KiB dataset buffer; native desktop Rust downloads/verifies results and
