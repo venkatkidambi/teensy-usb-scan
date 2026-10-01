@@ -54,7 +54,7 @@ export function phaseDelays(dataset,positionPoints,pressurePoints) {
     // Positive means the second signal lags. A periodic signal only identifies
     // delay modulo one cycle; report the signed shortest phase difference.
     const radians=Math.atan2(Math.sin(a.phase-b.phase),Math.cos(a.phase-b.phase));
-    return {ms:radians/(2*Math.PI*frequency)*1000,degrees:radians*180/Math.PI,r2:Math.min(a.r2,b.r2)};
+    return {ms:radians/(2*Math.PI*frequency)*1000,degrees:radians*180/Math.PI,radians,r2:Math.min(a.r2,b.r2)};
   };
   return {commandToPosition:pair(signals[0],signals[1]),positionToPressure:pair(signals[1],signals[2])};
 }

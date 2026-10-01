@@ -201,13 +201,15 @@ function drawSweepPhase() {
   if(canvas.width!==width)canvas.width=width;
   if(canvas.height!==height)canvas.height=height;
   ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,rect.width,rect.height);
-  const unit=$('experiment-phase-unit').value==='degrees'?'degrees':'ms';
+  const selectedUnit=$('experiment-phase-unit').value;
+  const unit=['degrees','radians'].includes(selectedUnit)?selectedUnit:'ms';
   const points=sweepPhases.filter(p=>!p.reason&&Number.isFinite(p[unit]));
   const frequencies=sweepPhases.map(p=>p.frequency).filter(f=>Number.isFinite(f)&&f>0);
   let xmin=frequencies.length?Math.min(...frequencies):0,xmax=frequencies.length?Math.max(...frequencies):1;
   const xpad=Math.max((xmax-xmin)*.05,xmax*.05,.01);xmin=Math.max(0,xmin-xpad);xmax+=xpad;
-  let ymin=unit==='degrees'?-180:Math.min(0,...points.map(p=>p.ms));
-  let ymax=unit==='degrees'?180:Math.max(0,...points.map(p=>p.ms));
+  const phaseLimit=unit==='degrees'?180:Math.PI;
+  let ymin=unit==='ms'?Math.min(0,...points.map(p=>p.ms)):-phaseLimit;
+  let ymax=unit==='ms'?Math.max(0,...points.map(p=>p.ms)):phaseLimit;
   if(unit==='ms'){const pad=Math.max((ymax-ymin)*.1,1);ymin-=pad;ymax+=pad;}
   const l=75,r=rect.width-20,t=20,b=rect.height-48;
   const x=value=>l+(value-xmin)/(xmax-xmin)*(r-l),y=value=>b-(value-ymin)/(ymax-ymin)*(b-t);
@@ -215,13 +217,14 @@ function drawSweepPhase() {
   for(let i=0;i<=4;i++){
     const value=ymin+(ymax-ymin)*i/4,py=y(value);
     ctx.strokeStyle='#e0e3e0';ctx.beginPath();ctx.moveTo(l,py);ctx.lineTo(r,py);ctx.stroke();
-    ctx.textAlign='right';ctx.fillText(value.toFixed(unit==='degrees'?0:1),l-8,py+3);
+    const label=unit==='radians'?['−π','−π/2','0','π/2','π'][i]:value.toFixed(unit==='degrees'?0:1);
+    ctx.textAlign='right';ctx.fillText(label,l-8,py+3);
     const frequency=xmin+(xmax-xmin)*i/4;
     ctx.textAlign='center';ctx.fillText(String(Number(frequency.toFixed(3))),x(frequency),b+16);
   }
   ctx.font='12px system-ui';ctx.textAlign='center';ctx.fillText('Frequency (Hz)',(l+r)/2,rect.height-7);
   ctx.save();ctx.translate(16,(t+b)/2);ctx.rotate(-Math.PI/2);
-  ctx.fillText(`Phase delay (${unit==='degrees'?'°':'ms'})`,0,0);ctx.restore();
+  ctx.fillText(`Phase delay (${unit==='degrees'?'°':unit==='radians'?'rad':'ms'})`,0,0);ctx.restore();
   ctx.strokeStyle='#919b96';ctx.beginPath();ctx.moveTo(l,y(0));ctx.lineTo(r,y(0));ctx.stroke();
   ctx.fillStyle='#32684d';ctx.strokeStyle='#32684d';
   for(const point of points){
