@@ -32,12 +32,6 @@ pub trait Actuator {
     fn prepare_feedback(&mut self, _now: u32) -> Result<bool, &'static str> {
         Ok(true)
     }
-    fn prepare_scan_gain(&mut self, _now: u32) -> Result<bool, &'static str> {
-        Ok(true)
-    }
-    fn scan_gain_values(&self) -> [Option<u32>; 2] {
-        [None; 2]
-    }
     fn start_timing(&mut self) {}
     fn end_timing(&mut self) {}
     fn tx_progress(&self) -> reversal::TxProgress {
@@ -109,7 +103,6 @@ pub struct Engine<'a> {
     malformed: u32,
     feedback_before: [Option<i64>; 2],
     feedback_verified: bool,
-    scan_gain: [Option<u32>; 2],
     epos_start_generation: u32,
     epos_logged_updates: u32,
 }
@@ -168,7 +161,6 @@ impl<'a> Engine<'a> {
             malformed: 0,
             feedback_before: [None; 2],
             feedback_verified: false,
-            scan_gain: [None; 2],
             epos_start_generation: 0,
             epos_logged_updates: 0,
         }
@@ -310,7 +302,6 @@ impl<'a> Engine<'a> {
         self.malformed = 0;
         self.feedback_before = [None; 2];
         self.feedback_verified = false;
-        self.scan_gain = [None; 2];
         self.epos_logged_updates = 0;
         self.hold_started = None;
         self.state = State::MoveToStart;
@@ -325,22 +316,10 @@ impl<'a> Engine<'a> {
                 return;
             }
             Ok(true) => {
+                self.feedback_pending = false;
                 self.feedback_verified = true;
             }
         }
-        if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) {
-            let result = io.prepare_scan_gain(now);
-            self.scan_gain = io.scan_gain_values();
-            match result {
-                Ok(false) => return,
-                Err(e) => {
-                    self.finish(State::Fault, e, io);
-                    return;
-                }
-                Ok(true) => {}
-            }
-        }
-        self.feedback_pending = false;
         self.move_started = now;
         let result = match self.config.and_then(ExperimentConfig::speed) {
             Some(speed) => io.speed(speed),
@@ -767,22 +746,6 @@ impl<'a> Engine<'a> {
         self.config.unwrap().write_json(out)?;
         self.envelope.write(out)?;
         if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) {
-            write!(
-                out,
-                ",\"scan_gain\":{{\"cap\":{SINE_SCAN_GAIN_CAP},\"saved\":false,\"before\":"
-            )?;
-            if let Some(value) = self.scan_gain[0] {
-                write!(out, "{value}")?;
-            } else {
-                write!(out, "null")?;
-            }
-            write!(out, ",\"applied\":")?;
-            if let Some(value) = self.scan_gain[1] {
-                write!(out, "{value}")?;
-            } else {
-                write!(out, "null")?;
-            }
-            write!(out, "}}")?;
             write!(
                 out,
                 ",\"sine_control\":\"velocity_scan\",\"sine_initialization\":\"negative_extremum_zero_velocity\",\"reversal_count\":{},\"reversal_total\":{},\"reversal_diagnostic_version\":2,\"reversal_window_ms\":{},\"reversals\":[]",

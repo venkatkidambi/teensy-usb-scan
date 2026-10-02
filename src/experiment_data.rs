@@ -2,8 +2,6 @@
 pub const CAPACITY: usize = 4096;
 pub const RECORD_FIELDS: usize = 12;
 pub const DATA_VERSION: u32 = 2;
-// User-authorized scan-gain trial. Only reduce PRO2; never SAVE it to flash.
-pub const SINE_SCAN_GAIN_CAP: u32 = 30;
 pub const RECORD_BYTES: usize = RECORD_FIELDS * 4;
 pub const CHUNK_RECORDS: usize = 2;
 pub const REVERSAL_CAPACITY: usize = 288;

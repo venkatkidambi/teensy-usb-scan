@@ -75,8 +75,6 @@ pub struct Telemetry {
     pub feedback_before: [Option<i64>; 2],
     pub positioning: [Sample; 4], // PTOL, PTO2, TOUT, DLAY; read only
     pub positioning_updates: [u32; 4],
-    pub scan_gain: Sample, // PRO2, readback before sinusoidal motion
-    pub scan_gain_updates: u32,
     pub timing_active: bool,
     pub epos_arrivals: ArrivalStats,
     pub transport: TransportStats,
@@ -115,12 +113,6 @@ impl Telemetry {
                 valid: false,
             }; 4],
             positioning_updates: [0; 4],
-            scan_gain: Sample {
-                value: 0,
-                ms: 0,
-                valid: false,
-            },
-            scan_gain_updates: 0,
             timing_active: false,
             epos_arrivals: ArrivalStats {
                 count: 0,
@@ -176,14 +168,6 @@ impl Telemetry {
 
     pub fn record(&mut self, tag: &[u8], value: i64, now: u32) {
         self.records = self.records.wrapping_add(1);
-        if tag == b"PRO2" {
-            self.scan_gain = Sample {
-                value,
-                ms: now,
-                valid: true,
-            };
-            self.scan_gain_updates = self.scan_gain_updates.wrapping_add(1);
-        }
         if tag == b"EPOS" {
             // A publication's identity is independent of its encoder value.
             self.epos_generation = self.epos_generation.wrapping_add(1);

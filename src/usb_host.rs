@@ -22,8 +22,6 @@ static CACHE: cortex_m::interrupt::Mutex<RefCell<crate::protocol::Telemetry>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::protocol::Telemetry::new()));
 static FEEDBACK_SETUP: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::FeedbackSetup>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::FeedbackSetup::new()));
-static SCAN_GAIN_SETUP: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::ScanGainSetup>> =
-    cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::ScanGainSetup::new()));
 
 pub fn telemetry() -> crate::protocol::Telemetry {
     cortex_m::interrupt::free(|cs| {
@@ -224,8 +222,7 @@ pub fn autonomous(on: bool) {
     AUTONOMOUS.store(on, Ordering::Relaxed);
     if on {
         cortex_m::interrupt::free(|cs| {
-            *FEEDBACK_SETUP.borrow(cs).borrow_mut() = crate::xeryon::FeedbackSetup::new();
-            *SCAN_GAIN_SETUP.borrow(cs).borrow_mut() = crate::xeryon::ScanGainSetup::new();
+            *FEEDBACK_SETUP.borrow(cs).borrow_mut() = crate::xeryon::FeedbackSetup::new()
         });
     }
 }
@@ -237,26 +234,6 @@ pub fn rx_pending() -> bool {
 
 pub struct ExperimentActuator;
 impl crate::experiment::Actuator for ExperimentActuator {
-    fn prepare_scan_gain(&mut self, now: u32) -> Result<bool, &'static str> {
-        let t = telemetry();
-        let idle = self.tx_idle();
-        cortex_m::interrupt::free(|cs| {
-            SCAN_GAIN_SETUP
-                .borrow(cs)
-                .borrow_mut()
-                .poll(now, &t, idle, |bytes| {
-                    // SAFETY: foreground-only copy of one complete bounded line.
-                    if unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, false) } {
-                        Ok(())
-                    } else {
-                        Err("Xeryon PRO2 setup transmit unavailable")
-                    }
-                })
-        })
-    }
-    fn scan_gain_values(&self) -> [Option<u32>; 2] {
-        cortex_m::interrupt::free(|cs| SCAN_GAIN_SETUP.borrow(cs).borrow().values)
-    }
     fn prepare_feedback(&mut self, now: u32) -> Result<bool, &'static str> {
         let t = telemetry();
         let idle = self.tx_idle();
