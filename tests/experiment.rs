@@ -14,6 +14,10 @@ mod tests {
         scans: Vec<xeryon_motion::ScanCommand>,
         events: Vec<String>,
         preparing: bool,
+        gain_preparing: bool,
+        gain_fail: bool,
+        gain_calls: u32,
+        gain_values: [Option<u32>; 2],
         usb_failed: bool,
         tracked: bool,
         clock: u32,
@@ -37,6 +41,17 @@ mod tests {
         }
     }
     impl Actuator for Io {
+        fn prepare_scan_gain(&mut self, _now: u32) -> Result<bool, &'static str> {
+            self.gain_calls += 1;
+            if self.gain_fail {
+                Err("Xeryon PRO2 readback mismatch")
+            } else {
+                Ok(!self.gain_preparing)
+            }
+        }
+        fn scan_gain_values(&self) -> [Option<u32>; 2] {
+            self.gain_values
+        }
         fn tx_progress(&self) -> reversal::TxProgress {
             reversal::TxProgress(self.progress)
         }
@@ -134,6 +149,71 @@ mod tests {
             cycles: 1,
             compensation_enabled: false,
             compensation_ms: 17,
+        }
+    }
+
+    #[test]
+    fn sine_gain_verification_blocks_motion_and_is_recorded_but_quasi_static_skips_it() {
+        for outcome in ["ready", "fault", "abort", "quasi"] {
+            let mut records = [Record::EMPTY; CAPACITY];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io {
+                gain_preparing: true,
+                gain_values: [Some(40), None],
+                ..Default::default()
+            };
+            let (t, p) = feedback(0, 0, true);
+            let config = if outcome == "quasi" {
+                ExperimentConfig::QuasiStatic {
+                    start_nm: 0,
+                    step_nm: 78,
+                    hold_ms: 10,
+                    steps: 1,
+                    speed_um_s: 10,
+                }
+            } else {
+                sinusoidal()
+            };
+            e.accept(config, &t, p, false, 0).unwrap();
+            e.begin(0, &mut io);
+            if outcome == "quasi" {
+                assert_eq!(io.gain_calls, 0);
+                assert_eq!(io.speeds, [10]);
+                continue;
+            }
+            assert!(e.feedback_pending);
+            assert!(io.targets.is_empty() && io.scans.is_empty() && io.speeds.is_empty());
+            e.poll(1, &t, p, &mut io);
+            assert!(io.targets.is_empty());
+            match outcome {
+                "ready" => {
+                    io.gain_preparing = false;
+                    io.gain_values[1] = Some(30);
+                    e.poll(2, &t, p, &mut io);
+                    assert!(!e.feedback_pending);
+                    assert_eq!(io.targets, [(-100, 2, true)]);
+                    let mut meta = String::new();
+                    e.metadata(&mut meta, 1).unwrap();
+                    assert!(meta.contains(
+                        "\"scan_gain\":{\"cap\":30,\"saved\":false,\"before\":40,\"applied\":30}"
+                    ));
+                }
+                "fault" => {
+                    io.gain_fail = true;
+                    e.poll(2, &t, p, &mut io);
+                    assert_eq!(e.reason, "Xeryon PRO2 readback mismatch");
+                }
+                "abort" => e.abort(&mut io),
+                _ => unreachable!(),
+            }
+            if outcome != "ready" {
+                let calls = io.gain_calls;
+                e.poll(3, &t, p, &mut io);
+                assert_eq!(io.gain_calls, calls);
+                assert!(io.targets.is_empty() && io.scans.is_empty());
+                assert!(e.stop_queued);
+                assert_eq!(e.state, State::DataReady);
+            }
         }
     }
     #[test]
@@ -406,6 +486,7 @@ mod tests {
         e.max_epos_age = u32::MAX;
         e.max_pressure_age = u32::MAX;
         e.feedback_before = [Some(i64::MAX), Some(i64::MAX)];
+        e.scan_gain = [Some(250), Some(30)];
         e.run = u32::MAX;
         e.started_ms = u32::MAX;
         e.elapsed_ms = u32::MAX;

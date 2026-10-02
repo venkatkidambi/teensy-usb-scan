@@ -124,6 +124,18 @@ the separate USB2 host header. Only one app/terminal can own the serial port.
   still included in the waveform summary. Raw readings are never smoothed or
   removed. These sampled maxima cannot bound motion between recorded readings.
 
+The current sinusoidal gain trial first reads `PRO2`, reduces it to **30** only
+when the current value is higher, and requires a fresh matching readback before
+any positioning or waveform motion. A gain already at or below 30 is preserved.
+Setup failure prevents the run and requests STOP. Results/CSV metadata record
+`scan_gain.before`, `scan_gain.applied`, and `scan_gain.cap`; an unverified value
+is null. This writes no `SAVE`: the volatile controller-wide gain stays in effect
+after completion or abort, including subsequent manual/quasi-static moves, until
+the controller is reset/power-cycled or the original gain is explicitly restored.
+Each sinusoidal START reapplies the cap, defined by `SINE_SCAN_GAIN_CAP` in
+`src/experiment_data.rs`. For the first comparison, rerun the experiment-7 settings
+(1 Hz, 10 µm amplitude, five cycles, same center/load, compensation off).
+
 Optional **Feed-forward delay compensation** defaults off with a 17 ms entry.
 Whole milliseconds from 0 through `MAX_COMPENSATION_MS` (25 ms) are accepted.
 Only actuator velocity advances: `v_ff(t) = Aω sin(ω(t + τ s(u)))`, where

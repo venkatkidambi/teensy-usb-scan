@@ -1,11 +1,90 @@
 //! XD-C ASCII feedback, manual v3.1 section 4.3 (pages 13–14).
-//! Fixed storage, no allocation, and no actuator commands.
+//! Fixed storage, no allocation, and bounded setup before motion.
 use crate::line::LineBuffer;
 
 // Conservative starting point. Verify actual EPOS cadence on the connected XD-C;
 // POLI describes data updates, not a guaranteed per-tag acquisition rate.
 pub const EXPERIMENT_POLI_MS: u32 = 20;
 pub const EXPERIMENT_INFO: u32 = 2; // preserves DPOS, Dashboard and requested replies
+
+/// Volatile PRO2 reduction for the sinusoidal trial, after INFO setup. Each
+/// query must have a fresh reply and each write must drain before verification.
+/// A lower existing gain is preserved. No SAVE, reset, or other tuning writes.
+pub struct ScanGainSetup {
+    pub values: [Option<u32>; 2], // original, verified applied
+    step: u8,                     // 0 query original, 1 write cap, 2 query applied, 3 done
+    pending: bool,
+    started: u32,
+    generation: u32,
+}
+impl ScanGainSetup {
+    pub const fn new() -> Self {
+        Self {
+            values: [None; 2],
+            step: 0,
+            pending: false,
+            started: 0,
+            generation: 0,
+        }
+    }
+    pub fn poll(
+        &mut self,
+        now: u32,
+        t: &crate::protocol::Telemetry,
+        idle: bool,
+        mut send: impl FnMut(&[u8]) -> Result<(), &'static str>,
+    ) -> Result<bool, &'static str> {
+        use crate::experiment_data::SINE_SCAN_GAIN_CAP;
+        use core::fmt::Write;
+        if self.step == 3 {
+            return Ok(true);
+        }
+        if self.pending {
+            let fresh = t.scan_gain.valid && t.scan_gain_updates != self.generation;
+            if idle && (self.step == 1 || fresh) {
+                if self.step != 1 {
+                    let value = t.scan_gain.value;
+                    if !(0..=250).contains(&value) {
+                        return Err("Invalid Xeryon PRO2 readback");
+                    }
+                    let value = value as u32;
+                    if self.step == 0 {
+                        self.values[0] = Some(value);
+                        if value <= SINE_SCAN_GAIN_CAP {
+                            self.values[1] = Some(value);
+                            self.step = 3;
+                            self.pending = false;
+                            return Ok(true);
+                        }
+                    } else if value != SINE_SCAN_GAIN_CAP {
+                        return Err("Xeryon PRO2 readback mismatch");
+                    } else {
+                        self.values[1] = Some(value);
+                    }
+                }
+                self.step += 1;
+                self.pending = false;
+            } else if now.wrapping_sub(self.started) >= 1500 {
+                return Err("Xeryon PRO2 setup timeout");
+            }
+            return Ok(self.step == 3);
+        }
+        if !idle {
+            return Err("Xeryon previous transmit incomplete");
+        }
+        let mut frame = crate::protocol::Frame::new();
+        if self.step == 1 {
+            writeln!(frame, "PRO2={SINE_SCAN_GAIN_CAP}").unwrap();
+        } else {
+            writeln!(frame, "PRO2=?").unwrap();
+        }
+        send(frame.pending())?;
+        self.generation = t.scan_gain_updates;
+        self.started = now;
+        self.pending = true;
+        Ok(false)
+    }
+}
 
 /// Sequential, bounded setup before motion. Never SAVE controller settings.
 pub struct FeedbackSetup {
@@ -198,6 +277,122 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_gain_reduction_serializes_read_write_verify_and_never_increases_gain() {
+        for original in [0, 20, 30, 40, 250] {
+            let mut setup = ScanGainSetup::new();
+            let mut t = crate::protocol::Telemetry::new();
+            t.record(b"PRO2", original, 0); // cached data must not authorize motion
+            let mut commands = Vec::new();
+            assert!(
+                !setup
+                    .poll(10, &t, true, |b| {
+                        commands.push(b.to_vec());
+                        Ok(())
+                    })
+                    .unwrap()
+            );
+            assert!(!setup.poll(11, &t, true, |_| panic!("stale reply")).unwrap());
+            t.record(b"PRO2", original, 12);
+            assert!(!setup.poll(12, &t, false, |_| panic!("TX busy")).unwrap());
+            assert_eq!(
+                setup.poll(13, &t, true, |_| panic!()).unwrap(),
+                original <= 30
+            );
+            if original > 30 {
+                assert!(
+                    !setup
+                        .poll(14, &t, true, |b| {
+                            commands.push(b.to_vec());
+                            Ok(())
+                        })
+                        .unwrap()
+                );
+                assert!(
+                    !setup
+                        .poll(15, &t, false, |_| panic!("write still pending"))
+                        .unwrap()
+                );
+                // A write echo cannot satisfy the subsequent explicit query.
+                t.record(b"PRO2", 30, 16);
+                assert!(!setup.poll(16, &t, true, |_| panic!()).unwrap());
+                assert!(
+                    !setup
+                        .poll(17, &t, true, |b| {
+                            commands.push(b.to_vec());
+                            Ok(())
+                        })
+                        .unwrap()
+                );
+                assert!(
+                    !setup
+                        .poll(18, &t, true, |_| panic!("old write echo"))
+                        .unwrap()
+                );
+                t.record(b"PRO2", 30, 19);
+                assert!(setup.poll(19, &t, true, |_| panic!()).unwrap());
+                assert_eq!(
+                    commands,
+                    [
+                        b"PRO2=?\n".to_vec(),
+                        b"PRO2=30\n".to_vec(),
+                        b"PRO2=?\n".to_vec()
+                    ]
+                );
+            } else {
+                assert_eq!(commands, [b"PRO2=?\n".to_vec()]);
+            }
+            assert_eq!(
+                setup.values,
+                [Some(original as u32), Some(original.min(30) as u32)]
+            );
+            assert!(
+                setup
+                    .poll(20, &t, true, |_| panic!("already verified"))
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn scan_gain_faults_on_invalid_mismatched_missing_or_failed_readback() {
+        for step in [0, 2] {
+            for value in [-1, 251, 40] {
+                let mut setup = ScanGainSetup::new();
+                setup.step = step;
+                let mut t = crate::protocol::Telemetry::new();
+                setup.poll(0, &t, true, |_| Ok(())).unwrap();
+                t.record(b"PRO2", value, 1);
+                let result = setup.poll(1, &t, true, |_| panic!());
+                if value == 40 && step == 0 {
+                    assert_eq!(result, Ok(false));
+                } else {
+                    assert!(result.is_err());
+                }
+                assert_eq!(setup.values[1], None);
+            }
+        }
+        for step in 0..3 {
+            let mut setup = ScanGainSetup::new();
+            setup.step = step;
+            let t = crate::protocol::Telemetry::new();
+            assert_eq!(
+                setup.poll(0, &t, false, |_| panic!()),
+                Err("Xeryon previous transmit incomplete")
+            );
+            assert_eq!(
+                setup.poll(0, &t, true, |_| Err("USB failed")),
+                Err("USB failed")
+            );
+            setup.poll(u32::MAX - 100, &t, true, |_| Ok(())).unwrap();
+            assert_eq!(
+                setup.poll(1399, &t, step != 1, |_| panic!()),
+                Err("Xeryon PRO2 setup timeout")
+            );
+            assert_eq!(setup.values[1], None);
+        }
+    }
 
     #[test]
     fn feedback_setup_serializes_queries_settings_and_requires_fresh_readback() {

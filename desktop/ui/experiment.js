@@ -143,6 +143,10 @@ export function experimentMessage(message) {
       $('experiment-result-summary').textContent+=` · experimental feed-forward time advance ${c.compensation_enabled?'ON':'OFF'} · configured ${c.compensation_ms??0} ms · configured phase ${phase.toFixed(3)}°`;
     }
     if(m.fault_stat!==undefined)$('experiment-result-summary').textContent+=` · Fault STAT ${m.fault_stat}`;
+    if(m.scan_gain){
+      const gain=m.scan_gain;
+      $('experiment-result-summary').textContent+=` · scanning gain PRO2 ${gain.before??'unknown'} → ${gain.applied??'unverified'} (cap ${gain.cap}, not saved to controller flash)`;
+    }
     if(m.timing){const t=m.timing;
       $('experiment-result-summary').textContent+=` · EPOS ${(t.epos.rate_millihz/1000).toFixed(1)} Hz (${t.epos.updates} updates), max gap ${t.epos.max_ms} ms, max receipt age ${t.max_epos_age_ms} ms, ${t.epos_repeated_records} repeated records · pressure ${(t.pressure.rate_millihz/1000).toFixed(1)} Hz · USB max service gap ${t.max_usb_service_gap_ms} ms, RX peak ${t.rx_peak_bytes} B · feedback settings ${t.feedback_verified?'verified':'unverified'}`;
     }

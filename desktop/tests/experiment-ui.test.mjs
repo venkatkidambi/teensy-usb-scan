@@ -187,6 +187,7 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
     assert.equal(node('experiment-data-panel').hidden, true);
     experimentMessage({ type: 'experiment_dataset', dataset: {
       metadata: { run: 8, config: { kind: 'sinusoidal' }, outcome: 'completed',
+        scan_gain: {before:40,applied:30,cap:30,saved:false},
         reason: 'none', count: 1, elapsed_ms: 1000, missed_samples: 0,
         max_lateness_ms: 0, stop_queued: true, reversals: [
           {direction:-1,max_error_counts:2,commands:[null,null,null,[1,0,250,251],[2,-1,250,253],[1,1,260,261]]},
@@ -196,6 +197,7 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
     assert.equal(node('experiment-data-panel').hidden, false);
     assert.equal(node('experiment-phase').hidden, false);
     assert.match(node('experiment-data-summary').textContent, /COMPLETED · Run 8 · sinusoidal/);
+    assert.match(node('experiment-result-summary').textContent, /scanning gain PRO2 40 → 30 \(cap 30, not saved to controller flash\)/);
     assert.match(node('experiment-result-summary').textContent, /positive peak: 1 reversals, 10–10 ms zero→resume queued, max receipt-time error 0.156 µm/);
     assert.match(node('experiment-result-summary').textContent, /negative peak: 1 reversals, 10–10 ms zero→resume queued, max receipt-time error 0.234 µm/);
     assert.equal(node('experiment-save').disabled, false);

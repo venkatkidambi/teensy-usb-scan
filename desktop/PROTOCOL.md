@@ -20,6 +20,16 @@ settings remain after the run; no SAVE command writes controller nonvolatile mem
 Quasi-static SSPD/TOU2 readbacks have three-second deadlines. Firmware checks
 TOU2 against the reserved movement budget and does not change that timeout.
 
+Sinusoidal preparation additionally queries `PRO2`, caps it at 30 only if higher,
+then explicitly queries/verifies the applied value before the first DPOS. Each
+step has a 1.5 s deadline and readbacks must be fresh; invalid/missing/mismatched
+replies fault the run. Existing gains in 0–30 are retained. Quasi-static preparation
+does not change gain. Sinusoidal `data_meta.scan_gain` contains `cap`, `before`,
+`applied` (null until verified), and `saved: false`. The setting is controller-wide
+and remains active after completion/ABORT; no SAVE or automatic restoration occurs.
+Reset/power-cycle the controller or explicitly restore its original PRO2 to undo
+the volatile change; every sinusoidal START on this firmware reapplies the cap.
+
 USB1: CDC ACM `5824:27dd`, 115200 8-N-1, no flow control, DTR asserted.
 Baud rate is a CDC setting, not USB throughput. The desktop opens the port natively.
 The actuator is on separate USB2 (`04d8:ef4a`).
