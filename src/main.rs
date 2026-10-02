@@ -7,6 +7,7 @@ mod console;
 mod experiment;
 mod experiment_data;
 mod fault;
+mod gpio_trajectory;
 mod line;
 mod motor;
 mod plunger;
@@ -14,6 +15,7 @@ mod plunger_config;
 mod pressure;
 mod pressure_i2c;
 mod protocol;
+mod trajectory;
 mod usb_host;
 mod xeryon;
 mod xeryon_motion;
@@ -25,6 +27,7 @@ fn main() -> ! {
         mut gpio2,
         mut gpio4,
         flexpwm4,
+        gpt1,
         adc1,
         lpi2c1,
         mut pit,
@@ -41,7 +44,10 @@ fn main() -> ! {
     use teensy4_bsp::{hal::iomuxc::gpio::Pin, pins::common, ral};
     const MOTOR_GPIO2_PINS: u32 = (1 << <common::P6 as Pin<2>>::OFFSET)
         | (1 << <common::P11 as Pin<2>>::OFFSET)
-        | (1 << <common::P12 as Pin<2>>::OFFSET);
+        | (1 << <common::P12 as Pin<2>>::OFFSET)
+        | (1 << <common::P7 as Pin<2>>::OFFSET)
+        | (1 << <common::P8 as Pin<2>>::OFFSET)
+        | (1 << <common::P9 as Pin<2>>::OFFSET);
     const MOTOR_GPIO4_PINS: u32 =
         (1 << <common::P4 as Pin<4>>::OFFSET) | (1 << <common::P5 as Pin<4>>::OFFSET);
     ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR27, |v| v
@@ -50,6 +56,7 @@ fn main() -> ! {
         & !MOTOR_GPIO4_PINS);
     cortex_m::asm::dsb();
 
+    gpio_trajectory::init(gpt1, &mut gpio2, pins.p7, pins.p8, pins.p9);
     motor::init(
         motor::Pins {
             pwm: pins.p2,
@@ -76,20 +83,7 @@ fn main() -> ! {
     static mut EXPERIMENT_SAMPLES: [experiment_data::Record; experiment_data::CAPACITY] =
         [experiment_data::Record::EMPTY; experiment_data::CAPACITY];
     let samples = unsafe { &mut *core::ptr::addr_of_mut!(EXPERIMENT_SAMPLES) };
-    // OCRAM keeps the larger diagnostic windows out of the DTCM stack budget.
-    #[unsafe(link_section = ".uninit.reversals")]
-    static mut REVERSALS: core::mem::MaybeUninit<
-        [experiment::reversal::Reversal; experiment::reversal::CAPACITY],
-    > = core::mem::MaybeUninit::uninit();
-    // SAFETY: entry runs once. Initialize each slot in place, with no large stack copy.
-    let reversals = unsafe {
-        let ptr = core::ptr::addr_of_mut!(REVERSALS).cast::<experiment::reversal::Reversal>();
-        for i in 0..experiment::reversal::CAPACITY {
-            ptr.add(i).write(experiment::reversal::Reversal::EMPTY);
-        }
-        core::slice::from_raw_parts_mut(ptr, experiment::reversal::CAPACITY)
-    };
-    let mut experiment = experiment::Engine::new(samples).with_reversals(reversals);
+    let mut experiment = experiment::Engine::new(samples);
     let mut console = console::Console::new(usb);
     usb_host::init(&mut ccm, &mut ccm_analog, &mut gpio3, &mut iomuxc_gpr);
     log::info!("Teensy USB2 host scanner ready; connect one device to the host header");

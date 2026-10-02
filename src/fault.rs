@@ -92,6 +92,7 @@ unsafe extern "C" fn DefaultHandler() -> ! {
 }
 
 extern "C" fn halt(kind: u32, sp: u32, exception: u32) -> ! {
+    crate::gpio_trajectory::emergency_low();
     let phase = PHASE.load(Ordering::Relaxed);
     // SAFETY: interrupts are disabled and this path never returns. Use raw
     // GPIO writes, avoiding locks/RefCells that may have caused the panic.

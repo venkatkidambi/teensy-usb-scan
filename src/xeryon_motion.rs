@@ -3,47 +3,6 @@ use crate::protocol::Telemetry;
 
 pub use crate::experiment_data::MAX_SPEED_UM_S as MAX_SPEED;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScanCommand {
-    Speed(u32),
-    Direction(i8),
-}
-impl ScanCommand {
-    pub fn write(self, out: &mut impl core::fmt::Write) -> Result<(), &'static str> {
-        match self {
-            Self::Speed(speed) if speed <= MAX_SPEED => writeln!(out, "SSPD={speed}"),
-            Self::Direction(direction) if (-1..=1).contains(&direction) => {
-                writeln!(out, "SCAN={direction}")
-            }
-            _ => return Err("Invalid Xeryon scan command"),
-        }
-        .map_err(|_| "Xeryon command too long")
-    }
-}
-
-/// Per-run accepted-command cache. Completion-gated sequencing lives in
-/// experiment::waveform_tx; this cache never represents physical feedback.
-#[derive(Default)]
-pub struct ScanState {
-    speed: Option<u32>,
-    pub direction: Option<i8>,
-}
-impl ScanState {
-    pub fn needs_speed(&self, velocity: f64) -> bool {
-        self.speed != Some(crate::experiment_data::velocity_speed(velocity))
-    }
-    /// Commit only after the caller has accepted this mandatory reversal line.
-    pub fn commit(&mut self, command: ScanCommand) {
-        match command {
-            ScanCommand::Speed(speed) => self.speed = Some(speed),
-            ScanCommand::Direction(direction) => self.direction = Some(direction),
-        }
-    }
-    pub fn stopped(&mut self) {
-        self.direction = Some(0);
-    }
-}
-
 pub fn write_speed(out: &mut impl core::fmt::Write, speed: u32) -> Result<(), &'static str> {
     if !(1..=MAX_SPEED).contains(&speed) {
         return Err("Xeryon speed must be 1..16777215 um/s");

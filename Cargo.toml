@@ -4,10 +4,6 @@ version = "0.2.0"
 edition = "2024"
 publish = false
 
-[features]
-# Engineering A/B build; normal firmware uses adaptive scheduling.
-fixed-100hz = []
-
 [dependencies]
 teensy4-bsp = { version = "0.6.0", features = ["rt"] }
 cortex-m = "0.7"

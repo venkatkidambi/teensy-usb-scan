@@ -321,6 +321,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gpio_setup_requires_ordered_fresh_matching_readbacks_and_times_out() {
+        let mut t = crate::protocol::Telemetry::new();
+        let mut s = GpioSetup::new();
+        for (i, expected) in ["STPS=1\n", "GPIO=2\n", "STPS=?\n", "GPIO=?\n"]
+            .iter()
+            .enumerate()
+        {
+            let now = i as u32 * 10;
+            assert!(
+                !s.poll(now, &t, true, |b| {
+                    assert_eq!(b, expected.as_bytes());
+                    Ok(())
+                })
+                .unwrap()
+            );
+            assert!(!s.poll(now + 1, &t, false, |_| panic!()).unwrap());
+            if i >= 2 {
+                assert!(!s.poll(now + 2, &t, true, |_| panic!()).unwrap());
+                t.record(
+                    if i == 2 { b"STPS" } else { b"GPIO" },
+                    if i == 2 { 1 } else { 2 },
+                    now + 3,
+                );
+            }
+            assert_eq!(s.poll(now + 4, &t, true, |_| panic!()).unwrap(), i == 3);
+        }
+        for mismatch in [false, true] {
+            let mut s = GpioSetup::new();
+            s.step = 2;
+            s.poll(0, &t, true, |_| Ok(())).unwrap();
+            if mismatch {
+                t.record(b"STPS", 2, 1);
+            }
+            assert!(s.poll(1500, &t, true, |_| panic!()).is_err());
+        }
+    }
     fn decode(bytes: &[u8]) -> Vec<Result<Record, Error>> {
         let mut decoder = Decoder::new();
         bytes.iter().filter_map(|&b| decoder.push(b)).collect()
@@ -387,5 +424,57 @@ mod tests {
         }
         decoder = Decoder::new(); // Same reset used on disconnect/mount.
         assert!(decoder.push(b'\n').is_none());
+    }
+}
+
+/// GPIO configuration is volatile and verified before ENABLE goes high.
+/// USB feedback remains active in GPIO=2. Never SAVE these settings.
+pub struct GpioSetup {
+    step: usize,
+    pending: bool,
+    started: u32,
+    generation: u32,
+}
+impl GpioSetup {
+    pub const fn new() -> Self {
+        Self {
+            step: 0,
+            pending: false,
+            started: 0,
+            generation: 0,
+        }
+    }
+    pub fn poll(
+        &mut self,
+        now: u32,
+        t: &crate::protocol::Telemetry,
+        idle: bool,
+        mut send: impl FnMut(&[u8]) -> Result<(), &'static str>,
+    ) -> Result<bool, &'static str> {
+        const COMMANDS: [&[u8]; 4] = [b"STPS=1\n", b"GPIO=2\n", b"STPS=?\n", b"GPIO=?\n"];
+        if self.step == 4 {
+            return Ok(true);
+        }
+        let index = if self.step % 2 == 0 { 1 } else { 0 };
+        if self.pending {
+            let fresh = t.gpio[index].valid && t.gpio_updates[index] != self.generation;
+            if idle && (self.step < 2 || fresh) {
+                if self.step >= 2 && t.gpio[index].value != if index == 0 { 2 } else { 1 } {
+                    return Err("GPIO/STPS readback mismatch");
+                }
+                self.step += 1;
+                self.pending = false;
+            } else if now.wrapping_sub(self.started) >= 1500 {
+                return Err("GPIO setup readback timeout");
+            }
+        } else if idle {
+            send(COMMANDS[self.step])?;
+            self.started = now;
+            self.generation = t.gpio_updates[index];
+            self.pending = true;
+        } else {
+            return Err("GPIO setup transmit busy");
+        }
+        Ok(self.step == 4)
     }
 }

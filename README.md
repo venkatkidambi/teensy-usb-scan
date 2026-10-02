@@ -109,50 +109,42 @@ the separate USB2 host header. Only one app/terminal can own the serial port.
 - **Quasi-static:** validated start, increment, hold, step count, and required
   speed. Firmware verifies SSPD and the controller TOU2 budget before motion;
   holds begin after confirmed arrival.
-- **Sinusoidal:** starts at `center − amplitude` with zero velocity, then uses
-  `x = center − A cos(2πft)` and `v = 2πfA sin(2πft)`. Adaptive 4–10 ms SSPD/SCAN
-  commands use elapsed Teensy time and coalesce under backpressure. Reversals
-  wait for zero-speed, direction, and resume transfer completion in order. The
-  final boundary sends STOP at the original starting extremum (`center − amplitude`),
-  with no subsequent positioning move.
+- **Sinusoidal:** Teensy generates `x = center − A cos(2πft)` using GPIO pulses.
+  Initial DPOS moves to `center − amplitude` and waits for Position Reached.
+  The waveform starts at rest, completes exactly N cycles, disables pulses,
+  sends STOP, then returns to center by DPOS and waits for Position Reached.
 - **Experiment Data:** verified results, position/force plots, phase estimates,
   CSV and PNG exports. Sweeps run frequencies in order, downloading each result
   before the next START. ABORT, faults, or disconnect cancel remaining runs.
   The waveform envelope excursion summary checks every unique logged EPOS
-  receipt during the sinusoid against its rounded encoder endpoints. Reversal
-  window excursions are labelled separately; spikes outside those windows are
-  still included in the waveform summary. Raw readings are never smoothed or
+  receipt during the sinusoid against its rounded encoder endpoints. Raw readings are never smoothed or
   removed. These sampled maxima cannot bound motion between recorded readings.
 
-Sinusoidal runs use the controller's existing scanning gain (`PRO2`); firmware
-does not override it. The earlier gain-30 trial was withdrawn after it failed to
-improve tracking. After flashing this version, power-cycle the **Xeryon controller**
-to reload its saved settings, or explicitly restore the pre-trial PRO2 value.
-Flashing/restarting only the Teensy does not clear the Xeryon's volatile gain.
-The trial sent no SAVE, so its gain reduction did not overwrite saved settings.
-Old trial datasets retain their `scan_gain` metadata and remain readable.
+Sinusoidal motion uses XD-C `GPIO=2` and `STPS=1`, verified by USB readback before
+ENABLE goes high. No settings are saved to controller flash. USB EPOS/STAT feedback,
+pressure acquisition, and logging continue normally; no position-feedback correction
+is applied. GPT1 runs at 1 MHz; bounded compare interrupts sample the Q30 trajectory
+at intervals of at least 25 µs, emitting at most one edge per interrupt. Direction
+changes get a full low interval before a rising edge. Pulses are separated by at
+least 75 µs in the timer model (extra margin below the controller's 20 kHz limit).
+Phase derives from the actual wrapping hardware counter, never loop/interrupt count.
+A gap over 75 µs, a missed encoder step, or a foreground service gap over 10 ms
+stops pulses and faults; there are no catch-up bursts. Completion clamps the exact
+N-cycle endpoint; a final quantized edge, if needed, drains before disabling ENABLE
+(microsecond clock resolution, bounded interrupt latency).
 
-Optional **Feed-forward delay compensation** defaults off with a 17 ms entry.
-Whole milliseconds from 0 through `MAX_COMPENSATION_MS` (25 ms) are accepted.
-Only actuator velocity advances: `v_ff(t) = Aω sin(ω(t + τ s(u)))`, where
-`τ = compensation_ms / 1000`, `u = min(t / 0.250 s, 1)`, and `s(u) = 3u² − 2u³`.
-After 250 ms this is exactly `Aω sin(ω(t + τ))`. MoveToStart stays at `C−A`;
-the smooth activation preserves zero initial velocity without an abrupt jump.
-This experimental time advance is not a measurement of mechanical delay.
-The unadvanced reference `C−A cos(ωt)`, duration `N/f`, all recorded timestamps,
-and pressure timing retain real elapsed time. There is no EPOS feedback or
-waveform DPOS correction. Reversals and scheduler error bounds use the advanced
-velocity, retaining ordered `SSPD=0 → SCAN=new direction → current speed`.
-The boundary STOP remains at `N/f`, even if advanced velocity is nonzero there;
-compensation does not guarantee physical return to the start position. Metadata
-and CSV retain the settings, configured/applied phase advance, and existing
-command latency and feedback age statistics. Toggle the checkbox for A/B runs
-without changing firmware; sweep runs retain the same settings.
+Peak requested rate is `2π × amplitude_µm × frequency_Hz / 0.078`. Validation caps
+it at **10,000 pulses/s** (780 µm/s peak velocity), conservatively below Xeryon's
+recommended 20 kHz. For example, 1 µm at 1 Hz needs 80.55 pulses/s; the largest
+integer-nm amplitude at 1 Hz is 124.140 µm (9,999.93 pulses/s). GPIO timing and
+physical direction still need oscilloscope/unloaded verification on the wired rig;
+software builds/tests do not establish physical tracking accuracy.
 
 Experiments record at 50 Hz into 4,096 fixed 48-byte records (192 KiB). The total
-acquisition bound is 81.9 s; sinusoidal runs reserve 10 s for final STOP transmission,
-accept 0.1–10 Hz, and are limited to 144 cycles by diagnostic capacity. USB1 PC
-disconnect does **not** stop an autonomous run while Teensy power remains. Manual
+acquisition bound is 81.9 s; sinusoidal runs reserve 10 s for STOP and confirmed
+center return and accept 0.1–10 Hz within the pulse-rate limit. USB1 PC disconnect
+stops sinusoidal runs and retains partial data; quasi-static runs retain their
+autonomous disconnect behavior. USB2 disconnect always stops trajectory pulses. Manual
 moves instead stop on disconnect, stale feedback, heartbeat loss, or deadline.
 ABORT/faults request STOP and retain partial results. USB STOP is best effort if
 the actuator link fails. Command acceptance is not physical motion confirmation.
@@ -170,6 +162,25 @@ CDC ACM XD-C (`04d8:ef4a`), 115200 8-N-1. SysTick supplies the wrapping 1 ms clo
 foreground work services pressure, USB, motion, and acquisition without blocking.
 USB2 control-transfer timeout support is limited; failed enumeration may require
 unplugging/reconnecting. No homing or saved controller settings change automatically.
+
+Xeryon GPIO wiring (in addition to the USB2 feedback connection):
+
+| Teensy 4.1 | XD-C GPIO bank 1 | Signal |
+| --- | --- | --- |
+| 7 | 23 / DI0 | PULSE |
+| 8 | 25 / DI1 | DIRECTION (high increments) |
+| 9 | 27 / DI2 | ENABLE (high enables) |
+| GND | 19 / GND | Common ground |
+
+The [XD-C manual v3.0, sections 5.1 and 7.2](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.0.pdf)
+specifies 3.3 V for these digital inputs: no level shifting is required for that
+bank/revision. Verify the actual controller connector before hardware use; other
+voltage interfaces require an appropriate buffer. Teensy pins are
+[not 5 V tolerant](https://www.pjrc.com/teensy/card11b_rev4_web.pdf).
+Do not connect the nearby 5 V or 48 V supply/piezo pins. Fit external 10 kΩ
+pulldowns on PULSE and ENABLE to hold them low during reset/unpowered Teensy;
+hold INDEX (pin 30) low so it cannot initiate an index search. Use short signal
+wires with a common ground. Verify direction unloaded before attaching the load.
 
 The plunger uses pin 2 PWM, 4/5 direction, 6 standby, 11/12 quadrature, and 20
 potentiometer; calibration is 16,688 counts/mm. Zero requires stopped motion.
@@ -192,13 +203,11 @@ workbooks using Python's standard library:
 python3 tools/calibrate_force.py results_calibration.xlsx 'Probe sensitivity.xlsx'
 ```
 
-Retained timing, reversal, final-return, and fault metadata support post-run
+Retained timing, final-return, and fault metadata support post-run
 diagnosis. USB completion/host receipt timestamps do not establish physical
 actuation or sensor conversion times. `SINE_ENVELOPE_MARGIN_NM` optionally enables
 a fresh-EPOS fault/STOP guard; it is disabled by default. The positive margin and
 `SINE_ENVELOPE_MAX_AGE_MS` (1–1000, default 100) are build environment settings.
-The `fixed-100hz` Cargo feature remains available for timing comparisons;
-normal firmware uses adaptive scheduling.
 
 Fatal pin-13 LED diagnostics repeat a long pulse, a fault group, then a phase group.
 Fault counts: 2 panic, 3 HardFault, 4 unexpected exception, 5 stalled foreground.
@@ -206,7 +215,7 @@ Phase counts: 1 dashboard/startup, 2 positioning, 3 armed, 4 waveform/stopping,
 5 cleanup. An immediate **3 / 1** can indicate startup stack overflow.
 `.cargo/config.toml` reserves **64 KiB** because the main frame plus startup logging
 exceeds the BSP's 16 KiB default. Fatal handling uses a separate 1 KiB emergency
-stack, disables the wired plunger, and halts; it cannot deliver USB STOP to the
+stack, disables the wired plunger and GPIO ENABLE/PULSE, and halts; it cannot deliver USB STOP to the
 independently powered Xeryon. `FATAL_REPORT` retains registers/phase in debugger
 memory until power loss. Normal experiment faults use the existing STOP path.
 

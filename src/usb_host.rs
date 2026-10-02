@@ -20,6 +20,8 @@ static TELEMETRY: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::Decoder>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::Decoder::new()));
 static CACHE: cortex_m::interrupt::Mutex<RefCell<crate::protocol::Telemetry>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::protocol::Telemetry::new()));
+static GPIO_SETUP: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::GpioSetup>> =
+    cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::GpioSetup::new()));
 static FEEDBACK_SETUP: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::FeedbackSetup>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::FeedbackSetup::new()));
 
@@ -78,6 +80,7 @@ pub fn move_xeryon(up: bool, nm: u32, speed: Option<u32>, now: u32) -> Result<i3
 }
 
 pub fn stop_xeryon() -> Result<(), &'static str> {
+    crate::gpio_trajectory::stop();
     if !crate::xeryon_motion::ready(&telemetry()) {
         return Err("Xeryon is not connected");
     }
@@ -222,6 +225,9 @@ pub fn autonomous(on: bool) {
     AUTONOMOUS.store(on, Ordering::Relaxed);
     if on {
         cortex_m::interrupt::free(|cs| {
+            *GPIO_SETUP.borrow(cs).borrow_mut() = crate::xeryon::GpioSetup::new()
+        });
+        cortex_m::interrupt::free(|cs| {
             *FEEDBACK_SETUP.borrow(cs).borrow_mut() = crate::xeryon::FeedbackSetup::new()
         });
     }
@@ -264,29 +270,38 @@ impl crate::experiment::Actuator for ExperimentActuator {
         cortex_m::interrupt::free(|cs| CACHE.borrow(cs).borrow_mut().timing_active = false);
         unsafe { usb_serial_timing(false) };
     }
-    fn tx_progress(&self) -> crate::experiment::reversal::TxProgress {
+    fn tx_progress(&self) -> crate::experiment::final_return::TxProgress {
         let mut values = [0; 6];
         // SAFETY: foreground-only snapshot into six u32 values.
         unsafe { usb_serial_progress(values.as_mut_ptr()) };
-        crate::experiment::reversal::TxProgress(values)
+        crate::experiment::final_return::TxProgress(values)
     }
-    fn scan(&mut self, commands: &[crate::xeryon_motion::ScanCommand]) -> Result<(), &'static str> {
-        if !self.tx_idle() {
-            return Err("Xeryon previous transmit incomplete");
-        }
-        // At most two lines per update: the existing transport sends the first
-        // immediately and flushes the second after its completion. No readbacks
-        // or trajectory logic in C. Any partial failure goes through STOP.
-        for &command in commands {
-            let mut frame = crate::protocol::Frame::new();
-            command.write(&mut frame)?;
-            let bytes = frame.pending();
-            // SAFETY: foreground-only bounded copy of one complete ASCII line.
-            if !unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, false) } {
-                return Err("Xeryon scan transmit unavailable");
-            }
-        }
-        Ok(())
+    fn prepare_gpio(&mut self, now: u32) -> Result<bool, &'static str> {
+        let t = telemetry();
+        cortex_m::interrupt::free(|cs| {
+            GPIO_SETUP
+                .borrow(cs)
+                .borrow_mut()
+                .poll(now, &t, self.tx_idle(), |bytes| {
+                    if unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, false) } {
+                        Ok(())
+                    } else {
+                        Err("GPIO setup transmit unavailable")
+                    }
+                })
+        })
+    }
+    fn start_gpio(
+        &mut self,
+        config: crate::experiment_data::ExperimentConfig,
+    ) -> Result<(), &'static str> {
+        crate::gpio_trajectory::start(config)
+    }
+    fn gpio_status(&self) -> crate::trajectory::Status {
+        crate::gpio_trajectory::status()
+    }
+    fn stop_gpio(&mut self) {
+        crate::gpio_trajectory::stop();
     }
     fn speed(&mut self, speed_um_s: u32) -> Result<(), &'static str> {
         if !self.tx_idle() {
@@ -413,6 +428,7 @@ extern "C" fn scanner_bus_event(event: u32) {
             ATTACHES.fetch_add(1, Ordering::Relaxed);
         }
         1 => {
+            crate::gpio_trajectory::stop();
             REMOVES.fetch_add(1, Ordering::Relaxed);
         }
         _ => {}
@@ -455,6 +471,7 @@ extern "C" fn scanner_device(
 
 #[unsafe(no_mangle)]
 extern "C" fn scanner_removed(address: u8) {
+    crate::gpio_trajectory::stop();
     XD_C.store(false, Ordering::Relaxed);
     reset_telemetry();
     cortex_m::interrupt::free(|cs| {
@@ -466,6 +483,9 @@ extern "C" fn scanner_removed(address: u8) {
 
 #[unsafe(no_mangle)]
 extern "C" fn scanner_serial_event(event: u8, address: u8, interface: u8) {
+    if event >= 2 {
+        crate::gpio_trajectory::stop();
+    }
     reset_telemetry();
     cortex_m::interrupt::free(|cs| {
         let mut cache = CACHE.borrow(cs).borrow_mut();

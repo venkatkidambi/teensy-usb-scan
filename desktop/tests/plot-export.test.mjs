@@ -40,7 +40,7 @@ test('PNG copies the visible plot bitmap at its displayed size and device pixel 
 test('PNG export uses native Save As, locks selection and exports, and recovers after cancellation or failure',async()=>{
   const h=harness();
   try{
-    const state={connected:true,hello:{experiments:true,sine_position:true},session:{}};
+    const state={connected:true,hello:{experiments:true,sine_gpio:true},session:{}};
     const calls=[];let resolve,reject;
     setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls,
       invoke(command,args){

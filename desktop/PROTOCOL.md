@@ -20,14 +20,6 @@ settings remain after the run; no SAVE command writes controller nonvolatile mem
 Quasi-static SSPD/TOU2 readbacks have three-second deadlines. Firmware checks
 TOU2 against the reserved movement budget and does not change that timeout.
 
-Experiment preparation leaves PRO2 unchanged. The earlier gain-30 trial has been
-removed; current firmware no longer emits `data_meta.scan_gain`. Older trial
-datasets may contain `cap`, `before`, `applied` (null if unverified), and
-`saved: false` in that object; the desktop still displays those recorded values.
-The old trial's volatile gain survives a Teensy firmware update. After updating,
-power-cycle/reset the Xeryon controller to reload saved settings, or explicitly
-restore its pre-trial PRO2. The trial did not issue SAVE.
-
 USB1: CDC ACM `5824:27dd`, 115200 8-N-1, no flow control, DTR asserted.
 Baud rate is a CDC setting, not USB throughput. The desktop opens the port natively.
 The actuator is on separate USB2 (`04d8:ef4a`).
@@ -169,25 +161,24 @@ supported range, source hashes and source observations used for the export.
 
 Firmware with `plunger_limits: true` in HELLO enforces potentiometer bounds and reports `plunger.limits: {"min":30,"max":75}` in snapshots. Bounds reset to 30–75% at boot, survive serial reconnects, and reject outward moves while allowing inward recovery. Up increases the reading. Missing/stale potentiometer feedback prevents motion. Drive is disabled at a bound; sampling latency and mechanical coast can cause overshoot.
 
-## Sinusoidal velocity control
+## Sinusoidal GPIO position control
 
-HELLO adds `sine_velocity: true` and retains `sine_position: true` as the legacy UI
-gate for desired sinusoidal position. START S accepts optional feed-forward parameters described below; default velocity
-is `2π f A sin(2π f t)` using actual elapsed Teensy time. Changed integer SSPD
-magnitudes use bounded adaptive 4–10 ms updates by default; theoretical sign
-crossings are mandatory events. Ordinary busy updates coalesce and recompute
-velocity at actual send time. Reversals wait for each USB completion: SSPD=0,
-then SCAN=new sign, then current theoretical speed. Waveform TX and the full
-reversal each have a 40 ms fault/STOP bound. No waveform DPOS or feedback drift
-correction is used.
+HELLO advertises `sine_gpio: true`, `sine_position: true`, and `max_pulse_hz: 10000`.
+The desktop requires `sine_gpio` for START S. Units remain nm and millihertz;
+frequency is 0.1–10 Hz, peak rate `2π A_µm f_Hz / 0.078` must be <= 10,000 Hz,
+and both extrema must fit the signed 26-bit encoder travel range.
+
 Initial DPOS targets `center - amplitude` and requires tracked Position Reached.
-RUNNING starts with SSPD=0 then SCAN=1 at t=0 after initial positioning drains.
-Position follows `center - A cos(2π f t)`. After the specified cycles, the waveform
-ends with STOP at the original starting extremum (`center - amplitude`). No final
-SSPD or DPOS positioning command is sent. Completion waits for STOP transmission
-to drain, bounded by the existing 10 s reserve; it does not require Position
-Reached or correct accumulated scan drift. ABORT/fault paths request STOP and
-retain samples. SSPD is changed during the waveform and remains at the last setting.
+With outputs low, USB configures and verifies `STPS=1` and `GPIO=2`. Teensy GPT1
+then drives PULSE/DIRECTION/ENABLE from integer position and actual monotonic
+microseconds. GPIO and USB feedback coexist. No repeated DPOS/SSPD/SCAN commands
+are sent during the waveform. See README for pin wiring and electrical constraints.
+At exactly N cycles the trajectory clamps to the negative extremum at zero
+velocity, disables pulses, sends STOP, waits for USB drain, sends DPOS=center,
+and waits for the existing echo/new-STAT Position Reached confirmation.
+The 10 s final reserve covers STOP plus return. ABORT, fault, USB1 disconnect, or
+USB2 disconnect stop sinusoidal GPIO generation and retain results. Quasi-static
+motion and autonomous disconnect behavior remain unchanged.
 
 Dataset version 2 uses 48-byte records: the original ten words followed by
 `epos_generation` and `pressure_generation` (u32). The desktop rejects version 1
@@ -198,12 +189,10 @@ plots every logger sample as a continuous line against experiment elapsed time
 (`time_s` in CSV); no I²C completion time column is exported. Both identities and
 per-signal new flags remain in CSV. During the sine waveform, `target` is the
 theoretical position at actual logging time; the terminal sample at STOP is the
-negative extremum, which remains the target while STOP drains.
-Quasi-static retains its last commanded DPOS target. Metadata adds
-`sine_control: "velocity_scan"` and
-`sine_initialization: "negative_extremum_zero_velocity"` for sinusoidal runs and retains `trajectory_ms: 10`
-and `sample_ms: 20`. Signed theoretical velocity can be calculated from saved
-configuration and elapsed time during the waveform; no age field is replaced.
+negative extremum while STOP drains, then the center during the final return.
+Quasi-static retains its last commanded DPOS target. Sinusoidal metadata adds
+`sine_control: "gpio_pulse_direction"`, calculated `peak_pulse_hz`, and
+`max_pulse_hz: 10000`; `sample_ms` remains 20.
 Controller faults include a specific `reason` and, when observed by the engine,
 `fault_stat`: the triggering STAT word retained before STOP. The results display
 this word because the live Dashboard may show a later, cleared status.
@@ -215,78 +204,24 @@ Post-run `timing` metadata reports arrival statistics, cache reuse, unlogged EPO
 updates, receipt ages, parse errors and USB service/backlog/TX occupancy.
 `epos_rtt`, `epos_source_drops` and `rx_overflow` are null (unavailable), not zero.
 Receipt timestamps measure Teensy reception, not controller sampling time.
-## Sinusoidal reversal diagnostics
+### Final return evidence
 
-For the velocity-reversal firmware, `data_meta` additionally declares
-`reversal_count`, `reversal_total`, `reversal_window_ms` and an initially empty
-`reversals` array. Each `data_chunk` JSON header supplies `reversal_offset` and
-at most two reversal objects; its binary payload and CRC remain dataset v2.
-The native receiver appends these objects in order to retained metadata and
-requires the declared count before ACK. Restarting GET_DATA resets both payload
-and diagnostic accumulation. Current firmware sends one reversal per two-sample
-chunk; `reversal_count` is capped by the available chunks and 288 stored entries.
-Validation limits runs to 144 cycles so accepted reversals fit the fixed storage.
-The receiver also accepts older dataset-v2 chunks of up to sixteen samples and
-two reversal objects. Nothing is streamed during RUNNING.
-
-The 8192-byte JSON line limit accommodates these headers and final-return metadata. Older clients
-can still decode the sample payload but need updating to retain the new
-diagnostics. See the [reversal record implementation](../src/reversal.rs) for
-fields and timestamp semantics.
-
-## Adaptive scheduler diagnostics
-
-`data_meta.scheduler` reports the selected `mode` (`adaptive` or `fixed100hz`),
-interval/tolerance configuration, attempted/accepted waveform command counts,
-SSPD rate and interval statistics, scheduling/reversal lateness, scheduled-to-queue
-and USB completion latency statistics, held-command error, and TX queue statistics.
-It also reports requested/coalesced updates, maximum consecutive coalescing,
-busy-duration statistics, zero/direction/resume completion latency from the
-theoretical crossing, and separate backpressure versus USB transfer fault counts.
-See the [waveform transport implementation](../src/waveform_tx.rs) for diagnostic
-definitions. Groups with no timing observations are null; missing
-completions remain explicitly counted. These diagnostics are returned only after
-RUNNING, retained by the desktop receiver, and exported in CSV metadata. Legacy
-`trajectory_ms=10` is the fixed baseline/max evaluation interval; it no longer
-describes every default-mode control interval. The sample format is unchanged.
-
-
-### Final STOP evidence
-
-`data_meta.final_return` (version 1, sinusoidal runs that reach the boundary) retains
-host timestamps in wrapping absolute milliseconds. The legacy `final_return`
-field name and version are retained for dataset compatibility. `target_counts`
-and `theoretical_counts` both identify the starting extremum; `speed_um_s` is zero.
-No final DPOS is sent: its token is zero, its timestamps are null, and `echo` is null.
-Subtract `started_ms` modulo
-2^32 for run-relative times. `stop` and `dpos` each contain an accepted command
-`token` and `ms=[scheduled, queued, USB-completed]`; null means unobserved. USB
-completion is not a controller acknowledgement. The DPOS `echo` is separate.
-`boundary_feedback` and `final_feedback` contain EPOS, DPOS, STAT, TIME, in that
-order; each entry is `[value, host_receipt_ms]` or null. `ptol_pto2_tout_dlay` uses
-the same representation for read-only pre-motion controller queries.
-`stat_transitions` retains up to eight distinct status words and receipt times;
-bit 10 is Position Reached. Overflow is counted in `stat_transitions_dropped`.
-The 50 Hz binary records retain the intermediate feedback and its ages, while
-`final_feedback` captures completion/failure between logger ticks. No field
-claims to be a synchronized physical measurement. `error_counts` and `error_um`
-are signed EPOS minus the starting extremum, diagnostic only. `deadline_ms`,
-`expired`, and `finished_ms` distinguish a timeout from successful completion.
-`boundary_ms` is the first representable millisecond at or after the mathematical
-cycle boundary; `observed_ms` is the actual foreground observation. The declared
-zero theoretical velocity belongs to the exact cycle boundary, even when the
-boundary is fractional or observed late. `waveform_tx_pending` reports USB busy;
-`waveform_intent_pending` reports unsent/coalesced/reversal intent discarded at STOP.
-
-The record format and DATA_VERSION remain unchanged. Deploy the updated desktop
-receiver with this firmware because final metadata may exceed the old 4096-byte
-line limit. Dataset CRC still covers binary records, as before.
+`data_meta.final_return` (version 2) retains the mathematical boundary, foreground observation,
+STOP/DPOS USB queue/completion timestamps, target center, start extremum, feedback,
+DPOS echo, positioning settings, and bounded STAT transitions. Times are wrapping
+absolute host milliseconds; subtract `started_ms` modulo 2^32 for relative times.
+`stop` and `dpos` contain `token` and `ms=[scheduled, queued, USB-completed]`;
+null means unobserved. USB completion alone is not physical arrival.
+`boundary_feedback` and `final_feedback` contain EPOS, DPOS, STAT, TIME as
+`[value, host_receipt_ms]` or null; `ptol_pto2_tout_dlay` contains read-only settings.
+`error_counts` / `error_um` are EPOS minus the center. `deadline_ms`, `expired`,
+and `finished_ms` distinguish return timeout from confirmed completion.
 
 ## Dataset transfer
 
 ```text
 START <id> Q <start_nm:i64> <step_nm:i64> <hold_ms:u32> <steps:u32> <speed_um_s:u32>
-START <id> S <center_nm:i64> <amplitude_nm:u32> <frequency_millihz:u32> <cycles:u32> [<compensation_enabled:0|1> <compensation_ms:u32>]
+START <id> S <center_nm:i64> <amplitude_nm:u32> <frequency_millihz:u32> <cycles:u32>
 ABORT <id>
 GET_DATA <id> <run>
 GET_CHUNK <id> <run> <record_offset>
@@ -297,7 +232,8 @@ START replies with `experiment_ack`, run, and action `start`; ABORT uses action
 `abort`. The retained dataset reports the terminal outcome. Hardware ownership
 lasts through positioning, acquisition, and transfer until verified ACK. Ordinary
 commands (including PING and manual STOP) return busy; use ABORT for an active run.
-USB1 disconnect and PC heartbeat loss do not terminate autonomous acquisition.
+USB1 disconnect stops sinusoidal runs; PC heartbeat loss alone does not terminate
+acquisition. Quasi-static disconnect behavior remains autonomous.
 
 On USB1 open, `experiment_state` announces `dashboard`, `running` (including
 positioning/arming), or `data_ready`. The desktop waits passively before its
@@ -306,8 +242,7 @@ The native receiver downloads `data_ready` results using GET_DATA, then sequenti
 GET_CHUNK requests. `data_meta` includes configuration, run, version, record size,
 count, bytes, CRC, outcome/reason, STOP queue result, timing, and retained diagnostics.
 
-A `data_chunk` JSON header with id/run/record-offset/byte-length and reversal
-metadata ends in LF, followed immediately by the declared binary bytes. There
+A `data_chunk` JSON header with id/run/record-offset/byte-length ends in LF, followed immediately by the declared binary bytes. There
 is no delimiter after the payload. Current firmware sends at most two records
 (96 bytes) per chunk; native reception accepts up to sixteen dataset-v2 records
 for compatibility. Binary LF/NUL/non-UTF8 bytes are opaque to line framing.
@@ -332,13 +267,13 @@ Dataset v2 contains twelve explicit little-endian 32-bit words per 48-byte recor
 Capacity is 4,096 records at 20 ms sampling. Position receipt time is signed
 `elapsed_ms - epos_age_ms`; signals are asynchronous, not simultaneous measurements.
 The terminal waveform sample and any subsequent samples while STOP drains record
-the original starting extremum. Version 1 datasets are rejected rather than decoded
+the original starting extremum; return-to-center samples record the center. Version 1 datasets are rejected rather than decoded
 with the wrong layout. CSV preserves raw values, ages, identities, and diagnostics.
 
 CRC-32/ISO-HDLC covers concatenated encoded records: initialize to 0xffffffff,
 use reflected polynomial 0xedb88320, and complement the final value. JSON metadata
 is validated separately and is not covered by this payload CRC. Native Rust
-checks count, bytes, offsets, run, timestamps, diagnostic count, and CRC before
+checks count, bytes, offsets, run, timestamps and CRC before
 retaining the dataset and sending ACK_DATA_RECEIVED. Firmware also requires every
 record to have transferred in sequence before accepting the matching count/CRC ACK.
 Empty fault datasets still require verification and ACK.
@@ -350,18 +285,3 @@ passes validation. Desktop CSV/PNG export opens a native Save As dialog, release
 serial locks while it is open, and rechecks ownership before writing. Cancellation
 or write failure leaves results available. RAM results are not durable across
 power loss or desktop process exit.
-
-Sinusoidal feed-forward compensation is experimental. New desktop START commands
-always include both compensation fields; legacy omitted fields mean disabled,
-17 ms configured. The firmware advertises `compensation_max_ms` in HELLO from
-`MAX_COMPENSATION_MS`; whole values 0..25 ms are validated even when disabled.
-Native configuration uses `compensation_enabled` (boolean) and `compensation_ms`
-(unsigned integer), preserved in `data_meta.config` and CSV metadata.
-`data_meta.feed_forward` labels the experiment and records `phase_deg =
-360*f*compensation_ms/1000`, `applied_phase_deg` (zero when disabled), and the
-250 ms `smoothstep_phase` activation policy. With `u=min(t/0.250,1)` and
-`s=3u²−2u³`, only velocity uses `t+τs`; direction and adaptive error calculations
-use that same monotone phase. Reference position, duration, all timestamp fields,
-pressure acquisition, and final STOP timing remain unchanged. Compensation may
-add a reversal just before the final STOP; the existing bounded diagnostics hold
-all 288 reversals of a 144-cycle run. No mechanical-delay claim is implied.

@@ -438,3 +438,6 @@ mod xeryon_motion_tests {
         assert_eq!(m.state, 1);
     }
 }
+
+#[path = "../src/trajectory.rs"]
+mod trajectory;

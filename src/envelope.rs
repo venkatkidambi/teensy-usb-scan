@@ -19,8 +19,6 @@ mod tests {
             amplitude_nm: 7800,
             frequency_mhz: 1000,
             cycles: 1,
-            compensation_enabled: false,
-            compensation_ms: 17,
         };
         let mut guard = Envelope::default();
         let mut t = Telemetry::new();

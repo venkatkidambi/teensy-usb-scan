@@ -4,16 +4,7 @@ use crate::{experiment_data::*, pressure::Reading, protocol::Telemetry, xeryon_m
 #[path = "envelope.rs"]
 pub mod envelope;
 #[path = "final_return.rs"]
-mod final_return;
-#[path = "reversal.rs"]
-pub mod reversal;
-#[path = "scheduling.rs"]
-pub mod scheduling;
-#[path = "waveform_tx.rs"]
-mod waveform_tx;
-
-const MODE_FEEDBACK_GRACE_MS: u32 = 100;
-
+pub mod final_return;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Dashboard,
@@ -34,11 +25,13 @@ pub trait Actuator {
     }
     fn start_timing(&mut self) {}
     fn end_timing(&mut self) {}
-    fn tx_progress(&self) -> reversal::TxProgress {
-        reversal::TxProgress::default()
+    fn tx_progress(&self) -> final_return::TxProgress {
+        final_return::TxProgress::default()
     }
-    /// One or two ordered, separately flushed SSPD/SCAN lines; no readback.
-    fn scan(&mut self, commands: &[xeryon_motion::ScanCommand]) -> Result<(), &'static str>;
+    fn prepare_gpio(&mut self, now: u32) -> Result<bool, &'static str>;
+    fn start_gpio(&mut self, config: ExperimentConfig) -> Result<(), &'static str>;
+    fn gpio_status(&self) -> crate::trajectory::Status;
+    fn stop_gpio(&mut self);
     /// Set and request SSPD in separate, ordered USB transfers.
     fn speed(&mut self, speed_um_s: u32) -> Result<(), &'static str>;
     fn query_motor_timeout(&mut self) -> Result<(), &'static str>;
@@ -73,20 +66,15 @@ pub struct Engine<'a> {
     timeout_pending: bool,
     timeout_updates: u32,
     next_sample: u32,
-    next_target: u32,
     step: u32,
     hold_started: Option<u32>,
     target: i32,
     epoch: u32,
     transfer_next: usize,
     stopping: bool,
+    returning: bool,
     final_return: final_return::Diagnostics,
-    scan: xeryon_motion::ScanState,
-    waveform_tx: waveform_tx::Transport,
-    pub scheduling: scheduling::Diagnostics,
-    pub reversals: reversal::Diagnostics<'a>,
     pub envelope: envelope::Envelope,
-    motion_changed_ms: u32,
     fault_stat: Option<u32>,
     feedback_pending: bool,
     epos_arrivals: crate::protocol::ArrivalStats,
@@ -131,20 +119,15 @@ impl<'a> Engine<'a> {
             timeout_pending: false,
             timeout_updates: 0,
             next_sample: 0,
-            next_target: 0,
             step: 0,
             hold_started: None,
             target: 0,
             epoch: 0,
             transfer_next: 0,
             stopping: false,
+            returning: false,
             final_return: Default::default(),
-            scan: xeryon_motion::ScanState::default(),
-            waveform_tx: waveform_tx::Transport::default(),
-            scheduling: scheduling::Diagnostics::default(),
-            reversals: reversal::Diagnostics::new(&mut []),
             envelope: envelope::Envelope::configured(),
-            motion_changed_ms: 0,
             fault_stat: None,
             feedback_pending: false,
             epos_arrivals: Default::default(),
@@ -164,10 +147,6 @@ impl<'a> Engine<'a> {
             epos_start_generation: 0,
             epos_logged_updates: 0,
         }
-    }
-    pub fn with_reversals(mut self, records: &'a mut [reversal::Reversal]) -> Self {
-        self.reversals = reversal::Diagnostics::new(records);
-        self
     }
     pub fn active(&self) -> bool {
         matches!(
@@ -263,11 +242,7 @@ impl<'a> Engine<'a> {
         self.duration_ms = duration;
         self.required_samples = required;
         self.len = 0;
-        self.reversals.reset();
         self.envelope.reset(t.epos_generation);
-        let mode = self.scheduling.mode;
-        self.scheduling = scheduling::Diagnostics::default();
-        self.scheduling.mode = mode;
         self.crc = !0;
         self.elapsed_ms = 0;
         self.started_ms = 0;
@@ -285,9 +260,8 @@ impl<'a> Engine<'a> {
         self.epoch = t.epoch;
         self.step = 0;
         self.stopping = false;
+        self.returning = false;
         self.final_return = Default::default();
-        self.scan = xeryon_motion::ScanState::default();
-        self.waveform_tx = waveform_tx::Transport::default();
         self.fault_stat = None;
         self.feedback_pending = true;
         self.epos_arrivals = Default::default();
@@ -333,28 +307,7 @@ impl<'a> Engine<'a> {
         if self.final_return.boundary.is_some() {
             self.final_return.finished = Some(self.started_ms.wrapping_add(self.elapsed_ms));
         }
-        self.waveform_tx
-            .close_busy(self.elapsed_ms, &mut self.scheduling);
-        if self.state == State::Running && !self.stopping {
-            if let Some(ExperimentConfig::Sinusoidal {
-                amplitude_nm,
-                frequency_mhz,
-                ..
-            }) = self.config
-            {
-                self.scheduling.observe(
-                    amplitude_nm,
-                    frequency_mhz,
-                    self.elapsed_ms.min(self.duration_ms - MOVE_TIMEOUT_MS),
-                    self.config.unwrap().feed_forward(),
-                );
-            }
-        }
-        if self.state == State::Running {
-            self.scheduling.refresh(io.tx_progress());
-        }
-        self.reversals.refresh(io.tx_progress(), self.started_ms);
-        self.waveform_tx = waveform_tx::Transport::default();
+        io.stop_gpio();
         io.end_timing();
         #[cfg(not(test))]
         crate::fault::mark(5);
@@ -372,6 +325,11 @@ impl<'a> Engine<'a> {
             self.reason = "STOP could not be queued";
         }
         self.state = State::DataReady;
+    }
+    pub fn disconnected(&mut self, io: &mut impl Actuator) {
+        if self.active() && matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) {
+            self.finish(State::Fault, "USB1 disconnected", io);
+        }
     }
     pub fn abort(&mut self, io: &mut impl Actuator) {
         if self.active() {
@@ -391,39 +349,11 @@ impl<'a> Engine<'a> {
             if self.state == State::Running {
                 self.elapsed_ms = now.wrapping_sub(self.started_ms);
             }
-            self.scheduling.usb_faults += 1;
             self.finish(State::Fault, "Xeryon USB transfer failed", io);
             return;
         }
         if self.state == State::Running {
             self.elapsed_ms = now.wrapping_sub(self.started_ms);
-            self.scheduling.refresh(io.tx_progress());
-            self.reversals.refresh(io.tx_progress(), self.started_ms);
-            if !self.stopping {
-                self.reversals.observe(
-                    self.config.unwrap(),
-                    self.elapsed_ms,
-                    now,
-                    t,
-                    !io.tx_idle(),
-                );
-            }
-            if !self.stopping {
-                if let Some(ExperimentConfig::Sinusoidal {
-                    amplitude_nm,
-                    frequency_mhz,
-                    ..
-                }) = self.config
-                    && self.elapsed_ms >= self.duration_ms - MOVE_TIMEOUT_MS
-                {
-                    self.scheduling.observe(
-                        amplitude_nm,
-                        frequency_mhz,
-                        self.elapsed_ms.min(self.duration_ms - MOVE_TIMEOUT_MS),
-                        self.config.unwrap().feed_forward(),
-                    );
-                }
-            }
             self.epos_arrivals = t.epos_arrivals;
             self.transport = t.transport;
             self.malformed = t.malformed.wrapping_sub(self.malformed_start);
@@ -439,19 +369,21 @@ impl<'a> Engine<'a> {
         // closed loop once armed, before starting acquisition or the waveform.
         let sine_running = self.state == State::Running
             && matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. }));
-        // STOP may clear closed-loop status. Allow the deliberately
-        // stopped phases and a bounded 100 ms mode-change feedback grace after
-        // starting SCAN. All other health checks stay in force.
+        // STOP can clear closed-loop state before the final DPOS is issued.
         let stopped_transition = sine_running
-            && (self.stopping
-                || self.scan.direction == Some(0)
-                || now.wrapping_sub(self.motion_changed_ms) < MODE_FEEDBACK_GRACE_MS);
+            && self.stopping
+            && (!self.returning
+                || self
+                    .final_return
+                    .dpos
+                    .scheduled
+                    .is_some_and(|sent| now.wrapping_sub(sent) < 100));
         let fault = Self::healthy(
             t,
             p,
             now,
             self.state != State::MoveToStart && !stopped_transition,
-            sine_running,
+            false,
         )
         .err()
         .or_else(|| (t.epoch != self.epoch).then_some("Xeryon connection changed"))
@@ -551,13 +483,26 @@ impl<'a> Engine<'a> {
             return;
         }
         if self.state == State::Armed {
-            // Drain positioning traffic before t=0 so the first waveform command
-            // is exactly SSPD=0 followed by SCAN=+1, never a delayed nonzero retry.
-            if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) && !io.tx_idle() {
+            if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) {
                 if now.wrapping_sub(self.move_started) >= self.move_timeout {
                     self.finish(State::Fault, "Start move deadline", io);
+                    return;
                 }
-                return;
+                if !io.tx_idle() {
+                    return;
+                }
+                match io.prepare_gpio(now) {
+                    Ok(false) => return,
+                    Err(e) => {
+                        self.finish(State::Fault, e, io);
+                        return;
+                    }
+                    Ok(true) => {}
+                }
+                if let Err(e) = io.start_gpio(self.config.unwrap()) {
+                    self.finish(State::Fault, e, io);
+                    return;
+                }
             }
             io.start_timing();
             self.last_pressure = p.samples;
@@ -569,9 +514,6 @@ impl<'a> Engine<'a> {
             self.started_ms = now;
             self.envelope.reset(t.epos_generation);
             self.next_sample = 0;
-            self.next_target = 0;
-            self.scan = xeryon_motion::ScanState::default();
-            self.motion_changed_ms = now;
             self.state = State::Running;
             #[cfg(not(test))]
             crate::fault::mark(4);
@@ -589,19 +531,17 @@ impl<'a> Engine<'a> {
         }
         // Log the theoretical position at the actual sample time, including
         // between control ticks. It is never sent as DPOS during the waveform.
-        if let ExperimentConfig::Sinusoidal {
-            center_nm,
-            amplitude_nm,
-            frequency_mhz,
-            ..
-        } = self.config.unwrap()
-            && (elapsed >= self.next_sample || (!self.stopping && elapsed >= self.next_target))
+        if let ExperimentConfig::Sinusoidal { .. } = self.config.unwrap()
+            && elapsed >= self.next_sample
+            && !self.returning
         {
             self.target = if elapsed >= self.duration_ms - MOVE_TIMEOUT_MS {
                 // Clamp the terminal sample to the exact endpoint before STOP.
                 self.config.unwrap().start().unwrap()
             } else {
-                sine_target(center_nm, amplitude_nm, frequency_mhz, elapsed)
+                crate::trajectory::Trajectory::new(self.config.unwrap())
+                    .unwrap()
+                    .position(elapsed * 1000)
             };
         }
         if elapsed >= self.next_sample {
@@ -684,50 +624,55 @@ impl<'a> Engine<'a> {
                     Ok(false)
                 }
             }
-            ExperimentConfig::Sinusoidal {
-                amplitude_nm,
-                frequency_mhz,
-                ..
-            } => {
-                let waveform_ms = self.duration_ms - MOVE_TIMEOUT_MS;
+            ExperimentConfig::Sinusoidal { center_nm, .. } => {
                 if self.stopping {
                     if now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS {
-                        Err("Final STOP deadline")
+                        Err("Return to center deadline")
+                    } else if !self.returning {
+                        if io.tx_idle() {
+                            self.target = counts(center_nm).unwrap();
+                            self.final_return.target = self.target;
+                            self.returning = true;
+                            self.final_return.dpos.scheduled = Some(now);
+                            io.target(self.target, now, true).map(|_| {
+                                self.final_return.dpos.queued(now, io.tx_progress());
+                                false
+                            })
+                        } else {
+                            Ok(false)
+                        }
                     } else {
-                        Ok(io.tx_idle())
-                    }
-                } else if elapsed >= waveform_ms {
-                    self.final_return = final_return::Diagnostics {
-                        boundary: Some(self.started_ms.wrapping_add(waveform_ms)),
-                        observed: now,
-                        theoretical_counts: self.config.unwrap().start().unwrap(),
-                        target: self.config.unwrap().start().unwrap(),
-                        speed: 0,
-                        waveform_pending: !io.tx_idle(),
-                        intent_pending: self.waveform_tx.intent_pending(),
-                        settings: t.positioning,
-                        deadline: now.wrapping_add(MOVE_TIMEOUT_MS),
-                        ..Default::default()
-                    };
-                    self.final_return.observe(t, io.tx_progress());
-                    self.final_return.boundary_feedback = self.final_return.last;
-                    self.waveform_tx.close_busy(elapsed, &mut self.scheduling);
-                    self.waveform_tx = waveform_tx::Transport::default();
-                    if elapsed - waveform_ms >= TRAJECTORY_MS {
-                        Err("Trajectory deadline missed")
-                    } else {
-                        self.target = self.config.unwrap().start().unwrap();
-                        self.stopping = true;
-                        self.move_started = now;
-                        self.final_return.stop.scheduled = Some(now);
-                        io.stop().map(|_| {
-                            self.final_return.stop.queued(now, io.tx_progress());
-                            self.scan.stopped();
-                            false
-                        })
+                        Ok(t.xeryon_motion
+                            .is_some_and(|m| m.state == 2 && m.target == Some(self.target)))
                     }
                 } else {
-                    self.poll_waveform(now, t, amplitude_nm, frequency_mhz, io)
+                    match io.gpio_status() {
+                        crate::trajectory::Status::Running => Ok(false),
+                        crate::trajectory::Status::Complete => {
+                            io.stop_gpio();
+                            self.stopping = true;
+                            self.move_started = now;
+                            self.final_return = final_return::Diagnostics {
+                                boundary: Some(
+                                    self.started_ms
+                                        .wrapping_add(self.duration_ms - MOVE_TIMEOUT_MS),
+                                ),
+                                observed: now,
+                                theoretical_counts: self.config.unwrap().start().unwrap(),
+                                target: counts(center_nm).unwrap(),
+                                settings: t.positioning,
+                                deadline: now.wrapping_add(MOVE_TIMEOUT_MS),
+                                ..Default::default()
+                            };
+                            self.final_return.observe(t, io.tx_progress());
+                            self.final_return.boundary_feedback = self.final_return.last;
+                            io.stop().map(|_| {
+                                self.final_return.stop.queued(now, io.tx_progress());
+                                false
+                            })
+                        }
+                        _ => Err("GPIO trajectory stopped or timing deadline missed"),
+                    }
                 }
             }
         };
@@ -745,35 +690,17 @@ impl<'a> Engine<'a> {
         )?;
         self.config.unwrap().write_json(out)?;
         self.envelope.write(out)?;
-        if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) {
-            write!(
-                out,
-                ",\"sine_control\":\"velocity_scan\",\"sine_initialization\":\"negative_extremum_zero_velocity\",\"reversal_count\":{},\"reversal_total\":{},\"reversal_diagnostic_version\":2,\"reversal_window_ms\":{},\"reversals\":[]",
-                self.transferred_reversals(),
-                self.reversals.total,
-                reversal::WINDOW_MS
-            )?;
-        }
         if let Some(ExperimentConfig::Sinusoidal {
             amplitude_nm,
             frequency_mhz,
-            compensation_ms,
             ..
         }) = self.config
         {
-            self.scheduling.write(out, amplitude_nm, frequency_mhz)?;
             write!(
                 out,
-                ",\"feed_forward\":{{\"label\":\"experimental feed-forward time advance\",\"phase_deg\":{:.6},\"applied_phase_deg\":{:.6},\"activation_ms\":{},\"activation\":\"smoothstep_phase\"}}",
-                FeedForward {
-                    advance_ms: compensation_ms
-                }
-                .phase_degrees(frequency_mhz),
-                self.config
-                    .unwrap()
-                    .feed_forward()
-                    .phase_degrees(frequency_mhz),
-                COMPENSATION_RAMP_MS
+                ",\"sine_control\":\"gpio_pulse_direction\",\"peak_pulse_hz\":{:.3},\"max_pulse_hz\":{}",
+                peak_pulse_hz(amplitude_nm, frequency_mhz),
+                MAX_PULSE_HZ
             )?;
         }
         self.final_return.write(out)?;
@@ -819,7 +746,7 @@ impl<'a> Engine<'a> {
         write!(out, "]}}")?;
         writeln!(
             out,
-            ",\"count\":{},\"record_bytes\":{RECORD_BYTES},\"bytes\":{},\"crc\":{},\"outcome\":\"{}\",\"reason\":\"{}\",\"stop_queued\":{},\"sample_ms\":{SAMPLE_MS},\"trajectory_ms\":{TRAJECTORY_MS},\"move_timeout_ms\":{MOVE_TIMEOUT_MS},\"started_ms\":{},\"elapsed_ms\":{},\"duration_bound_ms\":{},\"required_samples\":{},\"missed_samples\":{},\"max_lateness_ms\":{}}}",
+            ",\"count\":{},\"record_bytes\":{RECORD_BYTES},\"bytes\":{},\"crc\":{},\"outcome\":\"{}\",\"reason\":\"{}\",\"stop_queued\":{},\"sample_ms\":{SAMPLE_MS},\"move_timeout_ms\":{MOVE_TIMEOUT_MS},\"started_ms\":{},\"elapsed_ms\":{},\"duration_bound_ms\":{},\"required_samples\":{},\"missed_samples\":{},\"max_lateness_ms\":{}}}",
             self.len,
             self.len * RECORD_BYTES,
             self.checksum(),
@@ -842,12 +769,6 @@ impl<'a> Engine<'a> {
         self.transfer_next = 0;
         Ok(())
     }
-    // One diagnostic per two samples covers all supported reversal frequencies.
-    fn transferred_reversals(&self) -> usize {
-        self.reversals.len.min(self.len.div_ceil(CHUNK_RECORDS))
-    }
-    /// One bounded diagnostic per two-record chunk. Kept out of RUNNING
-    /// traffic; the desktop collects them in metadata for raw CSV export.
     pub fn chunk_header(
         &self,
         out: &mut impl core::fmt::Write,
@@ -856,19 +777,10 @@ impl<'a> Engine<'a> {
         offset: usize,
         bytes: usize,
     ) -> core::fmt::Result {
-        write!(
+        writeln!(
             out,
-            "{{\"type\":\"data_chunk\",\"id\":{id},\"run\":{run},\"offset\":{offset},\"bytes\":{bytes},\"reversal_offset\":{},\"reversals\":[",
-            (offset / CHUNK_RECORDS).min(self.transferred_reversals())
-        )?;
-        let first = offset / CHUNK_RECORDS;
-        for i in first..(first + 1).min(self.transferred_reversals()) {
-            if i != first {
-                write!(out, ",")?;
-            }
-            self.reversals.records[i].write(out)?;
-        }
-        writeln!(out, "]}}")
+            "{{\"type\":\"data_chunk\",\"id\":{id},\"run\":{run},\"offset\":{offset},\"bytes\":{bytes}}}"
+        )
     }
     pub fn chunk(&mut self, run: u32, offset: usize) -> Result<&[Record], &'static str> {
         if self.state != State::Transferring
@@ -895,53 +807,4 @@ impl<'a> Engine<'a> {
         // Bytes remain intact until the next successfully validated START.
         Ok(())
     }
-}
-
-/// Quantize once, directly to the nearest encoder count (ties away from zero).
-/// Configuration validation bounds the entire trajectory to the encoder range.
-fn sine_target(center_nm: i64, amplitude_nm: u32, frequency_mhz: u32, elapsed: u32) -> i32 {
-    let phase = (u64::from(elapsed) * u64::from(frequency_mhz) + 250_000) % 1_000_000;
-    let wave = sine(phase as f64 / 1_000_000.0).clamp(-1.0, 1.0);
-    let position = (center_nm as f64 - f64::from(amplitude_nm) * wave) / 78.0;
-    (position + if position < 0.0 { -0.5 } else { 0.5 }) as i32
-}
-
-/// v(t) = 2*pi*f*A*sin(2*pi*f*t), in um/s, from actual elapsed milliseconds.
-fn sine_velocity(amplitude_nm: u32, frequency_mhz: u32, elapsed: u32) -> f64 {
-    let phase = (u64::from(elapsed) * u64::from(frequency_mhz)) % 1_000_000;
-    sine_max_velocity(amplitude_nm, frequency_mhz)
-        * sine(phase as f64 / 1_000_000.0).clamp(-1.0, 1.0)
-}
-
-/// Only actuator velocity uses the advanced clock. The disabled branch retains
-/// exactly the original arithmetic; reference position always uses real elapsed.
-fn feed_forward_velocity(amplitude: u32, frequency: u32, elapsed: u32, ff: FeedForward) -> f64 {
-    if ff.advance_ms == 0 {
-        return sine_velocity(amplitude, frequency, elapsed);
-    }
-    let phase = ff.phase(frequency, elapsed) % 1_000_000.0;
-    sine_max_velocity(amplitude, frequency) * sine(phase / 1_000_000.0).clamp(-1.0, 1.0)
-}
-
-/// Range-reduced Taylor polynomial, |error| < 5e-14 over a cycle; no libm/heap.
-pub(crate) fn sine(turns: f64) -> f64 {
-    let mut x = turns * core::f64::consts::TAU;
-    if x > core::f64::consts::PI {
-        x -= core::f64::consts::TAU;
-    }
-    if x > core::f64::consts::FRAC_PI_2 {
-        x = core::f64::consts::PI - x;
-    }
-    if x < -core::f64::consts::FRAC_PI_2 {
-        x = -core::f64::consts::PI - x;
-    }
-    let xx = x * x;
-    x * (1.0
-        + xx * (-1.0 / 6.0
-            + xx * (1.0 / 120.0
-                + xx * (-1.0 / 5040.0
-                    + xx * (1.0 / 362880.0
-                        + xx * (-1.0 / 39916800.0
-                            + xx * (1.0 / 6227020800.0
-                                + xx * (-1.0 / 1307674368000.0 + xx / 355687428096000.0))))))))
 }

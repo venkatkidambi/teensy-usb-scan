@@ -11,7 +11,7 @@ function harness() {
   };
   const oldDocument=globalThis.document,oldObserver=globalThis.ResizeObserver;
   globalThis.document={getElementById:node,createElement:()=>({})};globalThis.ResizeObserver=class{observe(){}};
-  const state={connected:true,hello:{experiments:true,sine_position:true},session:{
+  const state={connected:true,hello:{experiments:true,sine_gpio:true},session:{
     async startExperiment(config,append=false){calls.push(config);appendFlags.push(append);archiveIndex=append?archiveIndex+1:0;archiveIndices[calls.length]=archiveIndex;this.experimentOwned=true;return {run:calls.length};},
     async request(command){calls.push(command);},
   }};
@@ -32,11 +32,7 @@ function harness() {
 test('sweep prevalidates every frequency, waits for download and release, and exports selected history',async()=>{
   const h=harness();
   try{
-    h.state.hello.compensation_max_ms=25;
-    h.node('experiment-compensation-enabled').checked=true;
-    h.node('experiment-compensation-ms').value='17';
     await h.submit();
-    assert.ok(h.ipc.find(c=>c[0]==='experiment_validate')[1].configs.every(c=>c.compensation_enabled&&c.compensation_ms===17));
     assert.deepEqual(h.ipc.find(c=>c[0]==='experiment_validate')[1].configs.map(c=>c.timing),[1,5,10]);
     assert.equal(h.calls.length,1);assert.equal(h.node('experiment-start-button').disabled,true);
     assert.equal(h.node('experiment-sweep-progress').hidden,false);

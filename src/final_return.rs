@@ -1,7 +1,8 @@
-//! Retained final STOP evidence under the legacy final_return wire key. Times are wrapping host milliseconds, not
+//! Retained final STOP and confirmed center-return evidence. Times are host milliseconds, not
 //! controller execution times. The 50 Hz dataset supplies the EPOS/STAT/TIME
 //! history; these snapshots retain the boundary and between-tick completion.
-use super::reversal::TxProgress;
+#[derive(Clone, Copy, Default)]
+pub struct TxProgress(pub [u32; 6]); // queued, completed, last two queue/done times
 use crate::protocol::{Sample, Telemetry};
 
 #[derive(Default)]
@@ -48,9 +49,6 @@ pub struct Diagnostics {
     pub observed: u32,
     pub theoretical_counts: i32,
     pub target: i32,
-    pub speed: u32,
-    pub waveform_pending: bool,
-    pub intent_pending: bool,
     pub stop: Command,
     pub dpos: Command,
     pub boundary_feedback: [Sample; 4], // EPOS, DPOS, STAT, TIME
@@ -102,13 +100,8 @@ impl Diagnostics {
         };
         write!(
             out,
-            ",\"final_return\":{{\"version\":1,\"boundary_ms\":{boundary},\"observed_ms\":{},\"theoretical_counts\":{},\"theoretical_velocity_um_s\":0,\"target_counts\":{},\"speed_um_s\":{},\"waveform_tx_pending\":{},\"waveform_intent_pending\":{},\"stop\":",
-            self.observed,
-            self.theoretical_counts,
-            self.target,
-            self.speed,
-            self.waveform_pending,
-            self.intent_pending
+            ",\"final_return\":{{\"version\":2,\"boundary_ms\":{boundary},\"observed_ms\":{},\"theoretical_counts\":{},\"theoretical_velocity_um_s\":0,\"target_counts\":{},\"stop\":",
+            self.observed, self.theoretical_counts, self.target
         )?;
         self.stop.write(out)?;
         write!(out, ",\"dpos\":")?;

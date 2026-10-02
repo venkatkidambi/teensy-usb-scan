@@ -147,6 +147,7 @@ impl Console {
         let open = configured && self.class.dtr();
         if self.open && !open {
             crate::motor::stop();
+            experiment.disconnected(&mut crate::usb_host::ExperimentActuator);
             crate::usb_host::disconnect_xeryon();
         }
         if !open || !self.open {
@@ -200,6 +201,7 @@ impl Console {
                     self.tx.clear();
                     self.open = false;
                     crate::motor::stop();
+                    experiment.disconnected(&mut crate::usb_host::ExperimentActuator);
                     crate::usb_host::disconnect_xeryon();
                     return;
                 }
@@ -359,9 +361,9 @@ impl Console {
                     }
                     Ok(Command::Hello(id)) => writeln!(
                         self.tx,
-                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"quasi_static_speed\":true,\"sine_position\":true,\"sine_velocity\":true,\"compensation_max_ms\":{}}}",
+                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"quasi_static_speed\":true,\"sine_position\":true,\"sine_gpio\":true,\"max_pulse_hz\":{}}}",
                         env!("CARGO_PKG_VERSION"),
-                        crate::experiment_data::MAX_COMPENSATION_MS
+                        crate::experiment_data::MAX_PULSE_HZ
                     ),
                     Ok(Command::Ping(id)) => {
                         writeln!(self.tx, "{{\"type\":\"pong\",\"id\":{id},\"ms\":{now}}}")

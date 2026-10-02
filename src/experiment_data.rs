@@ -4,9 +4,7 @@ pub const RECORD_FIELDS: usize = 12;
 pub const DATA_VERSION: u32 = 2;
 pub const RECORD_BYTES: usize = RECORD_FIELDS * 4;
 pub const CHUNK_RECORDS: usize = 2;
-pub const REVERSAL_CAPACITY: usize = 288;
 pub const SAMPLE_MS: u32 = 20; // 50 Hz experiment recording
-pub const TRAJECTORY_MS: u32 = 10; // Fixed-mode period and existing lateness fault bound
 pub const MOVE_TIMEOUT_MS: u32 = 10_000;
 pub const MAX_SPEED_UM_S: u32 = 0x00ff_ffff;
 pub const MAX_DURATION_MS: u32 = (CAPACITY as u32 - 1) * SAMPLE_MS;
@@ -14,71 +12,16 @@ pub const MIN_POSITION: i32 = -(1 << 25);
 pub const MAX_POSITION: i32 = (1 << 25) - 1;
 pub const MAX_TRAVEL_NM: u32 = MAX_POSITION as u32 * 78;
 
-/// Experimental actuator time advance, in whole milliseconds. Shared with desktop.
-pub const MAX_COMPENSATION_MS: u32 = 25;
-// At 10 Hz, phase rate <= 1.15 keeps successive crossings > 40 ms apart.
-pub const COMPENSATION_RAMP_MS: u32 = 250;
-
-/// Monotone feed-forward clock only; never use for acquisition or reference time.
-#[derive(Clone, Copy, Default)]
-pub struct FeedForward {
-    pub advance_ms: u32,
-}
-impl FeedForward {
-    pub fn time_ms(self, elapsed: u32) -> f64 {
-        let t = f64::from(elapsed);
-        let u = (t / f64::from(COMPENSATION_RAMP_MS)).min(1.0);
-        // Smoothstep has zero slope at both ends: v(0)=0 and no activation jump.
-        t + f64::from(self.advance_ms) * u * u * (3.0 - 2.0 * u)
-    }
-    pub fn phase(self, frequency: u32, elapsed: u32) -> f64 {
-        self.time_ms(elapsed) * f64::from(frequency)
-    }
-    pub fn direction(self, frequency: u32, elapsed: u32) -> i8 {
-        if self.advance_ms == 0 {
-            return sine_direction(frequency, elapsed);
-        }
-        if self.phase(frequency, elapsed) % 1_000_000.0 >= 500_000.0 {
-            -1
-        } else {
-            1
-        }
-    }
-    /// First real millisecond reaching a half-cycle, including during activation.
-    pub fn crossing_ms(self, frequency: u32, half_cycle: u64) -> u32 {
-        let phase = half_cycle * 500_000;
-        let mut hi = phase.div_ceil(u64::from(frequency)) as u32;
-        let mut lo = hi.saturating_sub(self.advance_ms);
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if self.phase(frequency, mid) >= phase as f64 {
-                hi = mid;
-            } else {
-                lo = mid + 1;
-            }
-        }
-        lo
-    }
-    pub fn phase_degrees(self, frequency_mhz: u32) -> f64 {
-        360.0 * f64::from(frequency_mhz) * f64::from(self.advance_ms) / 1_000_000.0
-    }
+/// XD-C manual section 5 recommends at most 20 kHz. Reserve timing headroom
+/// for 25 us IRQ service, direction setup and pulse high/low intervals.
+pub const MAX_PULSE_HZ: u32 = 10_000;
+pub fn peak_pulse_hz(amplitude_nm: u32, frequency_mhz: u32) -> f64 {
+    sine_max_velocity(amplitude_nm, frequency_mhz) / 0.078
 }
 
 /// nm and millihertz -> micrometers/second. Also used by desktop validation.
 pub fn sine_max_velocity(amplitude_nm: u32, frequency_mhz: u32) -> f64 {
     core::f64::consts::TAU * f64::from(frequency_mhz) * f64::from(amplitude_nm) / 1_000_000.0
-}
-
-/// Exact phase direction, with the outgoing sign at both extrema. Integer
-/// phase avoids sine approximation/rounding deciding which tick reverses.
-pub fn sine_direction(frequency_mhz: u32, elapsed_ms: u32) -> i8 {
-    let phase = u64::from(frequency_mhz) * u64::from(elapsed_ms) % 1_000_000;
-    if phase >= 500_000 { -1 } else { 1 }
-}
-
-/// SSPD is an unsigned 24-bit integer; round magnitude to nearest, ties up.
-pub fn velocity_speed(velocity: f64) -> u32 {
-    (velocity.abs() + 0.5) as u32
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,8 +38,6 @@ pub enum ExperimentConfig {
         amplitude_nm: u32,
         frequency_mhz: u32,
         cycles: u32,
-        compensation_enabled: bool,
-        compensation_ms: u32,
     },
 }
 
@@ -136,39 +77,8 @@ impl ExperimentConfig {
                 amplitude_nm: u32::try_from(increment).map_err(|_| "Amplitude out of range")?,
                 frequency_mhz: timing,
                 cycles: repeats,
-                compensation_enabled: false,
-                compensation_ms: 17,
             }),
             _ => Err("Unknown experiment mode"),
-        }
-    }
-    pub fn with_compensation(mut self, enabled: bool, ms: u32) -> Result<Self, &'static str> {
-        if ms > MAX_COMPENSATION_MS {
-            return Err("Feed-forward compensation exceeds the allowed range");
-        }
-        match &mut self {
-            Self::Sinusoidal {
-                compensation_enabled,
-                compensation_ms,
-                ..
-            } => {
-                *compensation_enabled = enabled;
-                *compensation_ms = ms;
-            }
-            _ => return Err("Compensation is only available for sinusoidal experiments"),
-        }
-        Ok(self)
-    }
-    pub fn feed_forward(self) -> FeedForward {
-        FeedForward {
-            advance_ms: match self {
-                Self::Sinusoidal {
-                    compensation_enabled: true,
-                    compensation_ms,
-                    ..
-                } => compensation_ms,
-                _ => 0,
-            },
         }
     }
     pub fn start(self) -> Result<i32, &'static str> {
@@ -247,12 +157,8 @@ impl ExperimentConfig {
                 amplitude_nm,
                 frequency_mhz,
                 cycles,
-                compensation_ms,
                 ..
             } => {
-                if compensation_ms > MAX_COMPENSATION_MS {
-                    return Err("Feed-forward compensation exceeds the allowed range");
-                }
                 if amplitude_nm < 78 || !(100..=10_000).contains(&frequency_mhz) || cycles == 0 {
                     return Err(
                         "Amplitude must be positive; frequency 0.1..10 Hz; cycles positive",
@@ -268,18 +174,10 @@ impl ExperimentConfig {
                         .checked_add(i64::from(amplitude_nm))
                         .ok_or("Trajectory overflow")?,
                 )?;
-                if u64::from(cycles) * 2 - 1 > REVERSAL_CAPACITY as u64 {
-                    return Err("Experiment exceeds fixed reversal diagnostics (144 cycles)");
+                if peak_pulse_hz(amplitude_nm, frequency_mhz) > f64::from(MAX_PULSE_HZ) {
+                    return Err("Sinusoidal peak pulse rate exceeds 10000 Hz");
                 }
-                let vmax = sine_max_velocity(amplitude_nm, frequency_mhz);
-                if !vmax.is_finite()
-                    || vmax <= 0.0
-                    || vmax > f64::from(MAX_SPEED_UM_S)
-                    || !(1..=MAX_SPEED_UM_S).contains(&velocity_speed(vmax))
-                {
-                    return Err("Sinusoidal peak speed is outside representable SSPD range");
-                }
-                // Preserve the acquisition reserve while the final STOP drains.
+                // Reserve time for STOP and the confirmed return to center.
                 (u64::from(cycles) * 1_000_000).div_ceil(u64::from(frequency_mhz))
                     + u64::from(MOVE_TIMEOUT_MS)
             }
@@ -306,11 +204,9 @@ impl ExperimentConfig {
                 amplitude_nm,
                 frequency_mhz,
                 cycles,
-                compensation_enabled,
-                compensation_ms,
             } => write!(
                 out,
-                "{{\"kind\":\"sinusoidal\",\"center_nm\":{center_nm},\"amplitude_nm\":{amplitude_nm},\"frequency_mhz\":{frequency_mhz},\"cycles\":{cycles},\"compensation_enabled\":{compensation_enabled},\"compensation_ms\":{compensation_ms}}}"
+                "{{\"kind\":\"sinusoidal\",\"center_nm\":{center_nm},\"amplitude_nm\":{amplitude_nm},\"frequency_mhz\":{frequency_mhz},\"cycles\":{cycles}}}"
             ),
         }
     }

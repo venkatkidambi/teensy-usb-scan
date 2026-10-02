@@ -65,19 +65,11 @@ impl Command {
                 } else {
                     None
                 };
-                let mut config =
+                let config =
                     ExperimentConfig::from_wire(kind, start, increment, timing, repeats, speed)
                         .map_err(|_| ())?;
-                if kind == "S" {
-                    if let Some(enabled) = optional {
-                        let enabled = match enabled {
-                            "0" => false,
-                            "1" => true,
-                            _ => return Err(()),
-                        };
-                        let ms = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
-                        config = config.with_compensation(enabled, ms).map_err(|_| ())?;
-                    }
+                if kind == "S" && optional.is_some() {
+                    return Err(());
                 }
                 Self::Start(id, config)
             }
