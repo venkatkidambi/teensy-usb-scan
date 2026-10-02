@@ -159,8 +159,12 @@ export function experimentMessage(message) {
       const measured=m.reversals.filter(r=>r.detail);
       if(measured.length){
         const worst=measured.reduce((a,b)=>a.detail.excursion_counts>=b.detail.excursion_counts?a:b);
-        $('experiment-result-summary').textContent+=` · largest measured envelope excursion ${(worst.detail.excursion_counts*.078).toFixed(3)} µm near ${(worst.detail.theoretical_ms/1000).toFixed(3)} s (host receipt timing)`;
+        $('experiment-result-summary').textContent+=` · largest excursion within reversal windows ${(worst.detail.excursion_counts*.078).toFixed(3)} µm near ${(worst.detail.theoretical_ms/1000).toFixed(3)} s`;
       }
+    }
+    const excursion=waveformExcursion(dataset);
+    if(excursion){
+      $('experiment-result-summary').textContent+=` · largest logged waveform envelope excursion ${(excursion.counts*.078).toFixed(3)} µm${excursion.counts?` at ${(excursion.receiptMs/1000).toFixed(3)} s`:''} (host receipt timing; ${excursion.observations} unique readings)`;
     }
     if(m.envelope&&m.config.kind==='sinusoidal')$('experiment-result-summary').textContent+=m.envelope.enabled?` · envelope STOP margin ${(m.envelope.margin_nm/1000).toFixed(3)} µm`:' · envelope STOP guard disabled';
     if(m.reversal_total>m.reversal_count)$('experiment-result-summary').textContent+=` · reversal details retained for ${m.reversal_count} of ${m.reversal_total} peaks`;
@@ -180,6 +184,26 @@ export function signalPoints(samples, field, scale=1) {
   let previous;
   return samples.filter(s=>{const fresh=s[generation]!==previous;previous=s[generation];return fresh;})
     .map(s=>[s[0]-s[age],s[field]*scale]);
+}
+// Scan all logged encoder publications: a reversal window can miss a spike
+// immediately before/after it. Preserve raw data and use the same rounded
+// encoder endpoints as firmware. This is an observed excursion, not a claim
+// about unrecorded motion or the exact sensor conversion time.
+export function waveformExcursion(result) {
+  const c=result.metadata.config;
+  if(c.kind!=='sinusoidal'||![c.center_nm,c.amplitude_nm,c.frequency_mhz,c.cycles,result.metadata.elapsed_ms].every(Number.isFinite)
+    ||!(c.amplitude_nm>0&&c.frequency_mhz>0&&c.cycles>0))return null;
+  const end=Math.min(result.metadata.elapsed_ms,c.cycles*1e6/c.frequency_mhz);
+  const counts=nm=>Math.trunc((nm+(nm<0?-39:39))/78);
+  const lower=counts(c.center_nm-c.amplitude_nm),upper=counts(c.center_nm+c.amplitude_nm);
+  const worst={counts:0,receiptMs:null,observations:0};
+  for(const [ms,position] of signalPoints(result.samples,1)){
+    if(ms<0||ms>end)continue;
+    worst.observations++;
+    const beyond=Math.max(lower-position,position-upper,0);
+    if(beyond>worst.counts){worst.counts=beyond;worst.receiptMs=ms;}
+  }
+  return worst.observations?worst:null;
 }
 export function forcePoints(samples) {
   return samples.map(s=>[s[0],forceMillinewtons(s[2])]);

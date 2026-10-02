@@ -1,6 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { setupExperiments, experimentMessage, experimentControls, signalPoints } from '../ui/experiment.js';
+import { setupExperiments, experimentMessage, experimentControls, signalPoints, waveformExcursion } from '../ui/experiment.js';
+
+test('waveform excursion catches experiment 7 spikes outside the reversal windows', () => {
+  // Raw experiment-7.csv observations. Spikes are 41 ms before the 3.5 s
+  // reversal and 44 ms after 4.5 s: neither is in its +/-40 ms window.
+  const result={metadata:{elapsed_ms:5001,config:{kind:'sinusoidal',center_nm:2320188,
+    amplitude_nm:10000,frequency_mhz:1000,cycles:5}},samples:[
+    [3440,29826,4361599,8545,1,2,3,29865,60183,0,18388],
+    [3460,29966,4483727,8545,1,2,3,29870,60383,0,18389],
+    [3480,29862,4415913,8545,1,2,3,29873,60587,0,18390],
+    [4540,29855,4374357,8545,16,2,18,29870,5686,0,18442],
+    [4560,29953,4419806,8545,16,2,18,29865,5887,0,18443],
+    [4580,29856,4389038,8545,16,2,18,29858,6086,0,18444],
+  ]};
+  const before=structuredClone(result);
+  assert.deepEqual(waveformExcursion(result),{counts:92,receiptMs:3459,observations:6});
+  assert.deepEqual(result,before); // no smoothing, clipping or timestamp rewriting
+});
+
+test('waveform excursion excludes pre/post-run readings and repeated publications', () => {
+  const config={kind:'sinusoidal',center_nm:-780,amplitude_nm:117,frequency_mhz:1000,cycles:1};
+  const sample=(ms,position,age,generation)=>[ms,position,0,0,age,0,0,0,0,0,generation];
+  const result={metadata:{elapsed_ms:1200,config},samples:[
+    sample(0,999,10,1), // pre-start
+    sample(20,-12,0,2), // -897 nm rounds to -12; inside
+    sample(40,-9,0,3), // -663 nm rounds to -9 (ties away from zero); inside
+    sample(60,-15,1,4), // lower excursion
+    sample(80,-15,21,4), // same publication
+    sample(1000,-9,0,5),
+    sample(1020,999,0,6), // after waveform STOP
+  ]};
+  assert.deepEqual(waveformExcursion(result),{counts:3,receiptMs:59,observations:4});
+  result.metadata.elapsed_ms=40; // an aborted run
+  assert.deepEqual(waveformExcursion(result),{counts:0,receiptMs:null,observations:2});
+  result.samples=[];
+  assert.equal(waveformExcursion(result),null);
+  config.kind='quasi_static';
+  assert.equal(waveformExcursion(result),null);
+});
 
 test('position uses receipt identity while pressure keeps every sample at elapsed time', () => {
   const samples = [

@@ -118,6 +118,11 @@ the separate USB2 host header. Only one app/terminal can own the serial port.
 - **Experiment Data:** verified results, position/force plots, phase estimates,
   CSV and PNG exports. Sweeps run frequencies in order, downloading each result
   before the next START. ABORT, faults, or disconnect cancel remaining runs.
+  The waveform envelope excursion summary checks every unique logged EPOS
+  receipt during the sinusoid against its rounded encoder endpoints. Reversal
+  window excursions are labelled separately; spikes outside those windows are
+  still included in the waveform summary. Raw readings are never smoothed or
+  removed. These sampled maxima cannot bound motion between recorded readings.
 
 Optional **Feed-forward delay compensation** defaults off with a 17 ms entry.
 Whole milliseconds from 0 through `MAX_COMPENSATION_MS` (25 ms) are accepted.
