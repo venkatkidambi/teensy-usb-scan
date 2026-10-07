@@ -27,7 +27,7 @@
 .sweep-progress{margin:0 18px 16px;padding:14px 16px;border:1px solid var(--line);border-radius:6px;background:#f5f8f5;--sweep-fill:var(--green)}
 .sweep-progress-heading{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px 16px;font-size:12px}.sweep-progress-heading strong{font-weight:600;color:var(--sweep-fill)}#experiment-sweep-count{color:var(--muted);font-variant-numeric:tabular-nums}
 .sweep-progress progress{display:block;appearance:none;-webkit-appearance:none;width:100%;height:10px;margin:10px 0;border:0;border-radius:5px;overflow:hidden;background:#e0e8e1;accent-color:var(--sweep-fill)}
-.sweep-progress progress::-webkit-progress-bar{background:#e0e8e1;border-radius:5px}.sweep-progress progress::-webkit-progress-value{background:linear-gradient(90deg,#75a484,var(--sweep-fill));border-radius:5px}.sweep-progress progress::-moz-progress-bar{background:linear-gradient(90deg,#75a484,var(--sweep-fill));border-radius:5px}
+.sweep-progress progress::-webkit-progress-bar{background:#e0e8e1;border-radius:5px}.sweep-progress progress::-webkit-progress-value{background:var(--sweep-fill);border-radius:5px}.sweep-progress progress::-moz-progress-bar{background:var(--sweep-fill);border-radius:5px}
 #experiment-sweep-status{margin:0;font-size:12px;line-height:1.5;color:var(--muted)}.sweep-progress[data-state="stopped"]{background:#fff9ee;--sweep-fill:#795414}.sweep-progress[data-state="stopped"] progress::-webkit-progress-value{background:var(--sweep-fill)}.sweep-progress[data-state="stopped"] progress::-moz-progress-bar{background:var(--sweep-fill)}.sweep-progress[data-state="complete"]{background:#e5f0e8}
 #experiment-data-panel>.panel-heading{align-items:flex-start;flex-wrap:wrap}#experiment-save{flex-shrink:0}
 #experiment-data-status:empty{display:none}
@@ -43,3 +43,99 @@
 .experiment-plots .panel-heading{flex-wrap:wrap}.experiment-plots .panel-foot{flex-wrap:wrap}
 .sweep-plot-controls{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin-bottom:12px;font-size:12px;color:var(--muted)}
 .sweep-plot-controls select{flex:0 1 200px;min-width:0}#experiment-sweep-phase-card .plot-wrap{height:280px}
+
+/* Shared controls and compact layout. Keep status and stop actions visible;
+   secondary settings and technical detail live in native disclosures. */
+:root{--surface:#f5f7f5;--danger:#9c342a;--radius:6px}
+main{padding-top:24px}.heading{margin-bottom:18px}
+h1,h2,h3,p{overflow-wrap:anywhere}
+button,input,select{min-width:0;min-height:38px;padding:8px 12px;border:1px solid #c9cfca;border-radius:var(--radius);background:white;color:inherit;font:inherit}
+button{font-weight:500;line-height:20px}
+input{font-variant-numeric:tabular-nums}
+input::placeholder{color:var(--muted)}
+input:disabled,select:disabled{color:var(--muted);background:var(--surface);cursor:default}
+input:focus-visible{outline:2px solid var(--green);outline-offset:3px}
+button:hover:not(:disabled){border-color:#aab8ad}
+.text-button{background:transparent}
+.stop-button{color:var(--danger);background:#fbe9e7;border-color:#e9bdb8}
+.stop-button:hover:not(:disabled){color:#80281f;background:#f6d7d2;border-color:#c9847b}
+.tools,.motion-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.motion-actions button{min-width:70px}
+.panel-heading>div{min-width:0}.panel-heading>button{flex-shrink:0}
+.panel-heading p,.pressure-detail{line-height:1.6}
+.panel-foot{flex-wrap:wrap;gap:6px 16px;line-height:1.6}
+.pill,.tag{display:inline-block;font-size:11px;font-weight:500;line-height:1.5;padding:4px 8px}
+.connection-panel{margin-bottom:0}
+.connection-bar label{font-size:12px}.connection-bar select{flex:1 1 180px;min-width:0}
+.notice{margin:10px 18px 16px;overflow-wrap:anywhere}
+.device{padding:0;border-top:0}
+.device summary{color:inherit;font-weight:500;padding:12px 18px}
+.device summary .tag{float:none;margin-left:6px;font-size:10px}
+.device p,.device small{display:block;margin:0;padding:0 18px 10px}
+.controller-status{grid-template-columns:minmax(150px,1fr) minmax(0,3fr);gap:4px 18px;align-items:center;padding:12px 18px}
+.controller-heading p{margin-top:4px}.flags{gap:6px}.flag{padding:5px 8px;font-size:11px}
+.mode-tabs{gap:4px;padding:4px;background:#f0f2ef;border:1px solid var(--line);border-radius:8px}
+.mode-tabs button{flex:1;background:transparent;border-color:transparent;padding-inline:10px;color:var(--muted)}
+.mode-tabs [aria-selected="true"]{background:white;border-color:#c9d8cd;color:var(--green)}
+.metrics,.main-grid,.movement-panel,.plunger-panel{margin-bottom:16px}
+.metric{padding:16px 18px}.metric-label{font-size:12px}.reading{margin:8px 0 10px}
+.metric-foot{flex-wrap:wrap;gap:4px 8px}
+.plunger-controls{gap:12px}.plunger-controls label{flex:0 1 170px;min-width:0}
+.plunger-controls input{width:100%;padding:8px 12px;border-color:#c9cfca;border-radius:var(--radius);font-size:14px}
+.pressure-readings{gap:8px 24px}
+summary{padding:12px 18px;line-height:1.6}
+summary:hover{color:var(--green);background:var(--surface)}
+summary::marker{color:var(--muted);font-size:10px}
+.diagnostic-actions{padding:4px 18px 18px}
+.plunger-layout{grid-template-columns:130px minmax(0,1fr);gap:18px;padding-bottom:16px}
+.plunger-settings .plunger-controls,.plunger-settings .pressure-detail{padding-left:0;padding-right:0}
+.plunger-limits summary{padding-left:0}
+.plunger-gauge{margin-bottom:0}
+
+/* One form grid for both experiment modes, with optional sweep configuration. */
+.experiment-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:end;gap:18px 16px;padding:0 18px 18px}
+.experiment-form label,.position-field{display:flex;flex-direction:column;gap:6px;min-width:0;font-size:12px;color:var(--muted)}
+.experiment-form input,.experiment-form select{width:100%;min-width:0;max-width:none;font-size:14px}
+.input-action{display:flex;gap:6px}.input-action input{flex:1;width:0}
+.input-action button{flex-shrink:0;font-size:12px;padding-inline:10px}
+.experiment-actions{grid-column:1/-1;display:flex;align-items:center;gap:12px}
+.experiment-actions button{flex-shrink:0}
+#experiment-start-reason{min-height:1.6em}
+#experiment-sweep-fields{grid-column:1/-1;padding:14px 16px;background:var(--surface)}
+#experiment-sweep-fields .sweep-heading{margin:0}
+#experiment-sweep-fields .sweep-heading label{font-size:13px;font-weight:500}
+#experiment-sweep-enabled{min-height:0}
+#experiment-sweep-enabled+span{transition:none}
+#experiment-sweep-enabled:checked+span{text-shadow:none}
+.sweep-options{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:center;gap:16px;margin-top:14px}
+#experiment-sweep-fields:has(#experiment-sweep-enabled:not(:checked)) .sweep-options{display:none}
+#experiment-frequencies{width:100%}
+.sweep-progress progress{height:8px}
+.experiment-data-toolbar select{max-width:520px}
+.sweep-plot-controls{margin:0;gap:8px}
+.sweep-plot-controls select{flex:initial;min-height:34px;padding:6px 10px;font-size:12px}
+.plot-export{min-height:34px}
+.phase-help{border:0}.phase-help summary{padding:0}.phase-help p{margin-top:8px}
+
+@media(max-width:950px){
+  .connection-bar select{max-width:none}
+  .experiment-form{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:700px){
+  main{padding:16px}
+  .controller-status{grid-template-columns:1fr;gap:8px}
+  .mode-tabs button{flex:1 1 40%}
+  .sweep-options{grid-template-columns:1fr}
+}
+@media(max-width:550px){
+  .connection-bar select{flex-basis:100%}
+  .experiment-form{grid-template-columns:1fr}
+  .experiment-actions{align-items:flex-start;flex-direction:column}
+  .plunger-layout{grid-template-columns:1fr}
+  .plunger-gauge{display:flex;align-items:center;gap:18px;margin-left:0}
+  .plunger-gauge-scale{width:130px;flex-shrink:0;height:110px}
+  .plunger-controls label{flex:1 1 120px}
+  .panel-heading{flex-wrap:wrap}
+  footer{align-items:flex-start}
+  .diagnostics>summary span{display:none}
+}
