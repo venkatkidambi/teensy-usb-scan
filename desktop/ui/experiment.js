@@ -21,7 +21,7 @@ function startBlocked({session,connected,hello,experimentUnresolved}) {
   if(experimentUnresolved)return 'Reconnect to recover the previous experiment before starting another.';
   if(!hello?.experiments)return 'Update the Teensy firmware to enable experiments.';
   if(mode==='quasi_static'&&!hello?.quasi_static_speed)return 'Update the Teensy firmware to enable quasi-static speed control.';
-  if(mode==='sinusoidal'&&!hello?.sine_gpio)return 'Update the Teensy firmware to enable sinusoidal position control.';
+  if(mode==='sinusoidal'&&!hello?.[`sine_serial_${$('experiment-control').value||'displacement'}`])return 'Update the Teensy firmware to enable the selected serial sine control mode.';
   if(session.pending)return 'Waiting for the current Teensy request to finish…';
   return '';
 }
@@ -48,6 +48,8 @@ export function experimentControls() {
   $('dashboard-panel').inert=owned;
   for(const control of $('experiment-form').elements)control.disabled=owned;
   $('experiment-speed').disabled=owned||mode!=='quasi_static';
+  $('experiment-control-field').hidden=mode!=='sinusoidal';
+  $('experiment-control').disabled=owned||mode!=='sinusoidal';
   const sweeping=mode==='sinusoidal'&&$('experiment-sweep-enabled').checked;
   $('experiment-sweep-progress').hidden=!sweeping||!$('experiment-sweep-status').textContent;
   $('experiment-frequencies').disabled=owned||!sweeping;
@@ -60,7 +62,7 @@ export function experimentControls() {
   $('experiment-start-button').title=blocked;
   text('experiment-start-reason',blocked);
   $('experiment-start-reason').hidden=!blocked;
-  text('experiment-motion-detail',mode==='sinusoidal'?'GPIO sinusoidal position control. Starts from rest at center − amplitude, completes the cycles, then returns to center and waits for arrival.':'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.');
+  text('experiment-motion-detail',mode==='sinusoidal'?`${$('experiment-control').value==='velocity'?'Serial velocity control varies scan speed in 1 µm/s steps; position can drift.':'Serial displacement control uses small position targets and a varying speed limit to reduce jerking.'} Both use smooth approach/return ramps and start the sine at center − amplitude. No GPIO wiring required. Lower frequencies allow more serial updates per cycle.`:'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.');
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
   $('experiment-save').disabled=!!saving||owned||!dataset;
@@ -313,6 +315,8 @@ export function setupExperiments(api) {
     }catch(e){text('experiment-data-status',`PNG export failed: ${e.message??e}`);}
     finally{saving=false;experimentControls();}
   };
+  $('experiment-control').value='displacement';
+  $('experiment-control').onchange=experimentControls;
   $('experiment-sweep-enabled').onchange=experimentControls;
   $('experiment-run').onchange=()=>{
     selectedIndex=Number($('experiment-run').value);
@@ -335,6 +339,7 @@ export function setupExperiments(api) {
       }
     }
     const config={kind:mode,start_um:Number($('experiment-start').value),increment_um:Number($('experiment-increment').value),timing:Number($('experiment-timing').value),repeats:Number($('experiment-repeats').value)};
+    if(mode==='sinusoidal')config.sine_control=$('experiment-control').value;
     if(mode==='quasi_static')config.speed_um_s=Number($('experiment-speed').value);
     if(mode==='sinusoidal'&&$('experiment-sweep-enabled').checked){
       validationCancelled=false;starting=true;experimentControls();

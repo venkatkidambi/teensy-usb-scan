@@ -124,6 +124,8 @@ mod command_tests {
         for text in [
             "START 7 Q -1234 78 500 2 10",
             "START 7 S 0 780 1000 1",
+            "START 7 S 0 780 1000 1 D",
+            "START 7 S 0 780 1000 1 V",
             "ABORT 7",
             "GET_DATA 7 1",
             "GET_CHUNK 7 1 0",

@@ -7,6 +7,7 @@ mod tests {
     #[derive(Default)]
     struct Io {
         targets: Vec<(i32, u32, bool)>,
+        serial: Vec<serial_sine::Command>,
         stops: usize,
         fail: bool,
         busy: bool,
@@ -17,6 +18,21 @@ mod tests {
         gpio_preparing: bool,
     }
     impl Actuator for Io {
+        fn prepare_serial(&mut self, _: u32) -> Result<bool, &'static str> {
+            Ok(true)
+        }
+        fn serial_commands(
+            &mut self,
+            commands: &[crate::experiment::serial_sine::Command],
+        ) -> Result<(), &'static str> {
+            assert!(!self.busy);
+            if self.fail {
+                return Err("serial transmit failure");
+            }
+            self.serial.extend_from_slice(commands);
+            Ok(())
+        }
+
         fn tx_failed(&self) -> bool {
             self.usb_failed
         }
@@ -24,6 +40,7 @@ mod tests {
             Ok(!self.preparing)
         }
         fn prepare_gpio(&mut self, _: u32) -> Result<bool, &'static str> {
+            assert!(self.serial.is_empty());
             Ok(!self.gpio_preparing && !self.busy)
         }
         fn start_gpio(&mut self, _: ExperimentConfig) -> Result<(), &'static str> {
@@ -102,6 +119,7 @@ mod tests {
             amplitude_nm: 7800,
             frequency_mhz: 1000,
             cycles: 1,
+            control: crate::experiment_data::SineControl::Gpio,
         }
     }
     #[test]
@@ -178,6 +196,265 @@ mod tests {
         assert_eq!(e.state, State::DataReady);
         assert_eq!(io.stops, 1);
     }
+    #[test]
+    fn serial_stream_uses_absolute_phase_and_never_reverses_at_nonzero_speed() {
+        for (amplitude_nm, frequency_mhz) in
+            [(7800, 100), (124140, 1000), (7800, 1300), (7800, 10000)]
+        {
+            for control in [SineControl::Displacement, SineControl::Velocity] {
+                let config = ExperimentConfig::Sinusoidal {
+                    center_nm: 0,
+                    amplitude_nm,
+                    frequency_mhz,
+                    cycles: 1,
+                    control,
+                };
+                let trajectory = crate::trajectory::Trajectory::new(config).unwrap();
+                let mut stream = serial_sine::Stream::default();
+                let mut io = Io::default();
+                let mut speed = u32::MAX;
+                let mut done = false;
+                for ms in 0..trajectory.duration_us.div_ceil(1000) + 20 {
+                    // Variable completion time forces coalescing instead of a
+                    // backlog, and shifts dispatch away from 5 ms boundaries.
+                    io.busy = ms % 17 >= 10 && ms % 17 <= 13;
+                    let old = io.serial.len();
+                    done = stream.tick(config, ms, &mut io).unwrap();
+                    assert!(io.serial.len() - old <= 2);
+                    for command in &io.serial[old..] {
+                        match command {
+                            serial_sine::Command::Speed(v) => speed = *v,
+                            serial_sine::Command::Direction(_) => assert_eq!(speed, 0),
+                            serial_sine::Command::Position(p) => {
+                                assert_eq!(*p, trajectory.position(ms * 1000))
+                            }
+                        }
+                        let mut wire = String::new();
+                        command.write(&mut wire).unwrap();
+                        assert!(wire.ends_with('\n') && wire.len() < 32);
+                    }
+                    if done {
+                        break;
+                    }
+                }
+                assert!(done);
+                assert!(stream.max_gap_ms <= 10);
+            }
+        }
+    }
+    #[test]
+    fn serial_approach_is_monotonic_with_slow_endpoint_steps_across_clock_wrap() {
+        for (from, to) in [(0, 1000), (1000, -1000)] {
+            let mut ramp = serial_sine::Ramp::new(from, to, 500);
+            let mut io = Io::default();
+            let epoch = u32::MAX - 50;
+            let mut positions = Vec::new();
+            for ms in 0..1100 {
+                if ramp.tick(epoch.wrapping_add(ms), &mut io).unwrap() {
+                    break;
+                }
+                positions.push((ms, ramp.target()));
+            }
+            assert_eq!(positions.first().unwrap().1, from);
+            assert_eq!(positions.last().unwrap().1, to);
+            assert!(positions.windows(2).all(|p| if to > from {
+                p[1].1 >= p[0].1
+            } else {
+                p[1].1 <= p[0].1
+            }));
+            assert!((positions[10].1 - from).abs() <= 1);
+            assert!((positions[990].1 - to).abs() <= 1);
+            assert!(positions.windows(2).all(|p| (p[1].1 - p[0].1).abs() <= 20));
+        }
+    }
+    fn serial_config(control: SineControl) -> ExperimentConfig {
+        ExperimentConfig::Sinusoidal {
+            center_nm: 0,
+            amplitude_nm: 7800,
+            frequency_mhz: 1000,
+            cycles: 2,
+            control,
+        }
+    }
+    fn serial_poll(e: &mut Engine<'_>, io: &mut Io, now: u32) {
+        let position = io
+            .serial
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                serial_sine::Command::Position(p) => Some(*p),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let tracked = io.targets.last().map_or(0, |t| t.0);
+        let (mut t, p) = feedback(now, tracked, true);
+        t.record(b"EPOS", i64::from(position), now);
+        t.record(b"SSPD", i64::from(e.config.unwrap().speed().unwrap()), now);
+        t.record(b"TOU2", 60, now);
+        t.speed_updates = now.wrapping_add(1);
+        t.motor_timeout_updates = now.wrapping_add(1);
+        if e.state == State::Running
+            && !e.stopping
+            && e.config.unwrap().control() == Some(SineControl::Velocity)
+        {
+            t.record(b"STAT", (1 << 5) | (1 << 6) | (1 << 13), now);
+        }
+        e.poll(now, &t, p, io);
+    }
+    #[test]
+    fn serial_modes_approach_run_and_return_without_gpio_and_confirm_arrival() {
+        for control in [SineControl::Displacement, SineControl::Velocity] {
+            let mut records = [Record::EMPTY; CAPACITY];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            let (t, p) = feedback(0, 0, true);
+            e.accept(serial_config(control), &t, p, false, 0).unwrap();
+            e.begin(0, &mut io);
+            let mut waveform_start = None;
+            let mut waveform_end = None;
+            for now in 0..6000 {
+                let previous_state = e.state;
+                serial_poll(&mut e, &mut io, now);
+                if previous_state != State::Running && e.state == State::Running {
+                    waveform_start = Some(io.serial.len());
+                }
+                if e.stopping && waveform_end.is_none() {
+                    waveform_end = Some(io.serial.len());
+                }
+                if e.data_ready() {
+                    break;
+                }
+            }
+            assert_eq!(e.outcome, "completed", "{}", e.reason);
+            assert!(io.gpio.is_none());
+            assert_eq!(io.stops, 1);
+            assert_eq!(
+                io.targets.iter().map(|t| t.0).collect::<Vec<_>>(),
+                [-100, 0]
+            );
+            let waveform = &io.serial[waveform_start.unwrap()..waveform_end.unwrap()];
+            if control == SineControl::Velocity {
+                assert!(
+                    !waveform
+                        .iter()
+                        .any(|c| matches!(c, serial_sine::Command::Position(_)))
+                );
+                let directions = waveform
+                    .iter()
+                    .filter_map(|c| match c {
+                        serial_sine::Command::Direction(d) if *d != 0 => Some(*d),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(directions, [1, -1, 1, -1]);
+            } else {
+                let positions = waveform
+                    .iter()
+                    .filter_map(|c| match c {
+                        serial_sine::Command::Position(p) => Some(*p),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(positions.iter().min(), Some(&-100));
+                assert_eq!(positions.iter().max(), Some(&100));
+                assert!(positions.windows(2).all(|p| (p[1] - p[0]).abs() <= 4));
+                assert!(
+                    !waveform
+                        .iter()
+                        .any(|c| matches!(c, serial_sine::Command::Direction(_)))
+                );
+            }
+            let mut metadata = String::new();
+            e.metadata(&mut metadata, 1).unwrap();
+            assert!(metadata.contains(control.name()));
+            assert!(metadata.contains("serial_timing"));
+            assert!(e.len >= 100);
+        }
+    }
+    #[test]
+    fn serial_return_waits_for_post_drain_epos_before_moving() {
+        let mut records = [Record::EMPTY; CAPACITY];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        let (t, p) = feedback(0, 0, true);
+        e.accept(serial_config(SineControl::Displacement), &t, p, false, 0)
+            .unwrap();
+        e.begin(0, &mut io);
+        let mut now = 0;
+        while !e.stopping {
+            serial_poll(&mut e, &mut io, now);
+            now += 1;
+            assert!(now < 4000);
+        }
+        let commands = io.serial.len();
+        io.busy = true;
+        for _ in 0..10 {
+            serial_poll(&mut e, &mut io, now);
+            now += 1;
+        }
+        assert!(e.return_drained.is_none());
+        io.busy = false;
+        let (mut t, mut p) = feedback(now, -100, true);
+        e.poll(now, &t, p, &mut io);
+        assert!(e.ramp.is_none());
+        assert_eq!(e.return_drained, Some(now));
+        p.ms = now + 1;
+        e.poll(now + 1, &t, p, &mut io); // old EPOS is fresh in age, but predates drain
+        assert!(e.ramp.is_none());
+        assert_eq!(io.serial.len(), commands);
+        t.record(b"EPOS", -99, now + 2);
+        e.poll(now + 2, &t, p, &mut io);
+        assert!(e.ramp.is_some());
+        assert_eq!(e.target, -99);
+    }
+    #[test]
+    fn serial_stall_fault_abort_and_disconnect_keep_partial_data() {
+        for control in [SineControl::Displacement, SineControl::Velocity] {
+            for failure in ["busy", "late", "abort", "disconnect", "tx"] {
+                let mut records = [Record::EMPTY; CAPACITY];
+                let mut e = Engine::new(&mut records);
+                let mut io = Io::default();
+                let (t, p) = feedback(0, 0, true);
+                e.accept(serial_config(control), &t, p, false, 0).unwrap();
+                e.begin(0, &mut io);
+                let mut now = 0;
+                while e.state != State::Running {
+                    serial_poll(&mut e, &mut io, now);
+                    now += 1;
+                    assert!(now < 1500, "{}", e.reason);
+                }
+                for _ in 0..100 {
+                    serial_poll(&mut e, &mut io, now);
+                    now += 1;
+                }
+                let commands = io.serial.len();
+                match failure {
+                    "abort" => e.abort(&mut io),
+                    "disconnect" => e.disconnected(&mut io),
+                    "late" => serial_poll(&mut e, &mut io, now + 30),
+                    _ => {
+                        io.busy = failure == "busy";
+                        io.fail = failure == "tx";
+                        for t in now..now + 30 {
+                            serial_poll(&mut e, &mut io, t);
+                        }
+                    }
+                }
+                assert!(e.data_ready(), "{control:?} {failure}: {}", e.reason);
+                assert!(e.len > 0);
+                assert_eq!(io.serial.len(), commands); // no backlog replay on fault
+                assert_eq!(io.stops, 1);
+                assert_eq!(
+                    e.outcome,
+                    if failure == "abort" {
+                        "aborted"
+                    } else {
+                        "faulted"
+                    }
+                );
+            }
+        }
+    }
     fn start(e: &mut Engine<'_>, config: ExperimentConfig, now: u32, io: &mut Io) {
         let (t, p) = feedback(now, 0, true);
         e.accept(config, &t, p, false, now).unwrap();
@@ -217,6 +494,7 @@ mod tests {
                 amplitude_nm: 10000,
                 frequency_mhz: 10000,
                 cycles: 1000,
+                control: crate::experiment_data::SineControl::Gpio,
             },
             ExperimentConfig::QuasiStatic {
                 speed_um_s: 10,
@@ -244,18 +522,21 @@ mod tests {
                 amplitude_nm: 78,
                 frequency_mhz: 100,
                 cycles: 1,
+                control: crate::experiment_data::SineControl::Gpio,
             },
             ExperimentConfig::Sinusoidal {
                 center_nm: 0,
                 amplitude_nm: 78,
                 frequency_mhz: 10_001,
                 cycles: 1,
+                control: crate::experiment_data::SineControl::Gpio,
             },
             ExperimentConfig::Sinusoidal {
                 center_nm: 0,
                 amplitude_nm: 78,
                 frequency_mhz: 100,
                 cycles: 21,
+                control: crate::experiment_data::SineControl::Gpio,
             },
         ] {
             assert!(config.validate().is_err(), "{config:?}");
@@ -531,6 +812,7 @@ mod tests {
                 amplitude_nm: 7800,
                 frequency_mhz: 1000,
                 cycles: 1,
+                control: crate::experiment_data::SineControl::Gpio,
             };
             let (t, p) = feedback(0, 0, true);
             assert!(e.accept(config, &t, p, false, 0).is_err());
@@ -676,6 +958,7 @@ mod tests {
                     amplitude_nm: 0,
                     frequency_mhz: 1000,
                     cycles: 1,
+                    control: crate::experiment_data::SineControl::Gpio,
                 },
                 &t,
                 p,

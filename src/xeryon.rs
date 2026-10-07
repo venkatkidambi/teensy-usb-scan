@@ -358,6 +358,41 @@ mod tests {
             assert!(s.poll(1500, &t, true, |_| panic!()).is_err());
         }
     }
+    #[test]
+    fn serial_setup_stops_disables_gpio_and_requires_fresh_zero_readback() {
+        let mut t = crate::protocol::Telemetry::new();
+        t.record(b"GPIO", 0, 0); // cached zero must not count as verification
+        for reply in [None, Some(2), Some(0)] {
+            let mut setup = GpioSetup::new();
+            for (i, expected) in [b"STOP\n".as_slice(), b"GPIO=0\n", b"GPIO=?\n"]
+                .into_iter()
+                .enumerate()
+            {
+                let now = i as u32 * 10;
+                assert!(
+                    !setup
+                        .poll_serial(now, &t, true, |b| {
+                            assert_eq!(b, expected);
+                            Ok(())
+                        })
+                        .unwrap()
+                );
+                assert!(!setup.poll_serial(now + 1, &t, false, |_| panic!()).unwrap());
+                if i < 2 {
+                    assert!(!setup.poll_serial(now + 2, &t, true, |_| panic!()).unwrap());
+                }
+            }
+            assert!(!setup.poll_serial(23, &t, true, |_| panic!()).unwrap());
+            if let Some(value) = reply {
+                t.record(b"GPIO", value, 24);
+            }
+            let result = setup.poll_serial(1520, &t, true, |_| panic!());
+            assert_eq!(result.is_ok(), reply == Some(0));
+            if reply == Some(0) {
+                assert_eq!(result, Ok(true));
+            }
+        }
+    }
     fn decode(bytes: &[u8]) -> Vec<Result<Record, Error>> {
         let mut decoder = Decoder::new();
         bytes.iter().filter_map(|&b| decoder.push(b)).collect()
@@ -443,6 +478,38 @@ impl GpioSetup {
             started: 0,
             generation: 0,
         }
+    }
+    /// Explicitly leave any retained GPIO mode before serial motion. Never SAVE.
+    pub fn poll_serial(
+        &mut self,
+        now: u32,
+        t: &crate::protocol::Telemetry,
+        idle: bool,
+        mut send: impl FnMut(&[u8]) -> Result<(), &'static str>,
+    ) -> Result<bool, &'static str> {
+        if self.step == 3 {
+            return Ok(true);
+        }
+        if self.pending {
+            let fresh = t.gpio[0].valid && t.gpio_updates[0] != self.generation;
+            if idle && (self.step < 2 || fresh) {
+                if self.step == 2 && t.gpio[0].value != 0 {
+                    return Err("Serial GPIO=0 readback mismatch");
+                }
+                self.step += 1;
+                self.pending = false;
+            } else if now.wrapping_sub(self.started) >= 1500 {
+                return Err("Serial mode setup timeout");
+            }
+        } else if idle {
+            send([b"STOP\n".as_slice(), b"GPIO=0\n", b"GPIO=?\n"][self.step])?;
+            self.started = now;
+            self.generation = t.gpio_updates[0];
+            self.pending = true;
+        } else {
+            return Err("Serial mode setup transmit busy");
+        }
+        Ok(self.step == 3)
     }
     pub fn poll(
         &mut self,

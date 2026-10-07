@@ -62,18 +62,18 @@ test('START explains blockers, validates fields, submits once, and reports failu
   globalThis.ResizeObserver=class {observe(){}};
   try {
     const calls=[],logs=[];let reject;
-    const state={connected:true,hello:{experiments:true,sine_gpio:true},session:{
+    const state={connected:true,hello:{experiments:true,sine_serial_displacement:true,sine_serial_velocity:true},session:{
       startExperiment(config){calls.push(config);return new Promise((_,fail)=>{reject=fail;});},
     }};
     setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls,activity:message=>logs.push(message)});
     node('tab-sinusoidal').onclick();
-    assert.match(node('experiment-motion-detail').textContent, /Starts from rest at center − amplitude/);
+    assert.match(node('experiment-motion-detail').textContent, /start the sine at center − amplitude/);
     const submit=()=>node('experiment-form').onsubmit({preventDefault(){}});
     for(const [object,key,value,expected] of [
       [state,'connected',false,/Connect the Teensy/],
       [state,'experimentUnresolved',true,/Reconnect/],
       [state.hello,'experiments',false,/enable experiments/],
-      [state.hello,'sine_gpio',false,/sinusoidal position control/],
+      [state.hello,'sine_serial_displacement',false,/serial sine control/],
       [state.session,'pending',true,/current Teensy request/],
       [state.session,'experimentOwned',true,/owns the hardware/],
     ]){
@@ -108,13 +108,21 @@ test('START explains blockers, validates fields, submits once, and reports failu
     assert.match(node('experiment-state').textContent,/Sending START/);
     assert.equal(node('experiment-start-button').disabled,true);
     await submit();
-    assert.deepEqual(calls,[{kind:'sinusoidal',start_um:374.556,increment_um:5,timing:1,repeats:5}]);
+    assert.deepEqual(calls,[{kind:'sinusoidal',start_um:374.556,increment_um:5,timing:1,repeats:5,sine_control:'displacement'}]);
     reject(Error('Controller is not ready'));await pending;
     assert.equal(node('experiment-state').textContent,'START failed: Controller is not ready');
     assert.equal(logs.at(-1),'START failed: Controller is not ready');
     assert.equal(node('experiment-start-button').disabled,false);
-    state.session.startExperiment=()=>{throw Error('Bridge unavailable');};
+    node('experiment-control').value='velocity';
+    node('experiment-control').onchange();
+    assert.match(node('experiment-motion-detail').textContent,/position can drift/);
+    state.hello.sine_serial_velocity=false;experimentControls();
+    assert.equal(node('experiment-start-button').disabled,true);
+    state.hello.sine_serial_velocity=true;experimentControls();
+    let selected;
+    state.session.startExperiment=config=>{selected=config;throw Error('Bridge unavailable');};
     await submit();
+    assert.equal(selected.sine_control,'velocity');
     assert.equal(node('experiment-state').textContent,'START failed: Bridge unavailable');
     assert.equal(node('experiment-start-button').disabled,false);
     node('tab-quasi_static').onclick();

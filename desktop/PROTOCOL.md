@@ -9,7 +9,7 @@ Current firmware also advertises `quasi_static_speed: true`. Quasi-static START
 requires `START <id> Q <start_nm> <step_nm> <hold_ms> <steps> <speed_um_s>` with
 integer speed 1–16777215 µm/s; missing, fractional, zero or out-of-range speeds
 are rejected. The desktop requires this capability before offering START Q.
-Sinusoidal START keeps its existing arguments. Quasi-static metadata includes
+Sinusoidal START accepts an optional final `D` (displacement, default) or `V` (velocity). Quasi-static metadata includes
 `speed_um_s`. START acknowledges acceptance; controller speed/TOU2 readback
 checks happen before motion and report any failure in the retained dataset.
 
@@ -161,23 +161,38 @@ supported range, source hashes and source observations used for the export.
 
 Firmware with `plunger_limits: true` in HELLO enforces potentiometer bounds and reports `plunger.limits: {"min":30,"max":75}` in snapshots. Bounds reset to 30–75% at boot, survive serial reconnects, and reject outward moves while allowing inward recovery. Up increases the reading. Missing/stale potentiometer feedback prevents motion. Drive is disabled at a bound; sampling latency and mechanical coast can cause overshoot.
 
-## Sinusoidal GPIO position control
+## Sinusoidal serial control
 
-HELLO advertises `sine_gpio: true`, `sine_position: true`, and `max_pulse_hz: 10000`.
-The desktop requires `sine_gpio` for START S. Units remain nm and millihertz;
-frequency is 0.1–10 Hz, peak rate `2π A_µm f_Hz / 0.078` must be <= 10,000 Hz,
-and both extrema must fit the signed 26-bit encoder travel range.
+HELLO advertises `sine_serial_displacement: true`, `sine_serial_velocity: true`,
+`sine_position: true`, and `sine_gpio: false`. The desktop requires the capability
+for the selected serial mode. Update desktop and firmware together. START S
+accepts an optional final `D` or `V`; omitting it selects displacement.
+Units remain nm and millihertz; frequency is 0.1–10 Hz, peak velocity
+`2π A_µm f_Hz` must be <= 780 µm/s, and both extrema must fit the signed 26-bit range.
 
-Initial DPOS targets `center - amplitude` and requires tracked Position Reached.
-With outputs low, USB configures and verifies `STPS=1` and `GPIO=2`. Teensy GPT1
-then drives PULSE/DIRECTION/ENABLE from integer position and actual monotonic
-microseconds. GPIO and USB feedback coexist. No repeated DPOS/SSPD/SCAN commands
-are sent during the waveform. See README for pin wiring and electrical constraints.
-At exactly N cycles the trajectory clamps to the negative extremum at zero
-velocity, disables pulses, sends STOP, waits for USB drain, sends DPOS=center,
-and waits for the existing echo/new-STAT Position Reached confirmation.
-The 10 s final reserve covers STOP plus return. ABORT, fault, USB1 disconnect, or
-USB2 disconnect stop sinusoidal GPIO generation and retain results. Quasi-static
+Before initial motion, firmware sends STOP, sets `GPIO=0`, and requires a fresh
+matching readback. It verifies SSPD and TOU2, approaches `center − amplitude`
+with a quintic rest-to-rest position ramp, and waits for confirmed arrival.
+The waveform starts at zero theoretical velocity:
+
+- `D`: DPOS follows `center − A cos(2πft)` on the encoder grid, with SSPD bounded
+  by local sine speed (plus 1 µm/s for speed quantization). Duplicate targets are
+  suppressed; speed updates still slow the actuator near turning points.
+- `V`: SSPD follows the magnitude of `2πf A sin(2πft)` at each interval midpoint;
+  SCAN supplies direction. Zero speed must drain before a direction change.
+  Only changed speeds/directions are sent. No position correction is applied.
+  Peaks below the 1 µm/s speed resolution are rejected; use displacement instead.
+
+Both schedule 5 ms updates from absolute elapsed time, wait for previous USB
+transfers to drain, and coalesce delayed work to the current phase. More than
+25 ms without servicing the waveform faults with STOP, rather than a catch-up
+burst. This is a dispatch bound, not a guarantee of controller response time.
+At the N-cycle boundary, the displacement endpoint is clamped exactly; velocity
+mode requests STOP. After STOP drains, fresh EPOS seeds a quintic return to center.
+Both ramps have zero endpoint velocity/acceleration and take at least 1 s.
+Final completion requires DPOS echo and subsequent Position Reached feedback.
+The 10 s final reserve covers STOP plus return. ABORT/fault/disconnect may stop
+immediately instead of ramping, and retain partial results. Quasi-static
 motion and autonomous disconnect behavior remain unchanged.
 
 Dataset version 2 uses 48-byte records: the original ten words followed by
@@ -189,10 +204,12 @@ plots every logger sample as a continuous line against experiment elapsed time
 (`time_s` in CSV); no I²C completion time column is exported. Both identities and
 per-signal new flags remain in CSV. During the sine waveform, `target` is the
 theoretical position at actual logging time; the terminal sample at STOP is the
-negative extremum while STOP drains, then the center during the final return.
+negative extremum while STOP drains, then the most recent return-ramp target.
 Quasi-static retains its last commanded DPOS target. Sinusoidal metadata adds
-`sine_control: "gpio_pulse_direction"`, calculated `peak_pulse_hz`, and
-`max_pulse_hz: 10000`; `sample_ms` remains 20.
+`sine_control: "serial_displacement"` or `"serial_velocity"` (also `config.control`),
+calculated `peak_speed_um_s`, and `serial_timing` with `update_ms`, `updates`
+(command batches), `skipped_ticks`, and `max_gap_ms` for the waveform only.
+`sample_ms` remains 20. Older GPIO datasets keep their original metadata.
 Controller faults include a specific `reason` and, when observed by the engine,
 `fault_stat`: the triggering STAT word retained before STOP. The results display
 this word because the live Dashboard may show a later, cleared status.
@@ -221,7 +238,7 @@ and `finished_ms` distinguish return timeout from confirmed completion.
 
 ```text
 START <id> Q <start_nm:i64> <step_nm:i64> <hold_ms:u32> <steps:u32> <speed_um_s:u32>
-START <id> S <center_nm:i64> <amplitude_nm:u32> <frequency_millihz:u32> <cycles:u32>
+START <id> S <center_nm:i64> <amplitude_nm:u32> <frequency_millihz:u32> <cycles:u32> [D|V]
 ABORT <id>
 GET_DATA <id> <run>
 GET_CHUNK <id> <run> <record_offset>

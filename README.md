@@ -109,10 +109,10 @@ the separate USB2 host header. Only one app/terminal can own the serial port.
 - **Quasi-static:** validated start, increment, hold, step count, and required
   speed. Firmware verifies SSPD and the controller TOU2 budget before motion;
   holds begin after confirmed arrival.
-- **Sinusoidal:** Teensy generates `x = center − A cos(2πft)` using GPIO pulses.
-  Initial DPOS moves to `center − amplitude` and waits for Position Reached.
-  The waveform starts at rest, completes exactly N cycles, disables pulses,
-  sends STOP, then returns to center by DPOS and waits for Position Reached.
+- **Sinusoidal:** choose **Displacement** (default) or **Velocity** serial control
+  for `x = center − A cos(2πft)`. No Teensy-to-Xeryon GPIO wiring is needed.
+  Both approach `center − amplitude` gradually and wait for Position Reached,
+  execute the requested cycles, then gradually return to center and confirm arrival.
 - **Experiment Data:** verified results, position/force plots, phase estimates,
   CSV and PNG exports. Sweeps run frequencies in order, downloading each result
   before the next START. ABORT, faults, or disconnect cancel remaining runs.
@@ -120,31 +120,45 @@ the separate USB2 host header. Only one app/terminal can own the serial port.
   receipt during the sinusoid against its rounded encoder endpoints. Raw readings are never smoothed or
   removed. These sampled maxima cannot bound motion between recorded readings.
 
-Sinusoidal motion uses XD-C `GPIO=2` and `STPS=1`, verified by USB readback before
-ENABLE goes high. No settings are saved to controller flash. USB EPOS/STAT feedback,
-pressure acquisition, and logging continue normally; no position-feedback correction
-is applied. GPT1 runs at 1 MHz; bounded compare interrupts sample the Q30 trajectory
-at intervals of at least 25 µs, emitting at most one edge per interrupt. Direction
-changes get a full low interval before a rising edge. Pulses are separated by at
-least 75 µs in the timer model (extra margin below the controller's 20 kHz limit).
-Phase derives from the actual wrapping hardware counter, never loop/interrupt count.
-A gap over 75 µs, a missed encoder step, or a foreground service gap over 10 ms
-stops pulses and faults; there are no catch-up bursts. Completion clamps the exact
-N-cycle endpoint; a final quantized edge, if needed, drains before disabling ENABLE
-(microsecond clock resolution, bounded interrupt latency).
+Serial sine setup sends STOP, disables GPIO with `GPIO=0`, and verifies a fresh
+readback before moving. It also verifies the approach speed and TOU2 budget.
+No settings are saved to controller flash, and controller gains are unchanged.
+The [XD-C command reference](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.0.pdf)
+defines SSPD as both scan speed and the speed towards a DPOS target.
 
-Peak requested rate is `2π × amplitude_µm × frequency_Hz / 0.078`. Validation caps
-it at **10,000 pulses/s** (780 µm/s peak velocity), conservatively below Xeryon's
-recommended 20 kHz. For example, 1 µm at 1 Hz needs 80.55 pulses/s; the largest
-integer-nm amplitude at 1 Hz is 124.140 µm (9,999.93 pulses/s). GPIO timing and
-physical direction still need oscilloscope/unloaded verification on the wired rig;
-software builds/tests do not establish physical tracking accuracy.
+- **Displacement:** streams encoder-rounded DPOS targets, with SSPD following
+  local sine speed. Duplicate targets are suppressed; speed decreases near
+  reversals, reducing the abrupt tiny moves caused by a large fixed speed.
+- **Velocity:** streams `v = 2πf A sin(2πft)` through SSPD and SCAN. It samples
+  speed at the middle of each nominal interval to reduce integration error,
+  drains a zero-speed command before changing direction, and avoids repeated
+  SCAN commands within each direction. This controls speed, so position can drift;
+  no abrupt position correction is injected during the waveform. SSPD resolves
+  whole µm/s; velocity runs with peak speed below 1 µm/s are rejected. Use
+  displacement mode for small, slow trajectories.
+
+Setpoints are scheduled every **5 ms** (up to 200 updates/s), separately from
+50 Hz recording. Phase uses absolute elapsed time; busy transfers coalesce to the
+current setpoint instead of replaying stale commands. A control service gap over
+25 ms faults and requests STOP. Actual cadence depends on USB/controller latency;
+`serial_timing` metadata records update batches, skipped ticks, and maximum gap.
+Approach and return use quintic position ramps with zero endpoint velocity and
+acceleration, capped approximately at the configured waveform peak speed. Their
+minimum duration is 1 s; the approach waits for confirmed arrival before acquisition.
+The sine itself retains its cosine shape and zero endpoint velocity; its acceleration
+changes at start/end. Serial quantization and actuator tuning still affect physical
+jerk and tracking. Software tests do not establish smoothness on the loaded rig.
+
+Validation retains the conservative **780 µm/s peak speed** bound:
+`2π × amplitude_µm × frequency_Hz <= 780`. For example, the largest integer-nm
+amplitude at 1 Hz is 124.140 µm. Accepted frequencies are 0.1–10 Hz; lower
+frequencies provide more serial updates per cycle (200 at 1 Hz, 20 at 10 Hz).
 
 Experiments record at 50 Hz into 4,096 fixed 48-byte records (192 KiB). The total
 acquisition bound is 81.9 s; sinusoidal runs reserve 10 s for STOP and confirmed
-center return and accept 0.1–10 Hz within the pulse-rate limit. USB1 PC disconnect
+center return and accept 0.1–10 Hz within the peak-speed limit. USB1 PC disconnect
 stops sinusoidal runs and retains partial data; quasi-static runs retain their
-autonomous disconnect behavior. USB2 disconnect always stops trajectory pulses. Manual
+autonomous disconnect behavior. USB2 disconnect faults motion and retains data. Manual
 moves instead stop on disconnect, stale feedback, heartbeat loss, or deadline.
 ABORT/faults request STOP and retain partial results. USB STOP is best effort if
 the actuator link fails. Command acceptance is not physical motion confirmation.
@@ -163,7 +177,8 @@ foreground work services pressure, USB, motion, and acquisition without blocking
 USB2 control-transfer timeout support is limited; failed enumeration may require
 unplugging/reconnecting. No homing or saved controller settings change automatically.
 
-Xeryon GPIO wiring (in addition to the USB2 feedback connection):
+Optional GPIO wiring for the retained pulse-driver implementation (unused by the
+serial sine modes; leave disconnected for the current setup):
 
 | Teensy 4.1 | XD-C GPIO bank 1 | Signal |
 | --- | --- | --- |

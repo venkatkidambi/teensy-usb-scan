@@ -25,6 +25,22 @@ pub fn sine_max_velocity(amplitude_nm: u32, frequency_mhz: u32) -> f64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SineControl {
+    Displacement,
+    Velocity,
+    Gpio,
+}
+impl SineControl {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Displacement => "serial_displacement",
+            Self::Velocity => "serial_velocity",
+            Self::Gpio => "gpio_pulse_direction",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExperimentConfig {
     QuasiStatic {
         start_nm: i64,
@@ -38,6 +54,7 @@ pub enum ExperimentConfig {
         amplitude_nm: u32,
         frequency_mhz: u32,
         cycles: u32,
+        control: SineControl,
     },
 }
 
@@ -77,9 +94,22 @@ impl ExperimentConfig {
                 amplitude_nm: u32::try_from(increment).map_err(|_| "Amplitude out of range")?,
                 frequency_mhz: timing,
                 cycles: repeats,
+                control: SineControl::Displacement,
             }),
             _ => Err("Unknown experiment mode"),
         }
+    }
+    pub fn control(self) -> Option<SineControl> {
+        match self {
+            Self::Sinusoidal { control, .. } => Some(control),
+            _ => None,
+        }
+    }
+    pub fn serial(self) -> bool {
+        matches!(
+            self.control(),
+            Some(SineControl::Displacement | SineControl::Velocity)
+        )
     }
     pub fn start(self) -> Result<i32, &'static str> {
         counts(match self {
@@ -96,6 +126,14 @@ impl ExperimentConfig {
     pub fn speed(self) -> Option<u32> {
         match self {
             Self::QuasiStatic { speed_um_s, .. } => Some(speed_um_s),
+            Self::Sinusoidal {
+                amplitude_nm,
+                frequency_mhz,
+                control,
+                ..
+            } if control != SineControl::Gpio => {
+                Some((sine_max_velocity(amplitude_nm, frequency_mhz) as u32 + 1).max(1))
+            }
             Self::Sinusoidal { .. } => None,
         }
     }
@@ -175,7 +213,14 @@ impl ExperimentConfig {
                         .ok_or("Trajectory overflow")?,
                 )?;
                 if peak_pulse_hz(amplitude_nm, frequency_mhz) > f64::from(MAX_PULSE_HZ) {
-                    return Err("Sinusoidal peak pulse rate exceeds 10000 Hz");
+                    return Err("Sinusoidal peak speed exceeds 780 um/s");
+                }
+                if self.control() == Some(SineControl::Velocity)
+                    && sine_max_velocity(amplitude_nm, frequency_mhz) < 1.0
+                {
+                    return Err(
+                        "Velocity sine peak must reach 1 um/s; increase amplitude/frequency or use displacement",
+                    );
                 }
                 // Reserve time for STOP and the confirmed return to center.
                 (u64::from(cycles) * 1_000_000).div_ceil(u64::from(frequency_mhz))
@@ -204,9 +249,11 @@ impl ExperimentConfig {
                 amplitude_nm,
                 frequency_mhz,
                 cycles,
+                control,
             } => write!(
                 out,
-                "{{\"kind\":\"sinusoidal\",\"center_nm\":{center_nm},\"amplitude_nm\":{amplitude_nm},\"frequency_mhz\":{frequency_mhz},\"cycles\":{cycles}}}"
+                "{{\"kind\":\"sinusoidal\",\"center_nm\":{center_nm},\"amplitude_nm\":{amplitude_nm},\"frequency_mhz\":{frequency_mhz},\"cycles\":{cycles},\"control\":\"{}\"}}",
+                control.name()
             ),
         }
     }

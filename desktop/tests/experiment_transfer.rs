@@ -143,6 +143,13 @@ fn final_return_metadata_above_old_line_limit_survives_download_and_csv() {
 }
 
 impl engine::Actuator for Io {
+    fn prepare_serial(&mut self, _: u32) -> Result<bool, &'static str> {
+        Ok(true)
+    }
+    fn serial_commands(&mut self, _: &[engine::serial_sine::Command]) -> Result<(), &'static str> {
+        Ok(())
+    }
+
     fn prepare_gpio(&mut self, _: u32) -> Result<bool, &'static str> {
         Ok(true)
     }
@@ -312,6 +319,7 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         amplitude_nm: 780,
         frequency_mhz: 1000,
         cycles: 1,
+        control: crate::experiment_data::SineControl::Gpio,
     };
     e.accept(config, &telemetry(0), pressure(0), false, 0)
         .unwrap();
@@ -521,6 +529,7 @@ fn native_configuration_is_validated_in_rust() {
         assert!(input.command(1).is_ok());
     }
     let command = receiver::Input {
+        sine_control: None,
         kind: "quasi_static".into(),
         speed_um_s: Some(10),
         start_um: -1.234,
@@ -578,6 +587,7 @@ fn native_configuration_is_validated_in_rust() {
     for timing in [0.0, 10.001, f64::NAN, f64::INFINITY] {
         assert!(
             receiver::Input {
+                sine_control: None,
                 kind: "sinusoidal".into(),
                 speed_um_s: None,
                 start_um: 0.0,
@@ -589,6 +599,38 @@ fn native_configuration_is_validated_in_rust() {
             .is_err()
         );
     }
+}
+#[test]
+fn serial_selection_round_trips_from_ui_to_firmware() {
+    for (mode, valid) in [("velocity", false), ("displacement", true)] {
+        let input: receiver::Input = serde_json::from_value(json!({"kind":"sinusoidal", "start_um":0, "increment_um":0.078, "timing":0.1, "repeats":1, "sine_control":mode})).unwrap();
+        assert_eq!(input.command(1).is_ok(), valid);
+    }
+    for (selection, suffix, control) in [
+        (None, "D", experiment_data::SineControl::Displacement),
+        (
+            Some("displacement"),
+            "D",
+            experiment_data::SineControl::Displacement,
+        ),
+        (
+            Some("velocity"),
+            "V",
+            experiment_data::SineControl::Velocity,
+        ),
+    ] {
+        let input: receiver::Input = serde_json::from_value(json!({"kind":"sinusoidal", "start_um":1.5, "increment_um":2, "timing":1.3, "repeats":3, "sine_control":selection})).unwrap();
+        let line = input.command(1).unwrap();
+        assert_eq!(line, format!("START 1 S 1500 2000 1300 3 {suffix}"));
+        let command::Command::Start(_, config) = command::Command::parse(line.as_bytes()).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(config.control(), Some(control));
+        assert!(config.validate().is_ok());
+    }
+    let input: receiver::Input = serde_json::from_value(json!({"kind":"sinusoidal", "start_um":0, "increment_um":1, "timing":1, "repeats":1, "sine_control":"gpio"})).unwrap();
+    assert!(input.command(1).is_err());
 }
 #[path = "../../src/xeryon.rs"]
 mod xeryon;

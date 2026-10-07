@@ -52,6 +52,7 @@ impl Trajectory {
             amplitude_nm,
             frequency_mhz,
             cycles,
+            ..
         } = config
         else {
             return Err("GPIO requires sinusoidal configuration");
@@ -63,6 +64,16 @@ impl Trajectory {
             duration_us: (u64::from(cycles) * TURN).div_ceil(u64::from(frequency_mhz)) as u32,
             start: config.start()?,
         })
+    }
+    /// Derivative in um/s; integer phase avoids accumulated timing drift.
+    pub fn velocity(&self, elapsed_us: u32) -> f64 {
+        if elapsed_us >= self.duration_us {
+            return 0.0;
+        }
+        let phase = u64::from(elapsed_us) * u64::from(self.frequency_mhz) % TURN;
+        crate::experiment_data::sine_max_velocity(self.amplitude_nm, self.frequency_mhz)
+            * cosine((phase + 3 * TURN / 4) % TURN) as f64
+            / Q as f64
     }
     pub fn position(&self, elapsed_us: u32) -> i32 {
         if elapsed_us >= self.duration_us {
@@ -164,6 +175,7 @@ mod tests {
             amplitude_nm: a,
             frequency_mhz: f,
             cycles: n,
+            control: crate::experiment_data::SineControl::Gpio,
         }
     }
     #[test]
@@ -186,6 +198,7 @@ mod tests {
             amplitude_nm: 78,
             frequency_mhz: 1000,
             cycles: 1,
+            control: crate::experiment_data::SineControl::Gpio,
         })
         .unwrap();
         let mut p = Pulses::new(t);

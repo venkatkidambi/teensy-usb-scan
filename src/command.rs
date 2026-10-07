@@ -65,11 +65,18 @@ impl Command {
                 } else {
                     None
                 };
-                let config =
+                let mut config =
                     ExperimentConfig::from_wire(kind, start, increment, timing, repeats, speed)
                         .map_err(|_| ())?;
-                if kind == "S" && optional.is_some() {
-                    return Err(());
+                if let ExperimentConfig::Sinusoidal {
+                    ref mut control, ..
+                } = config
+                {
+                    *control = match optional {
+                        None | Some("D") => crate::experiment_data::SineControl::Displacement,
+                        Some("V") => crate::experiment_data::SineControl::Velocity,
+                        _ => return Err(()),
+                    };
                 }
                 Self::Start(id, config)
             }

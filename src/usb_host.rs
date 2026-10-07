@@ -240,6 +240,41 @@ pub fn rx_pending() -> bool {
 
 pub struct ExperimentActuator;
 impl crate::experiment::Actuator for ExperimentActuator {
+    fn prepare_serial(&mut self, now: u32) -> Result<bool, &'static str> {
+        crate::gpio_trajectory::stop();
+        let t = telemetry();
+        cortex_m::interrupt::free(|cs| {
+            GPIO_SETUP
+                .borrow(cs)
+                .borrow_mut()
+                .poll_serial(now, &t, self.tx_idle(), |bytes| {
+                    // SAFETY: foreground-only, complete bounded line copied by C.
+                    if unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, false) } {
+                        Ok(())
+                    } else {
+                        Err("Serial mode setup transmit unavailable")
+                    }
+                })
+        })
+    }
+    fn serial_commands(
+        &mut self,
+        commands: &[crate::experiment::serial_sine::Command],
+    ) -> Result<(), &'static str> {
+        if !self.tx_idle() {
+            return Err("Serial waveform previous transmit incomplete");
+        }
+        // Each line is separately flushed; at most two lines per setpoint.
+        for command in commands {
+            let mut frame = crate::protocol::Frame::new();
+            command.write(&mut frame)?;
+            let bytes = frame.pending();
+            if !unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, false) } {
+                return Err("Serial waveform transmit unavailable");
+            }
+        }
+        Ok(())
+    }
     fn prepare_feedback(&mut self, now: u32) -> Result<bool, &'static str> {
         let t = telemetry();
         let idle = self.tx_idle();

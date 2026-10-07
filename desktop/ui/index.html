@@ -29,6 +29,7 @@
       <label><span id="experiment-increment-label">Signed step (µm)</span><input id="experiment-increment" type="number" step="0.001" value="1" required></label>
       <label><span id="experiment-timing-label">Hold time (s)</span><input id="experiment-timing" type="number" min="0.001" step="0.001" value="1" required></label>
       <label><span id="experiment-repeats-label">Number of steps</span><input id="experiment-repeats" type="number" min="1" step="1" value="3" required></label>
+      <label id="experiment-control-field" hidden><span>Sine control</span><select id="experiment-control"><option value="displacement">Displacement (position targets)</option><option value="velocity">Velocity (scan speed)</option></select></label>
       <label id="experiment-speed-field"><span id="experiment-speed-label">Actuator speed (µm/s)</span><input id="experiment-speed" type="number" min="1" max="16777215" step="1" value="10" required></label>
       <div id="experiment-sweep-fields" hidden>
         <h3 class="sweep-heading"><label for="experiment-sweep-enabled"><input id="experiment-sweep-enabled" type="checkbox"><span>Frequency sweep</span></label></h3>

@@ -5,6 +5,8 @@ use crate::{experiment_data::*, pressure::Reading, protocol::Telemetry, xeryon_m
 pub mod envelope;
 #[path = "final_return.rs"]
 pub mod final_return;
+#[path = "serial_sine.rs"]
+pub mod serial_sine;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Dashboard,
@@ -28,6 +30,8 @@ pub trait Actuator {
     fn tx_progress(&self) -> final_return::TxProgress {
         final_return::TxProgress::default()
     }
+    fn prepare_serial(&mut self, now: u32) -> Result<bool, &'static str>;
+    fn serial_commands(&mut self, commands: &[serial_sine::Command]) -> Result<(), &'static str>;
     fn prepare_gpio(&mut self, now: u32) -> Result<bool, &'static str>;
     fn start_gpio(&mut self, config: ExperimentConfig) -> Result<(), &'static str>;
     fn gpio_status(&self) -> crate::trajectory::Status;
@@ -73,6 +77,10 @@ pub struct Engine<'a> {
     transfer_next: usize,
     stopping: bool,
     returning: bool,
+    return_drained: Option<u32>,
+    serial: serial_sine::Stream,
+    ramp: Option<serial_sine::Ramp>,
+    serial_prepared: bool,
     final_return: final_return::Diagnostics,
     pub envelope: envelope::Envelope,
     fault_stat: Option<u32>,
@@ -126,6 +134,10 @@ impl<'a> Engine<'a> {
             transfer_next: 0,
             stopping: false,
             returning: false,
+            return_drained: None,
+            serial: Default::default(),
+            ramp: None,
+            serial_prepared: false,
             final_return: Default::default(),
             envelope: envelope::Envelope::configured(),
             fault_stat: None,
@@ -261,6 +273,12 @@ impl<'a> Engine<'a> {
         self.step = 0;
         self.stopping = false;
         self.returning = false;
+        self.return_drained = None;
+        self.serial = Default::default();
+        self.serial_prepared = false;
+        self.ramp = config.serial().then(|| {
+            serial_sine::Ramp::new(t.samples[0].value as i32, target, config.speed().unwrap())
+        });
         self.final_return = Default::default();
         self.fault_stat = None;
         self.feedback_pending = true;
@@ -292,6 +310,19 @@ impl<'a> Engine<'a> {
             Ok(true) => {
                 self.feedback_pending = false;
                 self.feedback_verified = true;
+            }
+        }
+        if self.config.unwrap().serial() && !self.serial_prepared {
+            match io.prepare_serial(now) {
+                Ok(false) => {
+                    self.feedback_pending = true;
+                    return;
+                }
+                Err(e) => {
+                    self.finish(State::Fault, e, io);
+                    return;
+                }
+                Ok(true) => self.serial_prepared = true,
             }
         }
         self.move_started = now;
@@ -378,12 +409,19 @@ impl<'a> Engine<'a> {
                     .dpos
                     .scheduled
                     .is_some_and(|sent| now.wrapping_sub(sent) < 100));
+        let velocity_running =
+            sine_running && self.config.unwrap().control() == Some(SineControl::Velocity);
+        let scan_transition = velocity_running
+            && !self.stopping
+            && self
+                .serial
+                .mode_transition(now.wrapping_sub(self.started_ms));
         let fault = Self::healthy(
             t,
             p,
             now,
-            self.state != State::MoveToStart && !stopped_transition,
-            false,
+            self.state != State::MoveToStart && !stopped_transition && !scan_transition,
+            velocity_running,
         )
         .err()
         .or_else(|| (t.epoch != self.epoch).then_some("Xeryon connection changed"))
@@ -396,6 +434,7 @@ impl<'a> Engine<'a> {
                         && !self.feedback_pending
                         && !self.speed_pending
                         && !self.timeout_pending
+                        && self.ramp.is_none()
                 })
                 .map(|m| m.interruption_reason.unwrap_or("Xeryon motion failed"))
         });
@@ -462,7 +501,9 @@ impl<'a> Engine<'a> {
                     } else {
                         self.timeout_pending = false;
                         self.move_started = now;
-                        if let Err(e) = io.target(self.target, now, true) {
+                        if self.ramp.is_none()
+                            && let Err(e) = io.target(self.target, now, true)
+                        {
                             self.finish(State::Fault, e, io);
                         }
                     }
@@ -471,6 +512,19 @@ impl<'a> Engine<'a> {
             }
             if now.wrapping_sub(self.move_started) >= self.move_timeout {
                 self.finish(State::Fault, "Start move deadline", io);
+                return;
+            }
+            if let Some(ramp) = self.ramp.as_mut() {
+                match ramp.tick(now, io) {
+                    Ok(true) => {
+                        self.ramp = None;
+                        if let Err(e) = io.target(self.target, now, true) {
+                            self.finish(State::Fault, e, io);
+                        }
+                    }
+                    Err(e) => self.finish(State::Fault, e, io),
+                    _ => {}
+                }
                 return;
             }
             if !t
@@ -483,7 +537,10 @@ impl<'a> Engine<'a> {
             return;
         }
         if self.state == State::Armed {
-            if matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. })) {
+            if !io.tx_idle() {
+                return;
+            }
+            if self.config.unwrap().control() == Some(SineControl::Gpio) {
                 if now.wrapping_sub(self.move_started) >= self.move_timeout {
                     self.finish(State::Fault, "Start move deadline", io);
                     return;
@@ -530,10 +587,10 @@ impl<'a> Engine<'a> {
             return;
         }
         // Log the theoretical position at the actual sample time, including
-        // between control ticks. It is never sent as DPOS during the waveform.
+        // between control ticks. Serial displacement also streams this trajectory.
         if let ExperimentConfig::Sinusoidal { .. } = self.config.unwrap()
             && elapsed >= self.next_sample
-            && !self.returning
+            && !self.stopping
         {
             self.target = if elapsed >= self.duration_ms - MOVE_TIMEOUT_MS {
                 // Clamp the terminal sample to the exact endpoint before STOP.
@@ -629,7 +686,42 @@ impl<'a> Engine<'a> {
                     if now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS {
                         Err("Return to center deadline")
                     } else if !self.returning {
-                        if io.tx_idle() {
+                        if self.config.unwrap().serial() {
+                            if self.ramp.is_none() {
+                                // Require feedback received after observing STOP drain,
+                                // not merely after queuing it behind waveform traffic.
+                                if !io.tx_idle() {
+                                    return;
+                                }
+                                let drained = *self.return_drained.get_or_insert(now);
+                                let after = t.samples[0].ms.wrapping_sub(drained);
+                                if after == 0 || after > 0x7fff_ffff {
+                                    return;
+                                }
+                                self.ramp = Some(serial_sine::Ramp::new(
+                                    t.samples[0].value as i32,
+                                    counts(center_nm).unwrap(),
+                                    self.config.unwrap().speed().unwrap(),
+                                ));
+                            }
+                            let ramp = self.ramp.as_mut().unwrap();
+                            let result = ramp.tick(now, io);
+                            self.target = ramp.target();
+                            match result {
+                                Ok(true) => {
+                                    self.ramp = None;
+                                    self.target = counts(center_nm).unwrap();
+                                    self.returning = true;
+                                    self.final_return.dpos.scheduled = Some(now);
+                                    io.target(self.target, now, true).map(|_| {
+                                        self.final_return.dpos.queued(now, io.tx_progress());
+                                        false
+                                    })
+                                }
+                                Ok(false) => Ok(false),
+                                Err(e) => Err(e),
+                            }
+                        } else if io.tx_idle() {
                             self.target = counts(center_nm).unwrap();
                             self.final_return.target = self.target;
                             self.returning = true;
@@ -646,7 +738,19 @@ impl<'a> Engine<'a> {
                             .is_some_and(|m| m.state == 2 && m.target == Some(self.target)))
                     }
                 } else {
-                    match io.gpio_status() {
+                    let status = if self.config.unwrap().serial() {
+                        match self.serial.tick(self.config.unwrap(), elapsed, io) {
+                            Ok(true) => crate::trajectory::Status::Complete,
+                            Ok(false) => crate::trajectory::Status::Running,
+                            Err(e) => {
+                                self.finish(State::Fault, e, io);
+                                return;
+                            }
+                        }
+                    } else {
+                        io.gpio_status()
+                    };
+                    match status {
                         crate::trajectory::Status::Running => Ok(false),
                         crate::trajectory::Status::Complete => {
                             io.stop_gpio();
@@ -693,14 +797,34 @@ impl<'a> Engine<'a> {
         if let Some(ExperimentConfig::Sinusoidal {
             amplitude_nm,
             frequency_mhz,
+            control,
             ..
         }) = self.config
         {
+            write!(out, ",\"sine_control\":\"{}\"", control.name())?;
+            if control == SineControl::Gpio {
+                write!(
+                    out,
+                    ",\"peak_pulse_hz\":{:.3},\"max_pulse_hz\":{}",
+                    peak_pulse_hz(amplitude_nm, frequency_mhz),
+                    MAX_PULSE_HZ
+                )?;
+            } else {
+                write!(
+                    out,
+                    ",\"peak_speed_um_s\":{:.3}",
+                    sine_max_velocity(amplitude_nm, frequency_mhz)
+                )?;
+            }
+        }
+        if self.config.unwrap().serial() {
             write!(
                 out,
-                ",\"sine_control\":\"gpio_pulse_direction\",\"peak_pulse_hz\":{:.3},\"max_pulse_hz\":{}",
-                peak_pulse_hz(amplitude_nm, frequency_mhz),
-                MAX_PULSE_HZ
+                ",\"serial_timing\":{{\"update_ms\":{},\"updates\":{},\"skipped_ticks\":{},\"max_gap_ms\":{}}}",
+                serial_sine::UPDATE_MS,
+                self.serial.updates,
+                self.serial.skipped,
+                self.serial.max_gap_ms
             )?;
         }
         self.final_return.write(out)?;

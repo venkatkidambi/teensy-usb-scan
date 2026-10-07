@@ -11,7 +11,7 @@ function harness() {
   };
   const oldDocument=globalThis.document,oldObserver=globalThis.ResizeObserver;
   globalThis.document={getElementById:node,createElement:()=>({})};globalThis.ResizeObserver=class{observe(){}};
-  const state={connected:true,hello:{experiments:true,sine_gpio:true},session:{
+  const state={connected:true,hello:{experiments:true,sine_serial_displacement:true,sine_serial_velocity:true},session:{
     async startExperiment(config,append=false){calls.push(config);appendFlags.push(append);archiveIndex=append?archiveIndex+1:0;archiveIndices[calls.length]=archiveIndex;this.experimentOwned=true;return {run:calls.length};},
     async request(command){calls.push(command);},
   }};

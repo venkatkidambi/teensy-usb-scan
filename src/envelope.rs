@@ -19,6 +19,7 @@ mod tests {
             amplitude_nm: 7800,
             frequency_mhz: 1000,
             cycles: 1,
+            control: crate::experiment_data::SineControl::Gpio,
         };
         let mut guard = Envelope::default();
         let mut t = Telemetry::new();

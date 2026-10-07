@@ -18,6 +18,7 @@ pub struct Input {
     pub timing: f64,
     pub repeats: u32,
     pub speed_um_s: Option<u32>,
+    pub sine_control: Option<String>,
 }
 fn scaled(value: f64, scale: f64) -> Result<i64, String> {
     let n = value * scale;
@@ -40,7 +41,7 @@ impl Input {
             "sinusoidal" => "S",
             _ => return Err("Unknown experiment mode".into()),
         };
-        let config = ExperimentConfig::from_wire(
+        let mut config = ExperimentConfig::from_wire(
             kind,
             start,
             increment,
@@ -48,13 +49,35 @@ impl Input {
             self.repeats,
             self.speed_um_s,
         )?;
+        if let ExperimentConfig::Sinusoidal {
+            ref mut control, ..
+        } = config
+        {
+            *control = match self.sine_control.as_deref() {
+                None | Some("displacement") => data::SineControl::Displacement,
+                Some("velocity") => data::SineControl::Velocity,
+                _ => return Err("Unknown sine control mode".into()),
+            };
+        } else if self.sine_control.is_some() {
+            return Err("Sine control requires sinusoidal mode".into());
+        }
         config.validate()?;
         let mut command = format!(
             "START {id} {kind} {start} {increment} {timing} {}",
             self.repeats
         );
-        if let Some(speed) = config.speed() {
+        if let ExperimentConfig::QuasiStatic {
+            speed_um_s: speed, ..
+        } = config
+        {
             write!(command, " {speed}").unwrap();
+        }
+        if let Some(control) = config.control() {
+            command.push_str(if control == data::SineControl::Velocity {
+                " V"
+            } else {
+                " D"
+            });
         }
         Ok(command)
     }
