@@ -59,7 +59,7 @@ export function parseMessage(line) {
   } else if(m.type==='hello') {
     if(m.protocol!==1||m.board!=='Teensy 4.1'||typeof m.firmware!=='string'||typeof m.motion!=='boolean'||typeof m.pressure!=='boolean') throw Error('Incompatible firmware; upload this project’s telemetry build');
     if(m.max_pulse_hz!==undefined&&(!u32(m.max_pulse_hz)||m.max_pulse_hz===0))throw Error('Invalid GPIO pulse limit');
-    for(const key of ['sine_serial_displacement','sine_serial_velocity'])if(m[key]!==undefined&&typeof m[key]!=='boolean')throw Error(`Invalid ${key} capability`);
+    for(const key of ['sine_serial_displacement','sine_serial_velocity','sine_serial_velocity_position'])if(m[key]!==undefined&&typeof m[key]!=='boolean')throw Error(`Invalid ${key} capability`);
     if(m.sine_gpio!==undefined&&typeof m.sine_gpio!=='boolean')throw Error('Invalid sine_gpio capability');
     if(m.sine_position!==undefined&&typeof m.sine_position!=='boolean')throw Error('Invalid sine_position capability');
     if(m.quasi_static_speed!==undefined&&typeof m.quasi_static_speed!=='boolean')throw Error('Invalid quasi_static_speed capability');

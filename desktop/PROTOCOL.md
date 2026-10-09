@@ -9,7 +9,7 @@ Current firmware also advertises `quasi_static_speed: true`. Quasi-static START
 requires `START <id> Q <start_nm> <step_nm> <hold_ms> <steps> <speed_um_s>` with
 integer speed 1–16777215 µm/s; missing, fractional, zero or out-of-range speeds
 are rejected. The desktop requires this capability before offering START Q.
-Sinusoidal START accepts an optional final `D` (displacement, default) or `V` (velocity). Quasi-static metadata includes
+Sinusoidal START accepts an optional final `D` (displacement, default), `V` (velocity), or `VP` (velocity + position correction). Quasi-static metadata includes
 `speed_um_s`. START acknowledges acceptance; controller speed/TOU2 readback
 checks happen before motion and report any failure in the retained dataset.
 
@@ -164,9 +164,10 @@ Firmware with `plunger_limits: true` in HELLO enforces potentiometer bounds and 
 ## Sinusoidal serial control
 
 HELLO advertises `sine_serial_displacement: true`, `sine_serial_velocity: true`,
+`sine_serial_velocity_position: true`,
 `sine_position: true`, and `sine_gpio: false`. The desktop requires the capability
 for the selected serial mode. Update desktop and firmware together. START S
-accepts an optional final `D` or `V`; omitting it selects displacement.
+accepts an optional final `D`, `V`, or `VP`; omitting it selects displacement.
 Units remain nm and millihertz; frequency is 0.1–10 Hz, peak velocity
 `2π A_µm f_Hz` must be <= 780 µm/s, and both extrema must fit the signed 26-bit range.
 
@@ -183,12 +184,25 @@ The waveform starts at zero theoretical velocity:
   Only changed speeds/directions are sent. No position correction is applied.
   Peaks below the 1 µm/s speed resolution are rejected; use displacement instead.
 
-Both schedule 5 ms updates from absolute elapsed time, wait for previous USB
+- `VP`: uses the same velocity feedforward and SCAN reversal sequence, adding
+  proportional position correction against the absolute-time target at EPOS's
+  host receipt timestamp (pre-waveform receipts use the start position).
+  A continuous one-count deadband precedes the 2 s⁻¹ gain. Correction is limited
+  to ±20% of theoretical peak speed, with a slew limit of that cap per 100 ms;
+  combined speed is clamped to ±780 µm/s before integer quantization. No DPOS
+  is issued during the waveform. Invalid EPOS or receipt age >100 ms faults with
+  STOP. The 1 µm/s minimum peak also applies. These conservative fixed settings
+  reduce drift; they do not guarantee zero physical jerk or tracking error.
+  Unknown controller/transport latency is not compensated. Metadata includes
+  `position_correction` with `gain_per_s`, `max_peak_fraction`, `ramp_ms`,
+  `deadband_counts`, `feedback_max_age_ms`, and `speed_limit_um_s`.
+
+All modes schedule 5 ms updates from absolute elapsed time, wait for previous USB
 transfers to drain, and coalesce delayed work to the current phase. More than
 25 ms without servicing the waveform faults with STOP, rather than a catch-up
 burst. This is a dispatch bound, not a guarantee of controller response time.
 At the N-cycle boundary, the displacement endpoint is clamped exactly; velocity
-mode requests STOP. After STOP drains, fresh EPOS seeds a quintic return to center.
+modes request STOP. After STOP drains, fresh EPOS seeds a quintic return to center.
 Both ramps have zero endpoint velocity/acceleration and take at least 1 s.
 Final completion requires DPOS echo and subsequent Position Reached feedback.
 The 10 s final reserve covers STOP plus return. ABORT/fault/disconnect may stop
@@ -206,7 +220,8 @@ per-signal new flags remain in CSV. During the sine waveform, `target` is the
 theoretical position at actual logging time; the terminal sample at STOP is the
 negative extremum while STOP drains, then the most recent return-ramp target.
 Quasi-static retains its last commanded DPOS target. Sinusoidal metadata adds
-`sine_control: "serial_displacement"` or `"serial_velocity"` (also `config.control`),
+`sine_control: "serial_displacement"`, `"serial_velocity"`, or
+`"serial_velocity_position"` (also `config.control`),
 calculated `peak_speed_um_s`, and `serial_timing` with `update_ms`, `updates`
 (command batches), `skipped_ticks`, and `max_gap_ms` for the waveform only.
 `sample_ms` remains 20. Older GPIO datasets keep their original metadata.

@@ -56,6 +56,7 @@ impl Input {
             *control = match self.sine_control.as_deref() {
                 None | Some("displacement") => data::SineControl::Displacement,
                 Some("velocity") => data::SineControl::Velocity,
+                Some("velocity_position") => data::SineControl::VelocityPosition,
                 _ => return Err("Unknown sine control mode".into()),
             };
         } else if self.sine_control.is_some() {
@@ -73,10 +74,10 @@ impl Input {
             write!(command, " {speed}").unwrap();
         }
         if let Some(control) = config.control() {
-            command.push_str(if control == data::SineControl::Velocity {
-                " V"
-            } else {
-                " D"
+            command.push_str(match control {
+                data::SineControl::Velocity => " V",
+                data::SineControl::VelocityPosition => " VP",
+                _ => " D",
             });
         }
         Ok(command)

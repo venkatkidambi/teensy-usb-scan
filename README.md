@@ -109,9 +109,10 @@ the separate USB2 host header. Only one app/terminal can own the serial port.
 - **Quasi-static:** validated start, increment, hold, step count, and required
   speed. Firmware verifies SSPD and the controller TOU2 budget before motion;
   holds begin after confirmed arrival.
-- **Sinusoidal:** choose **Displacement** (default) or **Velocity** serial control
+- **Sinusoidal:** choose **Displacement** (default), **Velocity**, or
+  **Velocity + position correction** serial control
   for `x = center − A cos(2πft)`. No Teensy-to-Xeryon GPIO wiring is needed.
-  Both approach `center − amplitude` gradually and wait for Position Reached,
+  All modes approach `center − amplitude` gradually and wait for Position Reached,
   execute the requested cycles, then gradually return to center and confirm arrival.
 - **Experiment Data:** verified results, position/force plots, phase estimates,
   CSV and PNG exports. Sweeps run frequencies in order, downloading each result
@@ -136,6 +137,18 @@ defines SSPD as both scan speed and the speed towards a DPOS target.
   no abrupt position correction is injected during the waveform. SSPD resolves
   whole µm/s; velocity runs with peak speed below 1 µm/s are rejected. Use
   displacement mode for small, slow trajectories.
+
+- **Velocity + position correction:** keeps SSPD/SCAN velocity control and adds
+  `v_correction = 2 s⁻¹ × position_error` to the sine velocity. The absolute-time
+  position target anchors each cycle, reducing accumulated drift without issuing
+  DPOS during the waveform. Error uses the target at EPOS receipt time, with a
+  one-count (0.078 µm) deadband. Correction is capped at 20% of sine peak speed
+  and takes at least 100 ms to ramp from zero to that cap; total commanded speed
+  is capped at 780 µm/s. Missing feedback or EPOS older than 100 ms faults with
+  STOP. This mode shares velocity's 1 µm/s minimum peak and speed quantization.
+  Receipt timestamps cannot remove unknown sensor/USB latency; loaded-rig testing
+  is still needed to assess tracking and smoothness. Dataset metadata records the
+  correction settings. Update both firmware and desktop to enable this mode.
 
 Setpoints are scheduled every **5 ms** (up to 200 updates/s), separately from
 50 Hz recording. Phase uses absolute elapsed time; busy transfers coalesce to the

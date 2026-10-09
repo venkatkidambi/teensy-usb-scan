@@ -125,6 +125,16 @@ test('START explains blockers, validates fields, submits once, and reports failu
     assert.equal(selected.sine_control,'velocity');
     assert.equal(node('experiment-state').textContent,'START failed: Bridge unavailable');
     assert.equal(node('experiment-start-button').disabled,false);
+    node('experiment-control').value='velocity_position';
+    node('experiment-control').onchange();
+    assert.match(node('experiment-motion-detail').textContent,/gradual encoder position correction/);
+    assert.equal(node('experiment-start-button').disabled,true);
+    await submit();
+    assert.equal(selected.sine_control,'velocity');
+    state.hello.sine_serial_velocity_position=true;experimentControls();
+    assert.equal(node('experiment-start-button').disabled,false);
+    await submit();
+    assert.equal(selected.sine_control,'velocity_position');
     node('tab-quasi_static').onclick();
     await submit();
     assert.match(node('experiment-state').textContent,/firmware.*quasi-static speed control/);

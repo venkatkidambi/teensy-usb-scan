@@ -201,7 +201,11 @@ mod tests {
         for (amplitude_nm, frequency_mhz) in
             [(7800, 100), (124140, 1000), (7800, 1300), (7800, 10000)]
         {
-            for control in [SineControl::Displacement, SineControl::Velocity] {
+            for control in [
+                SineControl::Displacement,
+                SineControl::Velocity,
+                SineControl::VelocityPosition,
+            ] {
                 let config = ExperimentConfig::Sinusoidal {
                     center_nm: 0,
                     amplitude_nm,
@@ -219,7 +223,15 @@ mod tests {
                     // backlog, and shifts dispatch away from 5 ms boundaries.
                     io.busy = ms % 17 >= 10 && ms % 17 <= 13;
                     let old = io.serial.len();
-                    done = stream.tick(config, ms, &mut io).unwrap();
+                    done = stream
+                        .tick(
+                            config,
+                            ms,
+                            ms,
+                            feedback(ms, trajectory.position(ms * 1000), true).0.samples[0],
+                            &mut io,
+                        )
+                        .unwrap();
                     assert!(io.serial.len() - old <= 2);
                     for command in &io.serial[old..] {
                         match command {
@@ -241,6 +253,140 @@ mod tests {
                 assert!(stream.max_gap_ms <= 10);
             }
         }
+    }
+    #[test]
+    fn anchored_velocity_rejects_accumulating_drift_without_position_commands() {
+        let mut errors = Vec::new();
+        for control in [SineControl::Velocity, SineControl::VelocityPosition] {
+            let config = ExperimentConfig::Sinusoidal {
+                center_nm: 0,
+                amplitude_nm: 7800,
+                frequency_mhz: 1000,
+                cycles: 20,
+                control,
+            };
+            let trajectory = crate::trajectory::Trajectory::new(config).unwrap();
+            let mut stream = serial_sine::Stream::default();
+            let mut io = Io::default();
+            let mut position = f64::from(trajectory.start) * 0.078;
+            let mut epos = crate::protocol::Sample::default();
+            let (mut speed, mut direction) = (0, 0);
+            for ms in 0..=20_000 {
+                // 50 Hz encoder publications; the control loop runs at 200 Hz.
+                if ms % 20 == 0 {
+                    epos = crate::protocol::Sample {
+                        valid: true,
+                        ms,
+                        value: (position / 0.078).round() as i64,
+                    };
+                }
+                let old = io.serial.len();
+                let done = stream.tick(config, ms, ms, epos, &mut io).unwrap();
+                for command in &io.serial[old..] {
+                    match command {
+                        serial_sine::Command::Speed(v) => {
+                            speed = *v;
+                            assert!(speed <= 780);
+                        }
+                        serial_sine::Command::Direction(d) => {
+                            assert_eq!(speed, 0);
+                            direction = *d;
+                        }
+                        serial_sine::Command::Position(_) => {
+                            panic!("Waveform restarted positioning")
+                        }
+                    }
+                }
+                if done {
+                    break;
+                }
+                // A persistent 0.8 um/s disturbance should not integrate forever.
+                position += (f64::from(speed) * f64::from(direction) + 0.8) / 1000.0;
+            }
+            errors.push((position - f64::from(trajectory.start) * 0.078).abs());
+        }
+        assert!(errors[0] > 10.0, "{errors:?}");
+        assert!(errors[1] < 2.0 && errors[1] < errors[0] / 5.0, "{errors:?}");
+    }
+    #[test]
+    fn anchored_velocity_caps_combined_speed_in_both_directions() {
+        let config = ExperimentConfig::Sinusoidal {
+            center_nm: 0,
+            amplitude_nm: 124140,
+            frequency_mhz: 1000,
+            cycles: 1,
+            control: SineControl::VelocityPosition,
+        };
+        let mut stream = serial_sine::Stream::default();
+        let mut io = Io::default();
+        let (mut speed, mut direction) = (0, 0);
+        for ms in 0..1000 {
+            let epos = crate::protocol::Sample {
+                valid: true,
+                ms,
+                value: if ms < 500 { -1000000 } else { 1000000 },
+            };
+            let old = io.serial.len();
+            stream.tick(config, ms, ms, epos, &mut io).unwrap();
+            for command in &io.serial[old..] {
+                match command {
+                    serial_sine::Command::Speed(v) => {
+                        speed = *v;
+                        assert!(speed <= 780);
+                    }
+                    serial_sine::Command::Direction(d) => {
+                        assert_eq!(speed, 0);
+                        direction = *d;
+                    }
+                    _ => panic!("Unexpected position command"),
+                }
+            }
+            if ms == 250 {
+                assert_eq!((speed, direction), (780, 1));
+            }
+            if ms == 750 {
+                assert_eq!((speed, direction), (780, -1));
+            }
+        }
+    }
+    #[test]
+    fn anchored_velocity_stops_and_keeps_data_when_position_feedback_ages_out() {
+        let mut records = [Record::EMPTY; CAPACITY];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        let (t, p) = feedback(0, 0, true);
+        e.accept(
+            serial_config(SineControl::VelocityPosition),
+            &t,
+            p,
+            false,
+            0,
+        )
+        .unwrap();
+        e.begin(0, &mut io);
+        let mut now = 0;
+        while e.state != State::Running {
+            serial_poll(&mut e, &mut io, now);
+            now += 1;
+            assert!(now < 2000);
+        }
+        for time in now..now + 110 {
+            let (mut t, p) = feedback(time, -100, true);
+            t.samples[0].ms = e.started_ms;
+            t.record(b"STAT", (1 << 5) | (1 << 6) | (1 << 13), time);
+            e.poll(time, &t, p, &mut io);
+            if e.data_ready() {
+                break;
+            }
+        }
+        assert_eq!(e.outcome, "faulted");
+        assert_eq!(e.reason, "Position correction feedback stale");
+        assert_eq!(io.stops, 1);
+        assert!(e.len > 0);
+        let mut metadata = String::new();
+        e.metadata(&mut metadata, 1).unwrap();
+        assert!(metadata.contains("\"position_correction\":{\"gain_per_s\":2,"));
+        assert!(metadata.contains("\"sine_control\":\"serial_velocity_position\""));
     }
     #[test]
     fn serial_approach_is_monotonic_with_slow_endpoint_steps_across_clock_wrap() {
@@ -295,15 +441,26 @@ mod tests {
         t.motor_timeout_updates = now.wrapping_add(1);
         if e.state == State::Running
             && !e.stopping
-            && e.config.unwrap().control() == Some(SineControl::Velocity)
+            && e.config
+                .unwrap()
+                .control()
+                .is_some_and(SineControl::velocity)
         {
+            let position = crate::trajectory::Trajectory::new(e.config.unwrap())
+                .unwrap()
+                .position(now.wrapping_sub(e.started_ms) * 1000);
+            t.record(b"EPOS", i64::from(position), now);
             t.record(b"STAT", (1 << 5) | (1 << 6) | (1 << 13), now);
         }
         e.poll(now, &t, p, io);
     }
     #[test]
     fn serial_modes_approach_run_and_return_without_gpio_and_confirm_arrival() {
-        for control in [SineControl::Displacement, SineControl::Velocity] {
+        for control in [
+            SineControl::Displacement,
+            SineControl::Velocity,
+            SineControl::VelocityPosition,
+        ] {
             let mut records = [Record::EMPTY; CAPACITY];
             let mut e = Engine::new(&mut records);
             let mut io = Io::default();
@@ -333,7 +490,7 @@ mod tests {
                 [-100, 0]
             );
             let waveform = &io.serial[waveform_start.unwrap()..waveform_end.unwrap()];
-            if control == SineControl::Velocity {
+            if control.velocity() {
                 assert!(
                     !waveform
                         .iter()
@@ -409,7 +566,11 @@ mod tests {
     }
     #[test]
     fn serial_stall_fault_abort_and_disconnect_keep_partial_data() {
-        for control in [SineControl::Displacement, SineControl::Velocity] {
+        for control in [
+            SineControl::Displacement,
+            SineControl::Velocity,
+            SineControl::VelocityPosition,
+        ] {
             for failure in ["busy", "late", "abort", "disconnect", "tx"] {
                 let mut records = [Record::EMPTY; CAPACITY];
                 let mut e = Engine::new(&mut records);

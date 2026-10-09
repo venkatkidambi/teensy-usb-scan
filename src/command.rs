@@ -75,6 +75,7 @@ impl Command {
                     *control = match optional {
                         None | Some("D") => crate::experiment_data::SineControl::Displacement,
                         Some("V") => crate::experiment_data::SineControl::Velocity,
+                        Some("VP") => crate::experiment_data::SineControl::VelocityPosition,
                         _ => return Err(()),
                     };
                 }

@@ -28,6 +28,7 @@ pub fn sine_max_velocity(amplitude_nm: u32, frequency_mhz: u32) -> f64 {
 pub enum SineControl {
     Displacement,
     Velocity,
+    VelocityPosition,
     Gpio,
 }
 impl SineControl {
@@ -35,8 +36,12 @@ impl SineControl {
         match self {
             Self::Displacement => "serial_displacement",
             Self::Velocity => "serial_velocity",
+            Self::VelocityPosition => "serial_velocity_position",
             Self::Gpio => "gpio_pulse_direction",
         }
+    }
+    pub fn velocity(self) -> bool {
+        matches!(self, Self::Velocity | Self::VelocityPosition)
     }
 }
 
@@ -108,7 +113,7 @@ impl ExperimentConfig {
     pub fn serial(self) -> bool {
         matches!(
             self.control(),
-            Some(SineControl::Displacement | SineControl::Velocity)
+            Some(SineControl::Displacement | SineControl::Velocity | SineControl::VelocityPosition)
         )
     }
     pub fn start(self) -> Result<i32, &'static str> {
@@ -215,7 +220,7 @@ impl ExperimentConfig {
                 if peak_pulse_hz(amplitude_nm, frequency_mhz) > f64::from(MAX_PULSE_HZ) {
                     return Err("Sinusoidal peak speed exceeds 780 um/s");
                 }
-                if self.control() == Some(SineControl::Velocity)
+                if self.control().is_some_and(SineControl::velocity)
                     && sine_max_velocity(amplitude_nm, frequency_mhz) < 1.0
                 {
                     return Err(

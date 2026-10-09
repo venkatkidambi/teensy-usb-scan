@@ -409,8 +409,12 @@ impl<'a> Engine<'a> {
                     .dpos
                     .scheduled
                     .is_some_and(|sent| now.wrapping_sub(sent) < 100));
-        let velocity_running =
-            sine_running && self.config.unwrap().control() == Some(SineControl::Velocity);
+        let velocity_running = sine_running
+            && self
+                .config
+                .unwrap()
+                .control()
+                .is_some_and(SineControl::velocity);
         let scan_transition = velocity_running
             && !self.stopping
             && self
@@ -739,7 +743,10 @@ impl<'a> Engine<'a> {
                     }
                 } else {
                     let status = if self.config.unwrap().serial() {
-                        match self.serial.tick(self.config.unwrap(), elapsed, io) {
+                        match self
+                            .serial
+                            .tick(self.config.unwrap(), elapsed, now, t.samples[0], io)
+                        {
                             Ok(true) => crate::trajectory::Status::Complete,
                             Ok(false) => crate::trajectory::Status::Running,
                             Err(e) => {
@@ -802,6 +809,17 @@ impl<'a> Engine<'a> {
         }) = self.config
         {
             write!(out, ",\"sine_control\":\"{}\"", control.name())?;
+            if control == SineControl::VelocityPosition {
+                write!(
+                    out,
+                    ",\"position_correction\":{{\"gain_per_s\":{},\"max_peak_fraction\":{},\"ramp_ms\":{},\"deadband_counts\":1,\"feedback_max_age_ms\":{},\"speed_limit_um_s\":{}}}",
+                    serial_sine::POSITION_GAIN_S,
+                    serial_sine::CORRECTION_FRACTION,
+                    serial_sine::CORRECTION_RAMP_MS,
+                    serial_sine::FEEDBACK_MAX_AGE_MS,
+                    serial_sine::VELOCITY_LIMIT_UM_S,
+                )?;
+            }
             if control == SineControl::Gpio {
                 write!(
                     out,

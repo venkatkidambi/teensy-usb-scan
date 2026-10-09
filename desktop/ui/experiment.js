@@ -62,7 +62,7 @@ export function experimentControls() {
   $('experiment-start-button').title=blocked;
   text('experiment-start-reason',blocked);
   $('experiment-start-reason').hidden=!blocked;
-  text('experiment-motion-detail',mode==='sinusoidal'?`${$('experiment-control').value==='velocity'?'Serial velocity control varies scan speed in 1 µm/s steps; position can drift.':'Serial displacement control uses small position targets and a varying speed limit to reduce jerking.'} Both use smooth approach/return ramps and start the sine at center − amplitude. No GPIO wiring required. Lower frequencies allow more serial updates per cycle.`:'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.');
+  text('experiment-motion-detail',mode==='sinusoidal'?`${$('experiment-control').value==='velocity_position'?'Serial velocity control adds a bounded, gradual encoder position correction to reduce drift.':$('experiment-control').value==='velocity'?'Serial velocity control varies scan speed in 1 µm/s steps; position can drift.':'Serial displacement control uses small position targets and a varying speed limit to reduce jerking.'} All modes use smooth approach/return ramps and start the sine at center − amplitude. No GPIO wiring required. Lower frequencies allow more serial updates per cycle.`:'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.');
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
   $('experiment-save').disabled=!!saving||owned||!dataset;

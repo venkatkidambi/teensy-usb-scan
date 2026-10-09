@@ -2,11 +2,60 @@
 use super::Actuator;
 use crate::{
     experiment_data::{ExperimentConfig, SineControl},
+    protocol::Sample,
     trajectory::Trajectory,
 };
 
 pub const UPDATE_MS: u32 = 5;
 pub const STALL_MS: u32 = 25;
+pub const POSITION_GAIN_S: f64 = 2.0;
+pub const CORRECTION_FRACTION: f64 = 0.2;
+pub const CORRECTION_RAMP_MS: u32 = 100;
+pub const FEEDBACK_MAX_AGE_MS: u32 = 100;
+pub const VELOCITY_LIMIT_UM_S: f64 = 780.0;
+
+#[derive(Default)]
+struct PositionCorrection {
+    velocity: f64,
+    last: u32,
+}
+impl PositionCorrection {
+    fn update(
+        &mut self,
+        trajectory: &Trajectory,
+        elapsed: u32,
+        now: u32,
+        epos: Sample,
+        peak_speed: f64,
+    ) -> Result<f64, &'static str> {
+        let age = now.wrapping_sub(epos.ms);
+        if !epos.valid || age > FEEDBACK_MAX_AGE_MS {
+            return Err("Position correction feedback stale");
+        }
+        if !(i64::from(crate::experiment_data::MIN_POSITION)
+            ..=i64::from(crate::experiment_data::MAX_POSITION))
+            .contains(&epos.value)
+        {
+            return Err("Invalid encoder position");
+        }
+        // Match the reference to the receipt time, then hold that error until
+        // another EPOS arrives. Comparing old EPOS with today's target would
+        // turn telemetry cadence into a spurious position lag. Receipt time
+        // cannot compensate for unknown controller/USB acquisition latency.
+        let target = trajectory.position(elapsed.saturating_sub(age) * 1000);
+        let error = i64::from(target) - epos.value;
+        // A continuous one-count deadband avoids chasing encoder rounding.
+        let error_um =
+            (error.unsigned_abs().saturating_sub(1) as f64) * error.signum() as f64 * 0.078;
+        let limit = peak_speed * CORRECTION_FRACTION;
+        let desired = (POSITION_GAIN_S * error_um).clamp(-limit, limit);
+        let step =
+            limit * f64::from(elapsed.saturating_sub(self.last)) / f64::from(CORRECTION_RAMP_MS);
+        self.velocity += (desired - self.velocity).clamp(-step, step);
+        self.last = elapsed;
+        Ok(self.velocity)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -43,6 +92,7 @@ pub struct Stream {
     direction: Option<i8>,
     terminal: bool,
     changed: u32,
+    correction: PositionCorrection,
     pub updates: u32,
     pub skipped: u32,
     pub max_gap_ms: u32,
@@ -95,6 +145,8 @@ impl Stream {
         &mut self,
         config: ExperimentConfig,
         elapsed: u32,
+        now: u32,
+        epos: Sample,
         io: &mut impl Actuator,
     ) -> Result<bool, &'static str> {
         if elapsed.saturating_sub(self.last) > STALL_MS {
@@ -103,7 +155,7 @@ impl Stream {
         let trajectory = Trajectory::new(config)?;
         let us = elapsed * 1000;
         if us >= trajectory.duration_us {
-            if config.control() == Some(SineControl::Velocity) {
+            if config.control().is_some_and(SineControl::velocity) {
                 return Ok(true);
             }
             if self.terminal {
@@ -134,9 +186,21 @@ impl Stream {
                 + 1;
             self.position(trajectory.position(us), speed, io)?;
         } else {
-            // Midpoint speed reduces zero-order-hold integration error. No
-            // position feedback correction is injected into the velocity sine.
-            let velocity = trajectory.velocity(us + UPDATE_MS * 500);
+            // Midpoint speed reduces zero-order-hold integration error.
+            let mut velocity = trajectory.velocity(us + UPDATE_MS * 500);
+            if let ExperimentConfig::Sinusoidal {
+                amplitude_nm,
+                frequency_mhz,
+                control: SineControl::VelocityPosition,
+                ..
+            } = config
+            {
+                let peak = crate::experiment_data::sine_max_velocity(amplitude_nm, frequency_mhz);
+                velocity += self
+                    .correction
+                    .update(&trajectory, elapsed, now, epos, peak)?;
+                velocity = velocity.clamp(-VELOCITY_LIMIT_UM_S, VELOCITY_LIMIT_UM_S);
+            }
             let speed = (velocity.abs() + 0.5) as u32;
             let direction = if speed == 0 {
                 0
@@ -165,6 +229,97 @@ impl Stream {
             }
         }
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn trajectory() -> Trajectory {
+        Trajectory::new(ExperimentConfig::Sinusoidal {
+            center_nm: 0,
+            amplitude_nm: 7800,
+            frequency_mhz: 1000,
+            cycles: 2,
+            control: SineControl::VelocityPosition,
+        })
+        .unwrap()
+    }
+    #[test]
+    fn correction_uses_receipt_phase_across_clock_wrap_and_encoder_deadband() {
+        let trajectory = trajectory();
+        let mut correction = PositionCorrection::default();
+        let epoch = u32::MAX - 100;
+        for elapsed in (0u32..500).step_by(5) {
+            let receipt = elapsed / 20 * 20;
+            for quantization in -1..=1 {
+                let epos = Sample {
+                    valid: true,
+                    ms: epoch.wrapping_add(receipt),
+                    value: i64::from(trajectory.position(receipt * 1000)) + quantization,
+                };
+                assert_eq!(
+                    correction
+                        .update(
+                            &trajectory,
+                            elapsed,
+                            epoch.wrapping_add(elapsed),
+                            epos,
+                            50.0
+                        )
+                        .unwrap(),
+                    0.0
+                );
+            }
+        }
+    }
+    #[test]
+    fn correction_is_bounded_slew_limited_and_rejects_bad_feedback() {
+        let trajectory = trajectory();
+        let mut correction = PositionCorrection::default();
+        let mut last = 0.0;
+        for elapsed in (0..=400).step_by(5) {
+            let offset = if elapsed < 200 { -10000 } else { 10000 };
+            let epos = Sample {
+                valid: true,
+                ms: elapsed,
+                value: i64::from(trajectory.position(elapsed * 1000)) + offset,
+            };
+            let velocity = correction
+                .update(&trajectory, elapsed, elapsed, epos, 50.0)
+                .unwrap();
+            assert!(velocity.abs() <= 10.0);
+            assert!((velocity - last).abs() <= 0.500001);
+            if elapsed == 100 {
+                assert_eq!(velocity, 10.0);
+            }
+            if elapsed == 400 {
+                assert_eq!(velocity, -10.0);
+            }
+            last = velocity;
+        }
+        let mut epos = Sample {
+            valid: true,
+            ms: 400,
+            value: 0,
+        };
+        assert!(correction.update(&trajectory, 500, 500, epos, 50.0).is_ok());
+        assert_eq!(
+            correction.update(&trajectory, 501, 501, epos, 50.0),
+            Err("Position correction feedback stale")
+        );
+        epos.valid = false;
+        assert!(
+            correction
+                .update(&trajectory, 400, 400, epos, 50.0)
+                .is_err()
+        );
+        epos.valid = true;
+        epos.value = i64::MAX;
+        assert_eq!(
+            correction.update(&trajectory, 400, 400, epos, 50.0),
+            Err("Invalid encoder position")
+        );
     }
 }
 

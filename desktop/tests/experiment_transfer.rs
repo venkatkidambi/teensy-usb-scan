@@ -602,7 +602,11 @@ fn native_configuration_is_validated_in_rust() {
 }
 #[test]
 fn serial_selection_round_trips_from_ui_to_firmware() {
-    for (mode, valid) in [("velocity", false), ("displacement", true)] {
+    for (mode, valid) in [
+        ("velocity", false),
+        ("velocity_position", false),
+        ("displacement", true),
+    ] {
         let input: receiver::Input = serde_json::from_value(json!({"kind":"sinusoidal", "start_um":0, "increment_um":0.078, "timing":0.1, "repeats":1, "sine_control":mode})).unwrap();
         assert_eq!(input.command(1).is_ok(), valid);
     }
@@ -617,6 +621,11 @@ fn serial_selection_round_trips_from_ui_to_firmware() {
             Some("velocity"),
             "V",
             experiment_data::SineControl::Velocity,
+        ),
+        (
+            Some("velocity_position"),
+            "VP",
+            experiment_data::SineControl::VelocityPosition,
         ),
     ] {
         let input: receiver::Input = serde_json::from_value(json!({"kind":"sinusoidal", "start_um":1.5, "increment_um":2, "timing":1.3, "repeats":3, "sine_control":selection})).unwrap();

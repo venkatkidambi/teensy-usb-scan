@@ -361,7 +361,7 @@ impl Console {
                     }
                     Ok(Command::Hello(id)) => writeln!(
                         self.tx,
-                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"quasi_static_speed\":true,\"sine_position\":true,\"sine_gpio\":false,\"sine_serial_displacement\":true,\"sine_serial_velocity\":true,\"max_pulse_hz\":{}}}",
+                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"quasi_static_speed\":true,\"sine_position\":true,\"sine_gpio\":false,\"sine_serial_displacement\":true,\"sine_serial_velocity\":true,\"sine_serial_velocity_position\":true,\"max_pulse_hz\":{}}}",
                         env!("CARGO_PKG_VERSION"),
                         crate::experiment_data::MAX_PULSE_HZ
                     ),
