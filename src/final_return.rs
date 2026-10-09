@@ -1,4 +1,4 @@
-//! Retained final STOP and confirmed center-return evidence. Times are host milliseconds, not
+//! Retained final STOP evidence (legacy final_return metadata key). Times are host milliseconds, not
 //! controller execution times. The 50 Hz dataset supplies the EPOS/STAT/TIME
 //! history; these snapshots retain the boundary and between-tick completion.
 #[derive(Clone, Copy, Default)]

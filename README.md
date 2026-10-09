@@ -113,7 +113,7 @@ the separate USB2 host header. Only one app/terminal can own the serial port.
   **Velocity + position correction** serial control
   for `x = center − A cos(2πft)`. No Teensy-to-Xeryon GPIO wiring is needed.
   All modes approach `center − amplitude` gradually and wait for Position Reached,
-  execute the requested cycles, then gradually return to center and confirm arrival.
+  execute the requested cycles, then STOP at the last cycle endpoint without returning to center.
 - **Experiment Data:** verified results, position/force plots, phase estimates,
   CSV and PNG exports. Sweeps run frequencies in order, downloading each result
   before the next START. ABORT, faults, or disconnect cancel remaining runs.
@@ -155,9 +155,9 @@ Setpoints are scheduled every **5 ms** (up to 200 updates/s), separately from
 current setpoint instead of replaying stale commands. A control service gap over
 25 ms faults and requests STOP. Actual cadence depends on USB/controller latency;
 `serial_timing` metadata records update batches, skipped ticks, and maximum gap.
-Approach and return use quintic position ramps with zero endpoint velocity and
-acceleration, capped approximately at the configured waveform peak speed. Their
-minimum duration is 1 s; the approach waits for confirmed arrival before acquisition.
+The approach uses a quintic position ramp with zero endpoint velocity and
+acceleration, capped approximately at the configured waveform peak speed. Its
+minimum duration is 1 s; it waits for confirmed arrival before acquisition.
 The sine itself retains its cosine shape and zero endpoint velocity; its acceleration
 changes at start/end. Serial quantization and actuator tuning still affect physical
 jerk and tracking. Software tests do not establish smoothness on the loaded rig.
@@ -168,8 +168,8 @@ amplitude at 1 Hz is 124.140 µm. Accepted frequencies are 0.1–10 Hz; lower
 frequencies provide more serial updates per cycle (200 at 1 Hz, 20 at 10 Hz).
 
 Experiments record at 50 Hz into 4,096 fixed 48-byte records (192 KiB). The total
-acquisition bound is 81.9 s; sinusoidal runs reserve 10 s for STOP and confirmed
-center return and accept 0.1–10 Hz within the peak-speed limit. USB1 PC disconnect
+acquisition bound is 81.9 s; sinusoidal runs reserve up to 10 s for the final STOP
+transfer to drain and accept 0.1–10 Hz within the peak-speed limit. USB1 PC disconnect
 stops sinusoidal runs and retains partial data; quasi-static runs retain their
 autonomous disconnect behavior. USB2 disconnect faults motion and retains data. Manual
 moves instead stop on disconnect, stale feedback, heartbeat loss, or deadline.
@@ -231,7 +231,7 @@ workbooks using Python's standard library:
 python3 tools/calibrate_force.py results_calibration.xlsx 'Probe sensitivity.xlsx'
 ```
 
-Retained timing, final-return, and fault metadata support post-run
+Retained timing, final-STOP, and fault metadata support post-run
 diagnosis. USB completion/host receipt timestamps do not establish physical
 actuation or sensor conversion times. `SINE_ENVELOPE_MARGIN_NM` optionally enables
 a fresh-EPOS fault/STOP guard; it is disabled by default. The positive margin and

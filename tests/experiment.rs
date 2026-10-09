@@ -455,7 +455,7 @@ mod tests {
         e.poll(now, &t, p, io);
     }
     #[test]
-    fn serial_modes_approach_run_and_return_without_gpio_and_confirm_arrival() {
+    fn serial_modes_finish_at_last_cycle_without_return_motion() {
         for control in [
             SineControl::Displacement,
             SineControl::Velocity,
@@ -485,10 +485,11 @@ mod tests {
             assert_eq!(e.outcome, "completed", "{}", e.reason);
             assert!(io.gpio.is_none());
             assert_eq!(io.stops, 1);
-            assert_eq!(
-                io.targets.iter().map(|t| t.0).collect::<Vec<_>>(),
-                [-100, 0]
-            );
+            assert_eq!(io.targets.iter().map(|t| t.0).collect::<Vec<_>>(), [-100]);
+            assert_eq!(io.serial.len(), waveform_end.unwrap());
+            assert_eq!(e.target, -100);
+            assert_eq!(e.final_return.target, -100);
+            assert!(e.final_return.dpos.scheduled.is_none());
             let waveform = &io.serial[waveform_start.unwrap()..waveform_end.unwrap()];
             if control.velocity() {
                 assert!(
@@ -529,40 +530,44 @@ mod tests {
         }
     }
     #[test]
-    fn serial_return_waits_for_post_drain_epos_before_moving() {
-        let mut records = [Record::EMPTY; CAPACITY];
-        let mut e = Engine::new(&mut records);
-        let mut io = Io::default();
-        let (t, p) = feedback(0, 0, true);
-        e.accept(serial_config(SineControl::Displacement), &t, p, false, 0)
-            .unwrap();
-        e.begin(0, &mut io);
-        let mut now = 0;
-        while !e.stopping {
-            serial_poll(&mut e, &mut io, now);
-            now += 1;
-            assert!(now < 4000);
+    fn serial_completion_waits_only_for_stop_drain_in_all_modes() {
+        for control in [
+            SineControl::Displacement,
+            SineControl::Velocity,
+            SineControl::VelocityPosition,
+        ] {
+            let mut records = [Record::EMPTY; CAPACITY];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            let (t, p) = feedback(0, 0, true);
+            e.accept(serial_config(control), &t, p, false, 0).unwrap();
+            e.begin(0, &mut io);
+            let mut now = 0;
+            while !e.stopping {
+                serial_poll(&mut e, &mut io, now);
+                now += 1;
+                assert!(now < 4000);
+            }
+            let commands = io.serial.len();
+            let (mut t, mut p) = feedback(now, -100, false);
+            t.record(b"STAT", 0, now); // STOP clears closed-loop and reached.
+            io.busy = true;
+            for _ in 0..25 {
+                e.poll(now, &t, p, &mut io);
+                now += 1;
+                assert!(!e.data_ready());
+            }
+            io.busy = false;
+            p.ms = now;
+            e.poll(now, &t, p, &mut io); // No new EPOS or arrival needed.
+            assert_eq!(e.outcome, "completed", "{}", e.reason);
+            assert!(e.data_ready());
+            assert!(e.ramp.is_none());
+            assert_eq!(io.serial.len(), commands);
+            assert_eq!(io.targets.len(), 1);
+            assert_eq!(io.stops, 1);
+            assert_eq!(e.samples[e.len - 1].target, -100);
         }
-        let commands = io.serial.len();
-        io.busy = true;
-        for _ in 0..10 {
-            serial_poll(&mut e, &mut io, now);
-            now += 1;
-        }
-        assert!(e.return_drained.is_none());
-        io.busy = false;
-        let (mut t, mut p) = feedback(now, -100, true);
-        e.poll(now, &t, p, &mut io);
-        assert!(e.ramp.is_none());
-        assert_eq!(e.return_drained, Some(now));
-        p.ms = now + 1;
-        e.poll(now + 1, &t, p, &mut io); // old EPOS is fresh in age, but predates drain
-        assert!(e.ramp.is_none());
-        assert_eq!(io.serial.len(), commands);
-        t.record(b"EPOS", -99, now + 2);
-        e.poll(now + 2, &t, p, &mut io);
-        assert!(e.ramp.is_some());
-        assert_eq!(e.target, -99);
     }
     #[test]
     fn serial_stall_fault_abort_and_disconnect_keep_partial_data() {
@@ -1186,7 +1191,7 @@ mod tests {
         );
     }
     #[test]
-    fn gpio_start_waits_for_arrival_setup_then_stop_drains_before_confirmed_center_return() {
+    fn gpio_start_waits_for_arrival_then_finishes_after_stop_without_return() {
         for begin in [0, u32::MAX - 900] {
             let mut records = [Record::EMPTY; 1024];
             let mut e = Engine::new(&mut records);
@@ -1220,25 +1225,21 @@ mod tests {
             assert_eq!(io.targets.len(), 1);
             assert!(!e.data_ready());
             io.busy = false;
+            let (mut t, p) = feedback(boundary.wrapping_add(2), -100, false);
+            t.record(b"STAT", 0, boundary.wrapping_add(2));
             e.poll(boundary.wrapping_add(2), &t, p, &mut io);
-            assert_eq!(io.targets.last().unwrap().0, 0);
-            assert!(!e.data_ready());
-            let (mut t, p) = feedback(boundary.wrapping_add(3), 0, false);
-            t.record(b"STAT", 0, boundary.wrapping_add(3)); // stale STOP status grace
-            e.poll(boundary.wrapping_add(3), &t, p, &mut io);
-            assert!(!e.data_ready());
-            let (t, p) = feedback(boundary.wrapping_add(25), 0, true);
-            e.poll(boundary.wrapping_add(25), &t, p, &mut io);
             assert_eq!(e.outcome, "completed");
             assert!(e.data_ready());
-            assert_eq!(io.targets.len(), 2);
+            assert_eq!(io.targets.len(), 1);
+            assert_eq!(io.targets[0].0, -100);
+            assert_eq!(e.target, -100);
             assert_eq!(io.stops, 1);
             let mut metadata = crate::protocol::Frame::new();
             e.metadata(&mut metadata, 1).unwrap();
         }
     }
     #[test]
-    fn return_timeout_or_abort_stops_gpio_and_retains_data() {
+    fn final_stop_timeout_or_abort_stops_gpio_and_retains_data() {
         for abort in [false, true] {
             let mut records = [Record::EMPTY; 1024];
             let mut e = Engine::new(&mut records);
@@ -1247,6 +1248,7 @@ mod tests {
             io.gpio = Some(Status::Complete);
             let (t, p) = feedback(1002, -100, true);
             e.poll(1002, &t, p, &mut io);
+            io.busy = true;
             e.poll(1003, &t, p, &mut io);
             if abort {
                 e.abort(&mut io);
@@ -1257,6 +1259,15 @@ mod tests {
             assert_eq!(io.gpio, Some(Status::Stopped));
             assert!(e.data_ready());
             assert_eq!(e.outcome, if abort { "aborted" } else { "faulted" });
+            assert_eq!(
+                e.reason,
+                if abort {
+                    "PC ABORT"
+                } else {
+                    "Final STOP deadline"
+                }
+            );
+            assert_eq!(io.targets.len(), 1);
         }
     }
 }

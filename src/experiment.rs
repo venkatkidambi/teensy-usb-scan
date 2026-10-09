@@ -76,8 +76,6 @@ pub struct Engine<'a> {
     epoch: u32,
     transfer_next: usize,
     stopping: bool,
-    returning: bool,
-    return_drained: Option<u32>,
     serial: serial_sine::Stream,
     ramp: Option<serial_sine::Ramp>,
     serial_prepared: bool,
@@ -133,8 +131,6 @@ impl<'a> Engine<'a> {
             epoch: 0,
             transfer_next: 0,
             stopping: false,
-            returning: false,
-            return_drained: None,
             serial: Default::default(),
             ramp: None,
             serial_prepared: false,
@@ -272,8 +268,6 @@ impl<'a> Engine<'a> {
         self.epoch = t.epoch;
         self.step = 0;
         self.stopping = false;
-        self.returning = false;
-        self.return_drained = None;
         self.serial = Default::default();
         self.serial_prepared = false;
         self.ramp = config.serial().then(|| {
@@ -400,15 +394,8 @@ impl<'a> Engine<'a> {
         // closed loop once armed, before starting acquisition or the waveform.
         let sine_running = self.state == State::Running
             && matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. }));
-        // STOP can clear closed-loop state before the final DPOS is issued.
-        let stopped_transition = sine_running
-            && self.stopping
-            && (!self.returning
-                || self
-                    .final_return
-                    .dpos
-                    .scheduled
-                    .is_some_and(|sent| now.wrapping_sub(sent) < 100));
+        // STOP can clear closed-loop state while its USB transfer drains.
+        let stopped_transition = sine_running && self.stopping;
         let velocity_running = sine_running
             && self
                 .config
@@ -685,61 +672,12 @@ impl<'a> Engine<'a> {
                     Ok(false)
                 }
             }
-            ExperimentConfig::Sinusoidal { center_nm, .. } => {
+            ExperimentConfig::Sinusoidal { .. } => {
                 if self.stopping {
                     if now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS {
-                        Err("Return to center deadline")
-                    } else if !self.returning {
-                        if self.config.unwrap().serial() {
-                            if self.ramp.is_none() {
-                                // Require feedback received after observing STOP drain,
-                                // not merely after queuing it behind waveform traffic.
-                                if !io.tx_idle() {
-                                    return;
-                                }
-                                let drained = *self.return_drained.get_or_insert(now);
-                                let after = t.samples[0].ms.wrapping_sub(drained);
-                                if after == 0 || after > 0x7fff_ffff {
-                                    return;
-                                }
-                                self.ramp = Some(serial_sine::Ramp::new(
-                                    t.samples[0].value as i32,
-                                    counts(center_nm).unwrap(),
-                                    self.config.unwrap().speed().unwrap(),
-                                ));
-                            }
-                            let ramp = self.ramp.as_mut().unwrap();
-                            let result = ramp.tick(now, io);
-                            self.target = ramp.target();
-                            match result {
-                                Ok(true) => {
-                                    self.ramp = None;
-                                    self.target = counts(center_nm).unwrap();
-                                    self.returning = true;
-                                    self.final_return.dpos.scheduled = Some(now);
-                                    io.target(self.target, now, true).map(|_| {
-                                        self.final_return.dpos.queued(now, io.tx_progress());
-                                        false
-                                    })
-                                }
-                                Ok(false) => Ok(false),
-                                Err(e) => Err(e),
-                            }
-                        } else if io.tx_idle() {
-                            self.target = counts(center_nm).unwrap();
-                            self.final_return.target = self.target;
-                            self.returning = true;
-                            self.final_return.dpos.scheduled = Some(now);
-                            io.target(self.target, now, true).map(|_| {
-                                self.final_return.dpos.queued(now, io.tx_progress());
-                                false
-                            })
-                        } else {
-                            Ok(false)
-                        }
+                        Err("Final STOP deadline")
                     } else {
-                        Ok(t.xeryon_motion
-                            .is_some_and(|m| m.state == 2 && m.target == Some(self.target)))
+                        Ok(io.tx_idle())
                     }
                 } else {
                     let status = if self.config.unwrap().serial() {
@@ -770,7 +708,7 @@ impl<'a> Engine<'a> {
                                 ),
                                 observed: now,
                                 theoretical_counts: self.config.unwrap().start().unwrap(),
-                                target: counts(center_nm).unwrap(),
+                                target: self.config.unwrap().start().unwrap(),
                                 settings: t.positioning,
                                 deadline: now.wrapping_add(MOVE_TIMEOUT_MS),
                                 ..Default::default()

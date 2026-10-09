@@ -202,10 +202,10 @@ transfers to drain, and coalesce delayed work to the current phase. More than
 25 ms without servicing the waveform faults with STOP, rather than a catch-up
 burst. This is a dispatch bound, not a guarantee of controller response time.
 At the N-cycle boundary, the displacement endpoint is clamped exactly; velocity
-modes request STOP. After STOP drains, fresh EPOS seeds a quintic return to center.
-Both ramps have zero endpoint velocity/acceleration and take at least 1 s.
-Final completion requires DPOS echo and subsequent Position Reached feedback.
-The 10 s final reserve covers STOP plus return. ABORT/fault/disconnect may stop
+modes request STOP. All modes complete after STOP drains, without sending a
+return-to-center target or waiting for Position Reached. The initial approach
+ramp has zero endpoint velocity/acceleration and takes at least 1 s.
+The 10 s final reserve bounds the wait for STOP to drain. ABORT/fault/disconnect may stop
 immediately instead of ramping, and retain partial results. Quasi-static
 motion and autonomous disconnect behavior remain unchanged.
 
@@ -218,7 +218,7 @@ plots every logger sample as a continuous line against experiment elapsed time
 (`time_s` in CSV); no I²C completion time column is exported. Both identities and
 per-signal new flags remain in CSV. During the sine waveform, `target` is the
 theoretical position at actual logging time; the terminal sample at STOP is the
-negative extremum while STOP drains, then the most recent return-ramp target.
+negative extremum and remains there while STOP drains.
 Quasi-static retains its last commanded DPOS target. Sinusoidal metadata adds
 `sine_control: "serial_displacement"`, `"serial_velocity"`, or
 `"serial_velocity_position"` (also `config.control`),
@@ -236,18 +236,20 @@ Post-run `timing` metadata reports arrival statistics, cache reuse, unlogged EPO
 updates, receipt ages, parse errors and USB service/backlog/TX occupancy.
 `epos_rtt`, `epos_source_drops` and `rx_overflow` are null (unavailable), not zero.
 Receipt timestamps measure Teensy reception, not controller sampling time.
-### Final return evidence
+### Final STOP evidence
 
 `data_meta.final_return` (version 2) retains the mathematical boundary, foreground observation,
-STOP/DPOS USB queue/completion timestamps, target center, start extremum, feedback,
-DPOS echo, positioning settings, and bounded STAT transitions. Times are wrapping
+STOP USB queue/completion timestamps, target endpoint (center minus amplitude),
+feedback, positioning settings, and bounded STAT transitions. The legacy
+`final_return` key is retained; `dpos` has token 0 and null timestamps, and
+`echo` is null because no final positioning command is sent. Times are wrapping
 absolute host milliseconds; subtract `started_ms` modulo 2^32 for relative times.
 `stop` and `dpos` contain `token` and `ms=[scheduled, queued, USB-completed]`;
 null means unobserved. USB completion alone is not physical arrival.
 `boundary_feedback` and `final_feedback` contain EPOS, DPOS, STAT, TIME as
 `[value, host_receipt_ms]` or null; `ptol_pto2_tout_dlay` contains read-only settings.
-`error_counts` / `error_um` are EPOS minus the center. `deadline_ms`, `expired`,
-and `finished_ms` distinguish return timeout from confirmed completion.
+`error_counts` / `error_um` are EPOS minus the last cycle endpoint. `deadline_ms`,
+`expired`, and `finished_ms` describe STOP drain timeout or completion.
 
 ## Dataset transfer
 
@@ -299,7 +301,7 @@ Dataset v2 contains twelve explicit little-endian 32-bit words per 48-byte recor
 Capacity is 4,096 records at 20 ms sampling. Position receipt time is signed
 `elapsed_ms - epos_age_ms`; signals are asynchronous, not simultaneous measurements.
 The terminal waveform sample and any subsequent samples while STOP drains record
-the original starting extremum; return-to-center samples record the center. Version 1 datasets are rejected rather than decoded
+the original starting extremum; no return-to-center motion is commanded. Version 1 datasets are rejected rather than decoded
 with the wrong layout. CSV preserves raw values, ages, identities, and diagnostics.
 
 CRC-32/ISO-HDLC covers concatenated encoded records: initialize to 0xffffffff,

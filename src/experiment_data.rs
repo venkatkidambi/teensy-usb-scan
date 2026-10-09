@@ -227,7 +227,7 @@ impl ExperimentConfig {
                         "Velocity sine peak must reach 1 um/s; increase amplitude/frequency or use displacement",
                     );
                 }
-                // Reserve time for STOP and the confirmed return to center.
+                // Reserve time for the final STOP transfer to drain.
                 (u64::from(cycles) * 1_000_000).div_ceil(u64::from(frequency_mhz))
                     + u64::from(MOVE_TIMEOUT_MS)
             }

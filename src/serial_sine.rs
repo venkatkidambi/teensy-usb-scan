@@ -323,7 +323,7 @@ mod tests {
     }
 }
 
-/// Rest-to-rest quintic positioning for approach and return, with zero endpoint
+/// Rest-to-rest quintic positioning for the initial approach, with zero endpoint
 /// velocity and acceleration. Controller dynamics and serial quantization still
 /// determine physical tracking; this is not a guarantee of zero physical jerk.
 pub struct Ramp {
@@ -344,6 +344,7 @@ impl Ramp {
             stream: Stream::default(),
         }
     }
+    #[cfg(test)]
     pub fn target(&self) -> i32 {
         self.stream.position.unwrap_or(self.from)
     }

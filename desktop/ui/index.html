@@ -45,7 +45,7 @@
       <p id="experiment-sweep-status" role="status"></p>
     </div>
     <p id="experiment-motion-detail" class="pressure-detail"></p>
-    <details class="help-details"><summary>Recording and motion limits</summary><p class="pressure-detail">50 Hz recording · up to 81.9 s. Quasi-static reserves travel time with settling margin (at least 10 s per move), plus each hold; sinusoidal reserves 10 s for the confirmed return to center. Start positions use the current encoder reference. Sinusoidal frequency: 0.1–10 Hz within the configured speed limit; tracking depends on the controller and load. Position resolution: 0.078 µm.</p></details>
+    <details class="help-details"><summary>Recording and motion limits</summary><p class="pressure-detail">50 Hz recording · up to 81.9 s. Quasi-static reserves travel time with settling margin (at least 10 s per move), plus each hold; sinusoidal reserves up to 10 s for the final STOP transfer and finishes at the last cycle endpoint. Start positions use the current encoder reference. Sinusoidal frequency: 0.1–10 Hz within the configured speed limit; tracking depends on the controller and load. Position resolution: 0.078 µm.</p></details>
   </section>
   <section id="experiment-data-panel" class="panel" aria-labelledby="experiment-data-title" hidden>
     <div class="panel-heading"><div><h2 id="experiment-data-title">Experiment Data</h2><p>Recorded position and calibrated force.</p></div><button id="experiment-save" class="primary" disabled>Save CSV</button></div>

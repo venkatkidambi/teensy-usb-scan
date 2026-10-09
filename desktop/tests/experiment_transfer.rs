@@ -328,11 +328,7 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     e.poll(1, &telemetry(1), pressure(1), &mut io);
     for now in 2..=1012 {
         io.complete = now >= 1002;
-        let mut t = telemetry(now);
-        if now >= 1004 {
-            t.xeryon_motion.as_mut().unwrap().target = Some(0);
-        }
-        e.poll(now, &t, pressure(now), &mut io);
+        e.poll(now, &telemetry(now), pressure(now), &mut io);
     }
     e.abort(&mut io); // A late ABORT cannot overwrite a completed run.
     assert_eq!(e.len, 51);
@@ -399,9 +395,9 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         Some("-0.780")
     );
     assert_eq!(dataset.metadata["outcome"], "completed");
-    assert_eq!(dataset.metadata["final_return"]["error_counts"], -123);
-    assert_eq!(dataset.metadata["final_return"]["error_um"], -9.594);
-    assert_eq!(dataset.metadata["final_return"]["finished_ms"], 1004);
+    assert_eq!(dataset.metadata["final_return"]["error_counts"], -113);
+    assert_eq!(dataset.metadata["final_return"]["error_um"], -8.814);
+    assert_eq!(dataset.metadata["final_return"]["finished_ms"], 1003);
     assert_eq!(dataset.metadata["final_return"]["expired"], false);
     assert!(dataset.csv().contains("final_feedback"));
     assert_eq!(dataset.metadata["sine_control"], "gpio_pulse_direction");
