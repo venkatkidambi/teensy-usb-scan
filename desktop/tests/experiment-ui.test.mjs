@@ -76,6 +76,7 @@ test('START explains blockers, validates fields, submits once, and reports failu
       [state.hello,'sine_serial_displacement',false,/serial sine control/],
       [state.session,'pending',true,/current Teensy request/],
       [state.session,'experimentOwned',true,/owns the hardware/],
+      [state.session,'gpioOwned',true,/GPIO owns motion/],
     ]){
       const old=object[key];object[key]=value;experimentControls();
       assert.equal(node('experiment-start-button').disabled,true);
@@ -94,7 +95,12 @@ test('START explains blockers, validates fields, submits once, and reports failu
     assert.equal(calls.length,0);
     node('experiment-repeats').reportValidity=()=>true;
     for(const [key,value] of Object.entries({start:'374.556',increment:'5',timing:'1',repeats:'5'}))node(`experiment-${key}`).value=value;
+    node('tab-wip').onclick();
+    assert.equal(node('wip-panel').hidden,false);
+    assert.equal(node('experiment-panel').hidden,true);
+    assert.equal(node('dashboard-panel').hidden,true);
     node('tab-data').onclick();
+    assert.equal(node('wip-panel').hidden,true);
     assert.equal(node('experiment-data-panel').hidden,false);
     assert.equal(node('experiment-data-empty').hidden,false);
     assert.equal(node('experiment-panel').hidden,true);

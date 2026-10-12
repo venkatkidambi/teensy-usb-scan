@@ -8,7 +8,7 @@ let mode='dashboard',view='dashboard',showResults=false,dataset=null,context=nul
 let sweep=null,history=[],selectedIndex=null,sweepTimer=null,historyLoading=false,validationCancelled=false;
 let phaseCache=new WeakMap(),sweepPhases=[];
 const plotNames=['position','pressure','sweep-phase'];
-const modes=['dashboard','quasi_static','sinusoidal','data'];
+const modes=['dashboard','quasi_static','sinusoidal','data','wip'];
 const fields=['start','increment','timing','repeats','speed'];
 const configurations={quasi_static:['0','1','1','3','10'],sinusoidal:['0','1','1','3','10']};
 function startBlocked({session,connected,hello,experimentUnresolved}) {
@@ -17,6 +17,7 @@ function startBlocked({session,connected,hello,experimentUnresolved}) {
   if(sweep)return 'Frequency sweep in progress. Press ABORT to stop it.';
   if(saving)return 'Wait for export to finish.';
   if(!connected||!session)return 'Connect the Teensy to start an experiment.';
+  if(session.gpioOwned)return 'GPIO owns motion. Wait for idle in WIP, or press its Stop button.';
   if(session.experimentOwned)return 'An experiment owns the hardware. Wait for its results or press ABORT.';
   if(experimentUnresolved)return 'Reconnect to recover the previous experiment before starting another.';
   if(!hello?.experiments)return 'Update the Teensy firmware to enable experiments.';
@@ -80,9 +81,10 @@ export function experimentControls() {
 function tab(next) {
   if(configurations[mode])configurations[mode]=fields.map(k=>$(`experiment-${k}`).value);
   view=next;
-  if(next!=='data')mode=next;
+  if(next!=='data'&&next!=='wip')mode=next;
   for(const name of modes)$(`tab-${name}`).setAttribute('aria-selected',String(view===name));
   $('dashboard-panel').hidden=view!=='dashboard';
+  $('wip-panel').hidden=view!=='wip';
   $('experiment-panel').hidden=!configurations[view];
   $('experiment-data-panel').hidden=view!=='data';
   if(configurations[view]){
@@ -98,7 +100,7 @@ function tab(next) {
 }
 export function experimentMessage(message) {
   if(message.type==='experiment_state') {
-    if(message.state!=='dashboard'&&(view==='dashboard'||view==='data'))tab(configurations[mode]?mode:'quasi_static');
+    if(message.state!=='dashboard'&&(view==='dashboard'||view==='data'||view==='wip'))tab(configurations[mode]?mode:'quasi_static');
     $('experiment-state').textContent=message.state==='running'?`Run ${message.run}: Teensy controlling experiment. Live telemetry paused.`:message.state==='data_ready'?`Run ${message.run}: downloading retained dataset…`:'Ready to configure an experiment.';
   }
   if(message.type==='experiment_ack') {

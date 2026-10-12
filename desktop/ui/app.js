@@ -9,7 +9,7 @@ const micronsPerCount=0.078;
 const positionNumber=new Intl.NumberFormat(undefined,{minimumFractionDigits:3,maximumFractionDigits:3});
 const position=counts=>positionNumber.format(counts*micronsPerCount);
 let session=null,connected=false,busy=false,demo=false,streaming=true,snapshot=null,received=0,hello=null;
-let limitsInitialized=false;
+let limitsInitialized=false,lastGpioPoll=0;
 let pressureHistory=[],lastPressure=null,experimentUnresolved=false;
 let history=[],logs=[],epoch=null,lastSample=null,lastPong=0,lastPing=0,demoTimer=null;
 function activity(message){logs.push(`${new Date().toLocaleTimeString()}  ${message}`);if(logs.length>100)logs.shift();text('log',logs.join('\n'));}
@@ -34,12 +34,14 @@ function controls(){
   $('xeryon-stop').disabled=!connected||!hello?.xeryon||!snapshot?.mounted||snapshot.cdc!==2||snapshot.vid!==0x04d8||snapshot.pid!==0xef4a;
   text('stream',streaming?'Pause stream':'Resume stream');
   if(session?.experimentOwned)for(const id of ['ping','snapshot','stream','plunger-up','plunger-down','plunger-zero','plunger-stop','xeryon-up','xeryon-down','xeryon-stop','xeryon-speed','xeryon-distance','plunger-speed','plunger-distance'])$(id).disabled=true;
+  gpioControls();
   experimentControls();
 }
-function xeryonBlocked(){
+function xeryonBlocked(gpio=false){
+  if(!gpio&&session?.gpioOwned)return 'GPIO owns motion — check the WIP tab.';
   if(!connected)return 'Connect Teensy to move the actuator.';
   if(!hello?.xeryon)return 'Upload current firmware to enable Xeryon movement.';
-  if(hello.xeryon_speed&&!hello.xeryon_optional_speed&&$('xeryon-speed').value.trim()==='')return 'This firmware requires a speed. Enter one, or flash current firmware to use the controller setting.';
+  if(!gpio&&hello.xeryon_speed&&!hello.xeryon_optional_speed&&$('xeryon-speed').value.trim()==='')return 'This firmware requires a speed. Enter one, or flash current firmware to use the controller setting.';
   if(!snapshot?.mounted||snapshot.cdc!==2||snapshot.vid!==0x04d8||snapshot.pid!==0xef4a)return 'Connect the Xeryon to the USB2 host port.';
   const v=snapshot.values;
   if(age(v.EPOS)>=3000||age(v.STAT)>=3000)return 'Waiting for fresh position and status.';
@@ -49,7 +51,30 @@ function xeryonBlocked(){
   if(xeryonMoving(stat))return 'Actuator is already moving.';
   return '';
 }
-function reset(){limitsInitialized=false;pressureHistory=[];lastPressure=null;snapshot=null;hello=null;history=[];epoch=null;lastSample=null;lastPong=0;lastPing=0;streaming=true;text('rtt','—');text('session-label','NO SESSION');render();draw();}
+function gpioBlocked(){
+  if(demo)return 'Demo preview — GPIO motion is disabled.';
+  if(!connected)return 'Connect Teensy to test GPIO movement.';
+  if(!hello?.gpio_test)return 'Update the Teensy firmware to enable GPIO tests.';
+  if(session?.experimentOwned||experimentUnresolved)return 'An experiment owns the hardware. Finish or abort it before testing GPIO.';
+  if(session?.gpioOwned)return session.gpioState==='failed'?'Restoration failed. Press Stop to retry; motion stays locked.':session.gpioState===null?'Reading GPIO status…':'GPIO test active. Wait for idle before another move.';
+  return xeryonBlocked(true);
+}
+function gpioControls(){
+  const reason=gpioBlocked(),ready=connected&&!!hello?.gpio_test;
+  $('gpio-count').disabled=!ready||!!session?.gpioOwned||!!session?.experimentOwned||experimentUnresolved;
+  const valid=/^[0-9]+$/.test($('gpio-count').value)&&+$('gpio-count').value>=1&&+$('gpio-count').value<=100;
+  for(const id of ['gpio-positive','gpio-negative'])$(id).disabled=!!reason||!!session?.pending||!valid;
+  // Stop remains available during pending requests and restoration failures.
+  $('gpio-stop').disabled=!ready||!!session?.experimentOwned||experimentUnresolved;
+  const labels={requesting:'Starting',idle:'Idle',stopping:'Stopping',configuring:'Configuring',baseline:'Checking position',pulsing:'Pulsing',settling:'Settling',restoring:'Restoring serial control',failed:'Needs attention'};
+  text('gpio-state',demo?'Demo':!connected?'Disconnected':!hello?.gpio_test?'Unavailable':labels[session?.gpioState]??'Checking status');
+  $('gpio-state').className=`pill ${session?.gpioError?'warn':ready&&session?.gpioState==='idle'?'live':''}`;
+  text('gpio-message',session?.gpioError?`${session.gpioError}. ${reason||'Serial control restored; check feedback before retrying.'}`:reason||'Ready. Choose a direction, then check encoder and target feedback.');
+  text('gpio-distance',valid?`${+$('gpio-count').value} pulses · ${position(+$('gpio-count').value)} µm nominal travel`:'Enter a whole pulse count from 1 to 100.');
+  for(const [id,tag] of [['gpio-epos','EPOS'],['gpio-dpos','DPOS']])text(id,age(snapshot?.values[tag])<3000?position(snapshot.values[tag].value):'—');
+  text('gpio-feedback',ageText(snapshot?.values.EPOS));
+}
+function reset(){lastGpioPoll=0;limitsInitialized=false;pressureHistory=[];lastPressure=null;snapshot=null;hello=null;history=[];epoch=null;lastSample=null;lastPong=0;lastPing=0;streaming=true;text('rtt','—');text('session-label','NO SESSION');render();draw();}
 async function refresh(){
   if(!invoke){notice('Launch Teensy Panel using desktop/start.cmd or desktop/start.sh.',true);return;}
   const previous=$('port').value;$('refresh').disabled=true;
@@ -160,6 +185,12 @@ for(const [id,direction] of [['xeryon-up','U'],['xeryon-down','D']])$(id).addEve
   }
   catch(e){notice(e.message,true);}
 });
+$('gpio-count').addEventListener('input',controls);
+for(const [id,direction] of [['gpio-positive','P'],['gpio-negative','N']])$(id).addEventListener('click',()=>{
+  if(gpioBlocked()||!$('gpio-count').reportValidity())return;
+  void request(`GPIO_MOVE ${direction} ${$('gpio-count').value}`).catch(()=>{});
+});
+$('gpio-stop').addEventListener('click',()=>void request('XERYON_STOP').catch(()=>disconnect('GPIO Stop was not acknowledged; serial connection closed.')));
 $('xeryon-stop').addEventListener('click',()=>void request('XERYON_STOP').catch(()=>disconnect('Xeryon Stop was not acknowledged; check the actuator.')));
 $('plunger-zero').addEventListener('click',()=>void request('PLUNGER_ZERO').catch(()=>{}));
 $('plunger-stop').addEventListener('click',()=>void request('PLUNGER_STOP').catch(()=>disconnect('Stop could not be acknowledged; serial connection closed.')));
@@ -171,7 +202,6 @@ function render(){
   $('connection').className=`pill ${demo||stalled?'warn':connected?'live':''}`;
   controls();
   if(stalled)notice('The Teensy is not answering connection checks. Displayed values may be stale; reconnect to retry.',true);
-  if($('dashboard-panel').hidden)return;
   for(const[id,tag]of[['epos','EPOS'],['dpos','DPOS']]){text(id,v[tag]?position(v[tag].value):'—');text(`${id}-age`,ageText(v[tag]));$(id).closest('.metric').classList.toggle('stale',!!v[tag]&&age(v[tag])>=3000);}
   const stat=v.STAT,key=stat?String(stat.value):'none';
   text('stat-word',stat?`STAT ${stat.value} / 0x${stat.value.toString(16).padStart(6,'0')}`:'Waiting for STAT');
@@ -265,7 +295,14 @@ $('demo').addEventListener('click',()=>{
   accept(make(60000));text('session-label','SIMULATED SESSION');notice('Demo mode — all readings are simulated. No serial port is open.');controls();
   demoTimer=setInterval(()=>accept(make(Math.floor(performance.now()-start)+60000)),100);
 });
-setInterval(()=>{if(connected&&session&&!session.experimentOwned&&!session.pending&&performance.now()-lastPing>2000){lastPing=performance.now();void request('PING',true).catch(()=>{});}render();if(history.length||pressureHistory.length)draw();},500);
+setInterval(()=>{
+  if(connected&&session&&!busy&&!session.experimentOwned&&!session.pending){
+    const now=performance.now();
+    if(now-lastPing>2000){lastPing=now;void request('PING',true).catch(()=>{});}
+    else if(hello?.gpio_test&&now-lastGpioPoll>=500){lastGpioPoll=now;void request('GPIO_STATUS',true).catch(()=>{});}
+  }
+  render();if(history.length||pressureHistory.length)draw();
+},500);
 $('xeryon-speed').value='';
 setupExperiments({state:()=>({session,connected,hello,snapshot,experimentUnresolved}),positionAge:()=>age(snapshot?.values.EPOS),invoke,controls,activity,viewChanged:()=>{render();draw();}});
 render();controls();void refresh();

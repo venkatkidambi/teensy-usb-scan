@@ -234,3 +234,55 @@ test('plunger limit configuration validates and frames requests',async()=>{
     await s.close();await rejection;
   }finally{await s.close();}
 });
+
+
+test('GPIO commands validate, retain ownership until confirmed idle, and allow Stop preemption',async()=>{
+  for(const m of [
+    {type:'gpio_ack',id:1,action:'accepted',steps:0},
+    {type:'gpio_ack',id:1,action:'accepted',steps:101},
+    {type:'gpio_status',id:1,state:'unknown',error:''},
+    {type:'gpio_status',id:1,state:'idle',error:null},
+  ])assert.throws(()=>parseMessage(JSON.stringify(m)),/GPIO/);
+  const queue=[],sent=[];
+  const s=new NativeSession(async(name,args)=>{
+    if(name==='serial_connect')return 7;
+    if(name==='serial_poll')return {session:7,messages:queue.splice(0),coalesced:0};
+    if(name==='serial_send')sent.push(args.command);
+  },()=>{},assert.fail,assert.fail,500);
+  const reply=m=>queue.push(JSON.stringify(m));
+  try{
+    await s.open('test');
+    await assert.rejects(s.request('GPIO_MOVE P 10'),/Firmware/);
+    const hello=s.request('HELLO');
+    reply({type:'hello',id:s.id,protocol:1,board:'Teensy 4.1',firmware:'test',motion:true,pressure:true,gpio_test:true});
+    await hello;assert.equal(s.gpioOwned,true);
+    let status=s.request('GPIO_STATUS');
+    reply({type:'gpio_status',id:s.id,state:'idle',error:''});
+    await status;assert.equal(s.gpioOwned,false);
+    for(const command of ['GPIO_MOVE P 0','GPIO_MOVE N 101','GPIO_MOVE X 1','GPIO_MOVE P 1.5','GPIO_MOVE N -1','GPIO_MOVE P 1 extra'])await assert.rejects(s.request(command),/Unsupported/);
+    let moving=s.request('GPIO_MOVE P 10');
+    reply({type:'gpio_ack',id:s.id,action:'accepted',steps:10});
+    await moving;assert.equal(s.gpioOwned,true);
+    await assert.rejects(s.request('XERYON_MOVE U 78'),/GPIO owns/);
+    await assert.rejects(s.request('GPIO_MOVE N 10'),/GPIO owns/);
+    await assert.rejects(s.startExperiment({}),/GPIO motion/);
+    status=s.request('GPIO_STATUS');const oldId=s.id;
+    const interrupted=assert.rejects(status,/Interrupted by Stop/);
+    const stop=s.request('XERYON_STOP');
+    reply({type:'gpio_status',id:oldId,state:'idle',error:''});
+    reply({type:'xeryon_ack',id:s.id,action:'stop'});
+    await stop;await interrupted;assert.equal(s.gpioOwned,true);
+    status=s.request('GPIO_STATUS');
+    reply({type:'gpio_status',id:s.id,state:'failed',error:'restore timeout'});
+    await status;assert.equal(s.gpioOwned,true);assert.equal(s.gpioError,'restore timeout');
+    status=s.request('GPIO_STATUS');
+    reply({type:'gpio_status',id:s.id,state:'idle',error:''});
+    await status;assert.equal(s.gpioOwned,false);
+    moving=s.request('GPIO_MOVE N 100');
+    reply({type:'gpio_ack',id:s.id,action:'accepted',steps:100});
+    await moving;
+    assert(sent.includes('GPIO_MOVE 3 P 10'));assert(sent.at(-1).endsWith(' N 100'));
+    s.experimentOwned=true;
+    await assert.rejects(s.request('GPIO_STATUS'),/Experiment owns/);
+  }finally{await s.close();}
+});

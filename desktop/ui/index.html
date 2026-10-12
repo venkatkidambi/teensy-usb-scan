@@ -20,7 +20,19 @@
     <button id="tab-quasi_static" aria-selected="false">Quasi-static</button>
     <button id="tab-sinusoidal" aria-selected="false">Sinusoidal</button>
     <button id="tab-data" aria-selected="false" aria-controls="experiment-data-panel">Experiment Data</button>
+    <button id="tab-wip" aria-selected="false" aria-controls="wip-panel">WIP</button>
   </nav>
+  <section id="wip-panel" class="panel movement-panel" aria-labelledby="gpio-title" hidden>
+    <div class="panel-heading"><div><h2 id="gpio-title">GPIO movement · XD-OEM</h2><p>Small pulse/direction tests. Start unloaded and clear of travel limits.</p></div><span id="gpio-state" class="pill" role="status">Disconnected</span></div>
+    <div class="plunger-controls">
+      <label for="gpio-count">Pulse count (1–100)<input id="gpio-count" type="number" min="1" max="100" step="1" value="10" aria-describedby="gpio-distance" required disabled></label>
+      <div class="motion-actions" role="group" aria-label="GPIO movement"><button id="gpio-positive" disabled>Positive (+)</button><button id="gpio-negative" disabled>Negative (−)</button><button id="gpio-stop" class="stop-button" disabled>Stop</button></div>
+    </div>
+    <p id="gpio-message" class="pressure-detail" role="status">Connect Teensy to test GPIO movement.</p>
+    <div class="pressure-readings"><span>Encoder <strong id="gpio-epos">—</strong> µm</span><span>Target <strong id="gpio-dpos">—</strong> µm</span><span id="gpio-feedback">Awaiting feedback</span></div>
+    <div class="panel-foot"><span id="gpio-distance">10 pulses · 0.780 µm nominal travel</span><span>Up to 1 kHz · INDEX stays inactive</span></div>
+    <details class="help-details"><summary>Test behavior</summary><p class="pressure-detail">Each pulse requests one encoder count (0.078 µm). Verify the direction against encoder feedback. USB movement and experiment starts remain locked until GPIO finishes and serial control is restored. Stop cancels the test and retries restoration after a fault.</p></details>
+  </section>
   <section id="experiment-panel" class="panel" hidden>
     <div class="panel-heading"><div><h2 id="experiment-title">Quasi-static experiment</h2><p id="experiment-state" role="status">Configure a run. Timing and acquisition run on the Teensy.</p></div><button id="experiment-abort" class="stop-button" disabled>ABORT</button></div>
     <form id="experiment-form" class="experiment-form" novalidate>
