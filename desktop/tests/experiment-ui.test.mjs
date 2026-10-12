@@ -206,6 +206,16 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
     assert.equal(node('experiment-phase').hidden, true);
     node('tab-sinusoidal').onclick();
     assert.equal(node('experiment-data-panel').hidden, true);
+    const samples=Array.from({length:101},(_,i)=>{
+      const ms=i*20,angle=t=>2*Math.PI*t/1000;
+      return [ms,500-19*Math.cos(angle(ms-3-7)),100000-40*Math.cos(angle(ms)),0,3,0,0,-20*Math.cos(angle(ms)),0,0,i,i];
+    });
+    experimentMessage({ type: 'experiment_dataset', dataset: {
+      metadata: { run: 8, config: { kind: 'sinusoidal', frequency_mhz: 1000, cycles: 2 }, outcome: 'completed',
+        reason: 'none', count: samples.length, elapsed_ms: 2020, missed_samples: 0,
+        max_lateness_ms: 0, stop_queued: true }, samples,
+    } });
+    assert.equal(node('experiment-amplitude').textContent,'1.482 / 1.560 µm · 95.00% achieved · error -0.078 µm (-5.00%) · fit R² 1.000');
     experimentMessage({ type: 'experiment_dataset', dataset: {
       metadata: { run: 8, config: { kind: 'sinusoidal' }, outcome: 'completed',
         reason: 'none', count: 1, elapsed_ms: 1000, missed_samples: 0,
@@ -213,6 +223,7 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
     } });
     assert.equal(node('experiment-data-panel').hidden, false);
     assert.equal(node('experiment-phase').hidden, false);
+    assert.match(node('experiment-amplitude').textContent,/^Unavailable: Frequency or cycle metadata/);
     assert.match(node('experiment-data-summary').textContent, /COMPLETED · Run 8 · sinusoidal/);
     assert.equal(node('experiment-save').disabled, false);
     const saving = node('experiment-save').onclick();

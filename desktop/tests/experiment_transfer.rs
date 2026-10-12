@@ -72,7 +72,7 @@ fn csv_exports_direct_force_with_raw_counts_ranges_and_calibration_provenance() 
     assert!(dataset.metadata.get("force_calibration").is_none());
     let header: Vec<_> = lines[1].split(',').collect();
     assert_eq!(
-        &header[17..],
+        &header[17..20],
         &["force_n", "force_mn", "force_extrapolated"]
     );
     for (i, expected) in [false, true, false, true, false, true, true]
@@ -87,13 +87,13 @@ fn csv_exports_direct_force_with_raw_counts_ranges_and_calibration_provenance() 
         let force_mn = row[18].parse::<f64>().unwrap();
         assert!((force_n * 1000.0 - force_mn).abs() < 0.000001);
     }
-    assert!(lines[2].ends_with(",0.012405235,12.405235,false"));
-    assert!(lines[3].ends_with(",0.021054229,21.054229,true"));
+    assert!(lines[2].contains(",0.012405235,12.405235,false,"));
+    assert!(lines[3].contains(",0.021054229,21.054229,true,"));
     assert!(
         lines
             .last()
             .unwrap()
-            .ends_with(",-0.350852500,-350.852500,true")
+            .contains(",-0.350852500,-350.852500,true,")
     );
 }
 
@@ -258,6 +258,7 @@ fn independent_signal_times_and_identities_round_trip_into_csv() {
             epos: 10,
             pressure_raw: 100,
             epos_age_ms: 17,
+            controller_age_ms: u32::MAX,
             pressure_age_ms: 3,
             epos_generation: u32::MAX,
             pressure_generation: 1,
@@ -268,6 +269,7 @@ fn independent_signal_times_and_identities_round_trip_into_csv() {
             epos: 10,
             pressure_raw: 100,
             epos_age_ms: 67,
+            controller_age_ms: 7,
             pressure_age_ms: 2,
             epos_generation: u32::MAX,
             pressure_generation: 2,
@@ -299,6 +301,12 @@ fn independent_signal_times_and_identities_round_trip_into_csv() {
     let lines: Vec<_> = csv.lines().collect();
     assert!(lines[1].contains("epos_host_receipt_s,epos_generation"));
     assert!(!lines[1].contains("pressure_i2c_completion_s"));
+    assert!(
+        lines[1]
+            .ends_with("controller_host_receipt_s,epos_timestamp_source,epos_controller_time_s")
+    );
+    assert!(lines[2].ends_with(",,host_receipt_ms,"));
+    assert!(lines[3].ends_with(",0.043,host_receipt_ms,"));
     assert_eq!(
         &lines[2].split(',').collect::<Vec<_>>()[12..17],
         &["-0.017", "4294967295", "1", "1", "1"]

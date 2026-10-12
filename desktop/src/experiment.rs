@@ -208,12 +208,12 @@ impl Dataset {
             "metadata,\"{}\"",
             metadata.to_string().replace('"', "\"\"")
         );
-        csv.push_str("time_s,position_um,pressure_raw,stat,epos_age_ms,pressure_age_ms,stat_age_ms,target_um,controller_ticks,controller_age_ms,epos_counts,target_counts,epos_host_receipt_s,epos_generation,pressure_generation,epos_new,pressure_new,force_n,force_mn,force_extrapolated\n");
+        csv.push_str("time_s,position_um,pressure_raw,stat,epos_age_ms,pressure_age_ms,stat_age_ms,target_um,controller_ticks,controller_age_ms,epos_counts,target_counts,epos_host_receipt_s,epos_generation,pressure_generation,epos_new,pressure_new,force_n,force_mn,force_extrapolated,controller_host_receipt_s,epos_timestamp_source,epos_controller_time_s\n");
         let mut previous: Option<&[i64; RECORD_FIELDS]> = None;
         for s in &self.samples {
             let _ = writeln!(
                 csv,
-                "{:.3},{:.3},{},{},{},{},{},{:.3},{},{},{},{},{:.3},{},{},{},{},{:.9},{:.6},{}",
+                "{:.3},{:.3},{},{},{},{},{},{:.3},{},{},{},{},{:.3},{},{},{},{},{:.9},{:.6},{},{},host_receipt_ms,",
                 s[0] as f64 / 1000.0,
                 s[1] as f64 * 0.078,
                 s[2],
@@ -234,6 +234,11 @@ impl Dataset {
                 calibration.newtons(s[2]),
                 calibration.newtons(s[2]) * 1000.0,
                 calibration.extrapolated(s[2]),
+                if s[9] == i64::from(u32::MAX) {
+                    String::new()
+                } else {
+                    format!("{:.3}", (s[0] - s[9]) as f64 / 1000.0)
+                },
             );
             previous = Some(s);
         }

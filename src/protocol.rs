@@ -406,9 +406,18 @@ mod tests {
         assert_eq!(copy.epos_generation, t.epos_generation);
         t.record(b"STAT", 0, 40);
         assert_eq!(t.epos_generation, 2);
+        // Reordered TIME, rollover/reset and same-receipt bursts must not retime
+        // EPOS or refresh its safety age. The manual supplies no pairing rule.
+        for (ticks, now) in [(u32::MAX as i64, 40), (0, 41), (10, 41)] {
+            t.record(b"TIME", ticks, now);
+            assert_eq!(t.samples[0].ms, 30);
+            assert_eq!(t.epos_generation, 2);
+            assert_eq!((t.samples[6].value, t.samples[6].ms), (ticks, now));
+        }
         t.reset();
         assert_eq!(t.epos_generation, 0);
         assert!(!t.samples[0].valid);
+        assert!(!t.samples[6].valid);
         assert_eq!(t.epos_arrivals.count, 0);
     }
     #[test]

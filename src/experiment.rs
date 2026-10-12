@@ -660,6 +660,8 @@ impl<'a> Engine<'a> {
             self.max_lateness_ms = self.max_lateness_ms.max(late);
             self.missed_samples += late / SAMPLE_MS;
             self.next_sample = (elapsed / SAMPLE_MS + 1) * SAMPLE_MS;
+            // Independent latest TIME and its receipt age: never pair it with EPOS
+            // by proximity, unwrap an undocumented modulus, or infer USB latency.
             let time = t.samples[6];
             if self.logged_epos != Some(t.epos_generation)
                 && t.epos_generation != self.epos_start_generation
@@ -907,7 +909,7 @@ impl<'a> Engine<'a> {
         )?;
         write!(
             out,
-            ",\"epos_repeated_records\":{},\"pressure_repeated_records\":{},\"max_epos_age_ms\":{},\"max_pressure_age_ms\":{},\"malformed_lines\":{},\"rx_peak_bytes\":{},\"rx_backlog_polls\":{},\"max_usb_service_gap_ms\":{},\"max_tx_busy_ms\":{},\"rx_overflow\":null,\"epos_rtt\":null,\"epos_timestamp\":\"host_receipt_ms\",\"pressure_timestamp\":\"i2c_completion_ms\",\"info\":{},\"poli_ms\":{},\"before\":[",
+            ",\"epos_repeated_records\":{},\"pressure_repeated_records\":{},\"max_epos_age_ms\":{},\"max_pressure_age_ms\":{},\"malformed_lines\":{},\"rx_peak_bytes\":{},\"rx_backlog_polls\":{},\"max_usb_service_gap_ms\":{},\"max_tx_busy_ms\":{},\"rx_overflow\":null,\"epos_rtt\":null,\"epos_timestamp\":\"host_receipt_ms\",\"controller_time_unit_us\":100,\"controller_epos_timestamp\":null,\"controller_time_association\":\"unvalidated\",\"controller_time_limitation\":\"TIME sampling instant, EPOS association, origin and rollover are unspecified; USB latency is unknown\",\"pressure_timestamp\":\"i2c_completion_ms\",\"info\":{},\"poli_ms\":{},\"before\":[",
             self.repeated_epos,
             self.repeated_pressure,
             self.max_epos_age,

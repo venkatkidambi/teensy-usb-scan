@@ -162,10 +162,21 @@ The sine itself retains its cosine shape and zero endpoint velocity; its acceler
 changes at start/end. Serial quantization and actuator tuning still affect physical
 jerk and tracking. Software tests do not establish smoothness on the loaded rig.
 
-Validation retains the conservative **780 µm/s peak speed** bound:
+Serial sine validation retains the **780 µm/s peak speed** bound:
 `2π × amplitude_µm × frequency_Hz <= 780`. For example, the largest integer-nm
 amplitude at 1 Hz is 124.140 µm. Accepted frequencies are 0.1–10 Hz; lower
 frequencies provide more serial updates per cycle (200 at 1 Hz, 20 at 10 Hz).
+
+GPIO sine accepts up to **20,000 pulses/s** peak (1560 µm/s at 0.078 µm/count,
+`STPS=1`). It retains the same position equation and validates both extrema against
+controller travel limits before enabling. Pin 7 uses FlexPWM1 SM3/B: selected
+50 µs slots contain a hardware edge at 20 µs and a falling edge at 45 µs. Only
+required count changes select a pulse. Thus high/low times are at least 25 µs;
+direction setup is at least 10 µs and rising-edge hold at least 25 µs. DMA0 clears
+the output enable every slot, so missed CPU service cannot repeat a selected
+pulse. An arming deadline of 10 µs and a 10 ms foreground watchdog fault safely;
+ABORT/fault clears ENABLE, PWM output and timer. These are register-derived
+limits, not oscilloscope validation of the controller/loaded rig.
 
 Experiments record at 50 Hz into 4,096 fixed 48-byte records (192 KiB). The total
 acquisition bound is 81.9 s; sinusoidal runs reserve up to 10 s for the final STOP
@@ -193,22 +204,21 @@ unplugging/reconnecting. No homing or saved controller settings change automatic
 Optional GPIO wiring for the retained pulse-driver implementation (unused by the
 serial sine modes; leave disconnected for the current setup):
 
-| Teensy 4.1 | XD-C GPIO bank 1 | Signal |
+| Teensy 4.1 | XD-OEM | Signal |
 | --- | --- | --- |
-| 7 | 23 / DI0 | PULSE |
-| 8 | 25 / DI1 | DIRECTION (high increments) |
-| 9 | 27 / DI2 | ENABLE (high enables) |
-| GND | 19 / GND | Common ground |
+| 7 | 13 | PULSE |
+| 8 | 14 | DIRECTION (high increments) |
+| 9 | 15 | ENABLE (high enables) |
+| 10 | 16 | INDEX (held low) |
+| GND | 2 | Common ground (also shared through USB host) |
 
-The [XD-C manual v3.0, sections 5.1 and 7.2](https://xeryon.com/download-files/Xeryon%20XD-C%20manual%20v3.0.pdf)
-specifies 3.3 V for these digital inputs: no level shifting is required for that
-bank/revision. Verify the actual controller connector before hardware use; other
-voltage interfaces require an appropriate buffer. Teensy pins are
-[not 5 V tolerant](https://www.pjrc.com/teensy/card11b_rev4_web.pdf).
+The [XD-OEM manual, sections 5.1 and 7.3](https://xeryon.com/download-files/Xeryon%20XD-OEM%20manual%20v3.0.pdf)
+specifies 3.3 V logic. Verify the actual controller connector before hardware use;
+Teensy pins are [not 5 V tolerant](https://www.pjrc.com/teensy/card11b_rev4_web.pdf).
 Do not connect the nearby 5 V or 48 V supply/piezo pins. Fit external 10 kΩ
-pulldowns on PULSE and ENABLE to hold them low during reset/unpowered Teensy;
-hold INDEX (pin 30) low so it cannot initiate an index search. Use short signal
-wires with a common ground. Verify direction unloaded before attaching the load.
+pulldowns on PULSE, ENABLE and INDEX to hold them low during reset/unpowered
+Teensy. Use short signal wires with common ground. Verify direction unloaded
+before attaching the load.
 
 The plunger uses pin 2 PWM, 4/5 direction, 6 standby, 11/12 quadrature, and 20
 potentiometer; calibration is 16,688 counts/mm. Zero requires stopped motion.
@@ -230,6 +240,15 @@ workbooks using Python's standard library:
 ```sh
 python3 tools/calibrate_force.py results_calibration.xlsx 'Probe sensitivity.xlsx'
 ```
+
+The XD-OEM manual defines TIME only as a timestamp with 0.1 ms resolution.
+INFO=4 includes EPOS/STAT/DPOS/TIME, but neither that mode nor INFO=2 establishes
+atomic sampling, acquisition time, clock origin, rollover modulus or transport
+latency. INFO=2 remains selected to preserve requested safety/setup readbacks.
+Records retain independent raw TIME and receipt age, plus unchanged EPOS receipt
+age and generation. CSV exposes each receipt time and leaves controller-derived
+EPOS time blank; metadata marks the association unvalidated. Plots and phase fits
+use host receipt without unwrapping, offset estimation or artificial shifting.
 
 Retained timing, final-STOP, and fault metadata support post-run
 diagnosis. USB completion/host receipt timestamps do not establish physical

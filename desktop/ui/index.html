@@ -71,8 +71,9 @@
         <dl class="phase-delays">
           <dt>Commanded trajectory → position at host receipt</dt><dd id="experiment-phase-command">Awaiting results</dd>
           <dt>Position at host receipt → force signal</dt><dd id="experiment-phase-pressure">Awaiting results</dd>
+          <dt>Amplitude accuracy · position / command</dt><dd id="experiment-amplitude">Awaiting results</dd>
         </dl>
-        <details class="phase-help"><summary>How to read phase delays</summary><p class="empty-copy">Sinusoidal fit during the waveform only. Positive delay means the second signal lags; signed phase is wrapped to ±180° or ±π radians (±half a period). Host receipt means the Teensy USB host. Force uses the plotted recording time. These include motion, transport and sampling effects; fit R² measures sinusoidal agreement.</p></details>
+        <details class="phase-help"><summary>How to read these fits</summary><p class="empty-copy">Sinusoidal fit during the waveform only. Positive delay means the second signal lags; signed phase is wrapped to ±180° or ±π radians (±half a period). Host receipt means the Teensy USB host. Controller TIME has 0.1 ms units, but its association with EPOS acquisition is undocumented; no synchronization or latency correction is applied. Force uses the plotted recording time. These include motion, transport and sampling effects; fit R² measures sinusoidal agreement. Amplitudes are fitted center-to-peak values over the same time window: 100% matches the commanded amplitude, and positive error means a larger position amplitude. Phase is fitted independently, so a pure delay does not count as amplitude error.</p></details>
       </section>
       <details class="experiment-run-details"><summary>Run details</summary><p id="experiment-result-summary" class="pressure-detail"></p></details>
       <div class="panel-foot"><span>Results are replaced by the first verified dataset of a new experiment. Sweep runs stay together.</span></div>

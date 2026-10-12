@@ -138,6 +138,7 @@ export function experimentMessage(message) {
     if(m.timing){const t=m.timing;
       $('experiment-result-summary').textContent+=` · EPOS ${(t.epos.rate_millihz/1000).toFixed(1)} Hz (${t.epos.updates} updates), max gap ${t.epos.max_ms} ms, max receipt age ${t.max_epos_age_ms} ms, ${t.epos_repeated_records} repeated records · pressure ${(t.pressure.rate_millihz/1000).toFixed(1)} Hz · USB max service gap ${t.max_usb_service_gap_ms} ms, RX peak ${t.rx_peak_bytes} B · feedback settings ${t.feedback_verified?'verified':'unverified'}`;
     }
+    $('experiment-result-summary').textContent+=' · EPOS timing: host receipt; controller TIME is unassociated, acquisition/USB latency unknown';
     const excursion=waveformExcursion(dataset);
     if(excursion){
       $('experiment-result-summary').textContent+=` · largest logged waveform envelope excursion ${(excursion.counts*.078).toFixed(3)} µm${excursion.counts?` at ${(excursion.receiptMs/1000).toFixed(3)} s`:''} (host receipt timing; ${excursion.observations} unique readings)`;
@@ -147,12 +148,21 @@ export function experimentMessage(message) {
     const format=value=>value.reason?`Unavailable: ${value.reason}`:`${value.ms.toFixed(2)} ms (${value.degrees.toFixed(1)}°), fit R² ${value.r2.toFixed(3)}`;
     text('experiment-phase-command',delays.reason||format(delays.commandToPosition));
     text('experiment-phase-pressure',delays.reason||format(delays.positionToPressure));
+    const fit=delays.commandToPosition;
+    if(delays.reason||fit.reason){
+      text('experiment-amplitude',`Unavailable: ${delays.reason||fit.reason}`);
+    }else{
+      const measured=fit.amplitude.measured*.078,commanded=fit.amplitude.reference*.078,ratio=measured/commanded;
+      const signed=(value,digits)=>{const rounded=+value.toFixed(digits);return `${rounded>0?'+':''}${rounded.toFixed(digits)}`;};
+      text('experiment-amplitude',`${measured.toFixed(3)} / ${commanded.toFixed(3)} µm · ${(ratio*100).toFixed(2)}% achieved · error ${signed(measured-commanded,3)} µm (${signed((ratio-1)*100,2)}%) · fit R² ${fit.r2.toFixed(3)}`);
+    }
     draw();
   }
   experimentControls();
 }
 // Pressure retains every logger sample at experiment elapsed time.
 // Position uses unique publications at host receipt time, including pre-start samples.
+// TIME is an independent report, never an EPOS timestamp or a phase correction.
 export function signalPoints(samples, field, scale=1) {
   if(field===2)return samples.map(s=>[s[0],s[field]*scale]);
   const age=4, generation=10;

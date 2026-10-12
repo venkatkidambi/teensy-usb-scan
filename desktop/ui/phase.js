@@ -34,8 +34,9 @@ export function fitPhase(points, frequency) {
     return sum+(value-mean-offset-a*Math.sin(angle)-b*Math.cos(angle))**2;
   },0);
   const r2=variance>0?1-residual/variance:0;
-  if(Math.hypot(a,b)<1e-9 || r2<.5)return {reason:'No reliable sinusoidal signal (fit R² < 0.50).'};
-  return {phase:Math.atan2(b,a),r2,samples:points.length};
+  const amplitude=Math.hypot(a,b);
+  if(amplitude<1e-9 || r2<.5)return {reason:'No reliable sinusoidal signal (fit R² < 0.50).'};
+  return {phase:Math.atan2(b,a),amplitude,r2,samples:points.length};
 }
 
 export function phaseDelays(dataset,positionPoints,pressurePoints) {
@@ -54,9 +55,10 @@ export function phaseDelays(dataset,positionPoints,pressurePoints) {
     // Positive means the second signal lags. A periodic signal only identifies
     // delay modulo one cycle; report the signed shortest phase difference.
     const radians=Math.atan2(Math.sin(a.phase-b.phase),Math.cos(a.phase-b.phase));
-    return {ms:radians/(2*Math.PI*frequency)*1000,degrees:radians*180/Math.PI,radians,r2:Math.min(a.r2,b.r2)};
+    return {ms:radians/(2*Math.PI*frequency)*1000,degrees:radians*180/Math.PI,radians,r2:Math.min(a.r2,b.r2),amplitude:{reference:a.amplitude,measured:b.amplitude}};
   };
-  return {commandToPosition:pair(signals[0],signals[1]),positionToPressure:pair(signals[1],signals[2])};
+  return {commandToPosition:pair(signals[0],signals[1]),positionToPressure:pair(signals[1],signals[2]),
+    positionTimestamp:'host_receipt_ms',controllerTimeValidated:false};
 }
 
 export function parseFrequencies(value) {

@@ -1250,7 +1250,7 @@ mod tests {
             assert!(io.targets.is_empty() && io.speeds.is_empty() && io.serial.is_empty());
             assert_eq!(io.stops, 0);
             assert!(!e.stop_queued);
-            let mut metadata = crate::protocol::Frame::new();
+            let mut metadata = crate::protocol::FixedFrame::<8192>::new();
             e.metadata(&mut metadata, 1).unwrap();
         }
     }

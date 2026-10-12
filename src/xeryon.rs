@@ -5,6 +5,8 @@ use crate::line::LineBuffer;
 // Conservative starting point. Verify actual EPOS cadence on the connected XD-C;
 // POLI describes data updates, not a guaranteed per-tag acquisition rate.
 pub const EXPERIMENT_POLI_MS: u32 = 20;
+// INFO=4 also includes TIME but omits requested parameter readbacks needed for
+// safety/setup. Neither mode promises atomic EPOS/TIME sampling or a clock origin.
 pub const EXPERIMENT_INFO: u32 = 2; // preserves DPOS, Dashboard and requested replies
 
 /// Sequential, bounded setup before motion. Never SAVE controller settings.

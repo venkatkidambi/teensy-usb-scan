@@ -27,6 +27,8 @@ fn main() -> ! {
         mut gpio2,
         mut gpio4,
         flexpwm4,
+        flexpwm1,
+        mut dma,
         gpt1,
         adc1,
         lpi2c1,
@@ -59,7 +61,16 @@ fn main() -> ! {
         & !MOTOR_GPIO4_PINS);
     cortex_m::asm::dsb();
 
-    gpio_trajectory::init(gpt1, &mut gpio2, pins.p7, pins.p8, pins.p9, pins.p10);
+    gpio_trajectory::init(
+        gpt1,
+        flexpwm1,
+        dma[0].take().unwrap(),
+        &mut gpio2,
+        pins.p7,
+        pins.p8,
+        pins.p9,
+        pins.p10,
+    );
     motor::init(
         motor::Pins {
             pwm: pins.p2,

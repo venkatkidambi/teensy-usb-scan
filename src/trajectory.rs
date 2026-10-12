@@ -1,7 +1,7 @@
 //! Integer, absolute-time sinusoidal position and bounded edge generation.
 //! Shared with native tests. No feedback correction or elapsed-loop accumulator.
 use crate::experiment_data::ExperimentConfig;
-pub const TICK_US: u32 = 25;
+pub const TICK_US: u32 = 50;
 const Q: i64 = 1 << 30;
 const TURN: u64 = 1_000_000_000; // microseconds * millihertz
 
@@ -179,7 +179,8 @@ pub enum Status {
     Stopped,
     Fault,
 }
-/// Returned pin levels, applied in ENABLE/PULSE-low, DIRECTION, PULSE-high order.
+/// One hardware pulse selection per 50 us slot. `high` selects a 25 us pulse;
+/// hardware supplies both edges, including consecutive selected slots.
 pub struct Pulses {
     pub trajectory: Trajectory,
     pub position: i32,
@@ -210,20 +211,14 @@ impl Pulses {
             self.high = false;
             return;
         }
-        if elapsed.wrapping_sub(self.last_tick) > 75 {
+        if elapsed.wrapping_sub(self.last_tick) > TICK_US {
             self.high = false;
             self.status = Status::Fault;
             return;
         }
         self.last_tick = elapsed;
         let terminal = elapsed >= self.trajectory.duration_us;
-        if self.high {
-            self.high = false;
-            if terminal && self.position == self.trajectory.end() {
-                self.status = Status::Complete;
-            }
-            return;
-        }
+        self.high = false;
         let delta = self.trajectory.position(elapsed) - self.position;
         if terminal && delta == 0 {
             self.status = Status::Complete;
@@ -240,10 +235,10 @@ impl Pulses {
         }
         let positive = delta > 0;
         if positive != self.positive {
-            self.positive = positive; // one full low tick of direction setup
+            self.positive = positive; // one full empty slot before reversal
             return;
         }
-        if elapsed.wrapping_sub(self.last_rise) < 75 {
+        if elapsed.wrapping_sub(self.last_rise) < TICK_US {
             return;
         }
         self.position += delta;
@@ -294,14 +289,14 @@ mod tests {
         assert!(gpio_origin(config(7800, 1000, 1), &t, Some(1000), 1).is_err());
     }
     #[test]
-    fn approach_is_bounded_monotonic_and_returns_exact_pulse_count_with_irq_jitter() {
+    fn approach_is_bounded_monotonic_and_returns_exact_pulse_count() {
         for (from, to) in [(0, 1), (1, 0), (-1000, 1000), (1000, -1000), (0, 0)] {
             let t = Trajectory::approach(from, to).unwrap();
             let mut p = Pulses::new(t);
             let mut elapsed = 0;
             let mut rises = 0;
             while p.status == Status::Running {
-                elapsed += 28; // includes bounded interrupt work/jitter
+                elapsed += TICK_US; // hardware time is independent of interrupt work
                 p.tick(elapsed);
                 if p.high {
                     rises += 1;
@@ -326,8 +321,37 @@ mod tests {
             [0, 250000, 500000, 750000, 1000000].map(|us| t.position(us)),
             [900, 1000, 1100, 1000, 900]
         );
-        assert!(config(124_140, 1000, 1).validate().is_ok());
-        assert!(config(124_141, 1000, 1).validate().is_err());
+        assert!(config(248_281, 1000, 1).validate().is_ok());
+        assert!(config(248_282, 1000, 1).validate().is_err());
+        for control in [
+            crate::experiment_data::SineControl::Displacement,
+            crate::experiment_data::SineControl::Velocity,
+            crate::experiment_data::SineControl::VelocityPosition,
+        ] {
+            let ExperimentConfig::Sinusoidal {
+                center_nm,
+                frequency_mhz,
+                cycles,
+                ..
+            } = config(78, 1000, 1)
+            else {
+                unreachable!()
+            };
+            for (amplitude_nm, accepted) in [(124_140, true), (124_141, false)] {
+                assert_eq!(
+                    ExperimentConfig::Sinusoidal {
+                        center_nm,
+                        amplitude_nm,
+                        frequency_mhz,
+                        cycles,
+                        control
+                    }
+                    .validate()
+                    .is_ok(),
+                    accepted
+                );
+            }
+        }
         assert!(config(u32::MAX, 1000, 1).validate().is_err());
     }
     #[test]
@@ -341,7 +365,7 @@ mod tests {
         })
         .unwrap();
         let mut p = Pulses::new(t);
-        for us in (25..=t.duration_us + 100).step_by(25) {
+        for us in (TICK_US..=t.duration_us + 100).step_by(TICK_US as usize) {
             p.tick(us);
         }
         assert_eq!(p.status, Status::Complete);
@@ -352,14 +376,14 @@ mod tests {
     fn pulses_reverse_complete_exact_cycles_and_stop_on_abort_or_deadline() {
         for (a, f, n) in [
             (7800, 1000, 3),
-            (124140, 1000, 1),
-            (12414, 10000, 2),
-            (1_241_400, 100, 1),
+            (248281, 1000, 1),
+            (24828, 10000, 2),
+            (2_482_810, 100, 1),
             (7800, 1300, 2),
         ] {
             let t = Trajectory::new(config(a, f, n)).unwrap();
             let mut p = Pulses::new(t);
-            let (mut rises, mut previous, mut last) = (0, false, 0);
+            let (mut rises, mut last, mut shortest) = (0, 0, u32::MAX);
             let (mut direction, mut changes) = (true, 0);
             for us in (TICK_US..t.duration_us).step_by(TICK_US as usize) {
                 p.tick(us);
@@ -369,12 +393,12 @@ mod tests {
                     direction = p.positive;
                     changes += 1;
                 }
-                if p.high && !previous {
+                if p.high {
                     rises += 1;
-                    assert!(us - last >= 75);
+                    assert!(us - last >= TICK_US);
+                    shortest = shortest.min(us - last);
                     last = us;
                 }
-                previous = p.high;
                 let reference = (78000.0
                     - f64::from(a)
                         * (f64::from(us) * f64::from(f) * core::f64::consts::TAU / 1e9).cos())
@@ -387,6 +411,10 @@ mod tests {
             assert_eq!(changes, 2 * n - 1);
             let max = counts(78000 + i64::from(a)).unwrap();
             assert_eq!(rises, 2 * (max - t.start) as u32 * n);
+            if a >= 24828 {
+                assert_eq!(shortest, 50); // actually exercises the 20 kHz ceiling
+            }
+            assert!(rises < t.duration_us / TICK_US); // not a constant-rate train
             let mut p = Pulses::new(t);
             let mut us = TICK_US;
             while !p.high {

@@ -12,9 +12,8 @@ pub const MIN_POSITION: i32 = -(1 << 25);
 pub const MAX_POSITION: i32 = (1 << 25) - 1;
 pub const MAX_TRAVEL_NM: u32 = MAX_POSITION as u32 * 78;
 
-/// XD-OEM manual section 5 recommends at most 20 kHz. Reserve timing headroom
-/// for 25 us IRQ service, direction setup and pulse high/low intervals.
-pub const MAX_PULSE_HZ: u32 = 10_000;
+/// XD-OEM section 5: recommended maximum, GPIO only. Hardware slots are 50 us.
+pub const MAX_PULSE_HZ: u32 = 20_000;
 pub fn peak_pulse_hz(amplitude_nm: u32, frequency_mhz: u32) -> f64 {
     sine_max_velocity(amplitude_nm, frequency_mhz) / 0.078
 }
@@ -221,7 +220,11 @@ impl ExperimentConfig {
                         .checked_add(i64::from(amplitude_nm))
                         .ok_or("Trajectory overflow")?,
                 )?;
-                if peak_pulse_hz(amplitude_nm, frequency_mhz) > f64::from(MAX_PULSE_HZ) {
+                if self.control() == Some(SineControl::Gpio) {
+                    if peak_pulse_hz(amplitude_nm, frequency_mhz) > f64::from(MAX_PULSE_HZ) {
+                        return Err("GPIO peak pulse rate exceeds 20000 Hz (1560 um/s)");
+                    }
+                } else if sine_max_velocity(amplitude_nm, frequency_mhz) > 780.0 {
                     return Err("Sinusoidal peak speed exceeds 780 um/s");
                 }
                 if self.control().is_some_and(SineControl::velocity)
@@ -280,6 +283,8 @@ pub struct Record {
     pub pressure_age_ms: u32,
     pub stat_age_ms: u32,
     pub target: i32,
+    /// Latest independent TIME report, NOT an acquisition timestamp for EPOS.
+    /// Its origin, modulus and association are unspecified by the XD-OEM manual.
     pub controller_ticks: u32,
     pub controller_age_ms: u32,
     pub epos_generation: u32,
