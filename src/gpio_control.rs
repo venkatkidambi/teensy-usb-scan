@@ -80,6 +80,15 @@ pub fn target(
     Ok(target as i32)
 }
 
+/// A DPOS sample can still describe the previous target after the last pulse.
+/// Keep polling until fresh feedback confirms the requested target and the
+/// controller's position-reached flag. The coordinator bounds this wait.
+pub fn completed(t: &crate::protocol::Telemetry, expected: i32, now: u32, since: u32) -> bool {
+    position(t, now, since).is_ok()
+        && t.samples[1].value == i64::from(expected)
+        && t.samples[2].value & (1 << 10) != 0
+}
+
 pub struct Burst {
     remaining: u32,
     pub high: bool,
@@ -105,7 +114,8 @@ impl Burst {
         if self.high {
             self.high = false;
         } else if self.remaining == 0 {
-            // One final low half-period before disabling ENABLE / changing DIR.
+            // One final low half-period before reporting pulse completion.
+            // The driver then holds ENABLE / DIR until feedback settles or Stop.
             self.status = Status::Complete;
         } else {
             self.remaining -= 1;
@@ -237,6 +247,28 @@ mod tests {
     }
 
     #[test]
+    fn completion_waits_for_target_feedback_and_stationary_reached_status() {
+        let mut t = baseline();
+        // Encoder has moved 100 counts, but USB still reports the old target.
+        t.record(b"EPOS", 4395, 201);
+        t.record(b"DPOS", 4295, 201);
+        t.record(b"STAT", 1344, 201);
+        assert!(!completed(&t, 4395, 202, 200));
+        t.record(b"DPOS", 4395, 203);
+        assert!(completed(&t, 4395, 204, 200));
+        // A new query round cannot reuse an old position-reached indication.
+        assert!(!completed(&t, 4395, 204, 202));
+        t.record(b"EPOS", 4394, 205);
+        t.record(b"STAT", 1 << 5, 205);
+        assert!(!completed(&t, 4395, 206, 200));
+        t.record(b"STAT", 1344, 207);
+        assert!(completed(&t, 4395, 208, 200));
+        assert!(!completed(&t, 4395, 500, 200));
+        t.record(b"STAT", 1344 | (1 << 12), 208);
+        assert!(!completed(&t, 4395, 209, 200));
+    }
+
+    #[test]
     fn stop_or_fault_cannot_emit_another_edge() {
         for status in [Status::Stopped, Status::Fault] {
             let mut b = Burst::new(100).unwrap();
@@ -246,5 +278,15 @@ mod tests {
             assert!(!b.high);
             assert_eq!(b.status, status);
         }
+        // The settling watchdog also stops a completed train without another edge.
+        let mut b = Burst::new(1).unwrap();
+        b.tick();
+        b.tick();
+        b.tick();
+        assert_eq!(b.status, Status::Complete);
+        b.stop(Status::Fault);
+        b.tick();
+        assert!(!b.high);
+        assert_eq!(b.status, Status::Fault);
     }
 }

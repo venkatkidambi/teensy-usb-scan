@@ -115,7 +115,7 @@ pub fn start(config: ExperimentConfig) -> Result<(), &'static str> {
         let d = slot.as_mut().ok_or("GPIO unavailable")?;
         if d.burst
             .as_ref()
-            .is_some_and(|b| b.status == Status::Running)
+            .is_some_and(|b| matches!(b.status, Status::Running | Status::Complete))
         {
             return Err("GPIO pulse test busy");
         }
@@ -166,7 +166,7 @@ pub fn start_steps(positive: bool, steps: u32) -> Result<(), &'static str> {
         if d.run.as_ref().is_some_and(|p| p.status == Status::Running)
             || d.burst
                 .as_ref()
-                .is_some_and(|b| b.status == Status::Running)
+                .is_some_and(|b| matches!(b.status, Status::Running | Status::Complete))
             || d.timer.count().wrapping_sub(d.last_edge) < crate::gpio_control::HALF_US
         {
             return Err("GPIO busy or direction hold incomplete");
@@ -233,7 +233,19 @@ extern "C" fn GPT1() {
                 } else if now.wrapping_sub(d.last_edge) >= crate::gpio_control::HALF_US {
                     b.tick();
                 }
-                if b.status != Status::Running {
+                if b.status == Status::Complete {
+                    // The pulse train is complete, but the XD-OEM may still be
+                    // tracking its last target. Keep ENABLE / DIR stable while
+                    // the coordinator waits for fresh position-reached feedback.
+                    // Continue servicing the timer so loss of the foreground
+                    // heartbeat still enforces the 10 ms watchdog deadline.
+                    d.pulse.clear();
+                    d.index.clear();
+                    d.timer.set_output_compare_count(
+                        Ocr::OCR1,
+                        d.timer.count().wrapping_add(crate::gpio_control::HALF_US),
+                    );
+                } else if b.status != Status::Running {
                     d.low();
                 } else {
                     if b.high {

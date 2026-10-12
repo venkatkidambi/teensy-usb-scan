@@ -390,12 +390,7 @@ impl Console {
                         }
                     }
                     Ok(Command::GpioStatus(id)) => {
-                        let (state, error) = crate::usb_host::gpio_test_status();
-                        writeln!(
-                            self.tx,
-                            "{{\"type\":\"gpio_status\",\"id\":{id},\"state\":\"{state}\",\"error\":\"{}\"}}",
-                            error.unwrap_or("")
-                        )
+                        crate::usb_host::gpio_test_status(&mut self.tx, id)
                     }
                     Ok(Command::XeryonMove(id, up, nm, speed)) => {
                         match crate::usb_host::move_xeryon(up, nm, speed, now) {

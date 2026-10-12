@@ -237,6 +237,11 @@ test('plunger limit configuration validates and frames requests',async()=>{
 
 
 test('GPIO commands validate, retain ownership until confirmed idle, and allow Stop preemption',async()=>{
+  const result={start:4295,expected:4395,epos:4394,dpos:4395,verified:true};
+  const statusMessage={type:'gpio_status',id:1,state:'idle',error:'',test:result};
+  assert.deepEqual(parseMessage(JSON.stringify(statusMessage)).test,result);
+  for(const test of [{...result,expected:33554432},{...result,epos:null},{...result,verified:'true'},{...result,epos:null,dpos:null}])assert.throws(()=>parseMessage(JSON.stringify({...statusMessage,test})),/GPIO test feedback/);
+  assert.doesNotThrow(()=>parseMessage(JSON.stringify({...statusMessage,test:null})));
   for(const m of [
     {type:'gpio_ack',id:1,action:'accepted',steps:0},
     {type:'gpio_ack',id:1,action:'accepted',steps:101},
@@ -269,16 +274,17 @@ test('GPIO commands validate, retain ownership until confirmed idle, and allow S
     status=s.request('GPIO_STATUS');const oldId=s.id;
     const interrupted=assert.rejects(status,/Interrupted by Stop/);
     const stop=s.request('XERYON_STOP');
-    reply({type:'gpio_status',id:oldId,state:'idle',error:''});
+    reply({type:'gpio_status',id:oldId,state:'idle',error:'',test:result});
     reply({type:'xeryon_ack',id:s.id,action:'stop'});
-    await stop;await interrupted;assert.equal(s.gpioOwned,true);
+    await stop;await interrupted;assert.equal(s.gpioOwned,true);assert.equal(s.gpioTest,null);
     status=s.request('GPIO_STATUS');
     reply({type:'gpio_status',id:s.id,state:'failed',error:'restore timeout'});
     await status;assert.equal(s.gpioOwned,true);assert.equal(s.gpioError,'restore timeout');
     status=s.request('GPIO_STATUS');
-    reply({type:'gpio_status',id:s.id,state:'idle',error:''});
-    await status;assert.equal(s.gpioOwned,false);
+    reply({type:'gpio_status',id:s.id,state:'idle',error:'',test:result});
+    await status;assert.equal(s.gpioOwned,false);assert.deepEqual(s.gpioTest,result);
     moving=s.request('GPIO_MOVE N 100');
+    assert.equal(s.gpioTest,null);
     reply({type:'gpio_ack',id:s.id,action:'accepted',steps:100});
     await moving;
     assert(sent.includes('GPIO_MOVE 3 P 10'));assert(sent.at(-1).endsWith(' N 100'));

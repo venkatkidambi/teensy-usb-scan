@@ -44,10 +44,15 @@ struct GpioTest {
     setup: crate::xeryon::GpioSetup,
     positive: bool,
     steps: u32,
-    expected: i32,
+    expected: Option<i32>,
     since: u32,
     query: usize,
+    query_since: u32,
     origin: i32,
+    start: i32,
+    observed: Option<[i64; 2]>,
+    matched_since: Option<u32>,
+    verified: bool,
     reference_confirmed: Option<u32>,
     error: Option<&'static str>,
 }
@@ -57,10 +62,15 @@ static GPIO_TEST: cortex_m::interrupt::Mutex<RefCell<GpioTest>> =
         setup: crate::xeryon::GpioSetup::new(),
         positive: true,
         steps: 0,
-        expected: 0,
+        expected: None,
         since: 0,
         query: 0,
+        query_since: 0,
         origin: 0,
+        start: 0,
+        observed: None,
+        matched_since: None,
+        verified: false,
         reference_confirmed: None,
         error: None,
     }));
@@ -69,22 +79,40 @@ pub fn gpio_busy() -> bool {
     cortex_m::interrupt::free(|cs| GPIO_TEST.borrow(cs).borrow().phase != GpioPhase::Idle)
 }
 
-pub fn gpio_test_status() -> (&'static str, Option<&'static str>) {
+pub fn gpio_test_status(out: &mut impl fmt::Write, id: u32) -> fmt::Result {
     cortex_m::interrupt::free(|cs| {
         let test = GPIO_TEST.borrow(cs).borrow();
-        (
-            match test.phase {
-                GpioPhase::Idle => "idle",
-                GpioPhase::Stop => "stopping",
-                GpioPhase::Configure => "configuring",
-                GpioPhase::Baseline | GpioPhase::Synchronize => "baseline",
-                GpioPhase::Pulsing => "pulsing",
-                GpioPhase::Settling => "settling",
-                GpioPhase::Restore => "restoring",
-                GpioPhase::Failed => "failed",
-            },
-            test.error,
-        )
+        let state = match test.phase {
+            GpioPhase::Idle => "idle",
+            GpioPhase::Stop => "stopping",
+            GpioPhase::Configure => "configuring",
+            GpioPhase::Baseline | GpioPhase::Synchronize => "baseline",
+            GpioPhase::Pulsing => "pulsing",
+            GpioPhase::Settling => "settling",
+            GpioPhase::Restore => "restoring",
+            GpioPhase::Failed => "failed",
+        };
+        write!(
+            out,
+            "{{\"type\":\"gpio_status\",\"id\":{id},\"state\":\"{state}\",\"error\":\"{}\",\"test\":",
+            test.error.unwrap_or("")
+        )?;
+        if let Some(expected) = test.expected {
+            write!(
+                out,
+                "{{\"start\":{},\"expected\":{expected},\"verified\":{},\"epos\":",
+                test.start, test.verified
+            )?;
+            if let Some([epos, dpos]) = test.observed {
+                write!(out, "{epos},\"dpos\":{dpos}")?;
+            } else {
+                write!(out, "null,\"dpos\":null")?;
+            }
+            write!(out, "}}")?;
+        } else {
+            write!(out, "null")?;
+        }
+        writeln!(out, "}}")
     })
 }
 
@@ -110,10 +138,15 @@ pub fn start_gpio_test(positive: bool, steps: u32, now: u32) -> Result<(), &'sta
             setup: crate::xeryon::GpioSetup::new(),
             positive,
             steps,
-            expected: 0,
+            expected: None,
             since: now,
             query: 0,
+            query_since: now,
             origin: 0,
+            start: 0,
+            observed: None,
+            matched_since: None,
+            verified: false,
             reference_confirmed: None,
             error: None,
         };
@@ -131,6 +164,11 @@ fn send_gpio_line(bytes: &[u8]) -> Result<(), &'static str> {
 }
 
 impl GpioTest {
+    fn query_again(&mut self, now: u32) {
+        self.query = 0;
+        self.query_since = now;
+    }
+
     fn restore(&mut self, now: u32) {
         crate::gpio_trajectory::stop();
         self.phase = GpioPhase::Restore;
@@ -166,9 +204,25 @@ impl GpioTest {
         if !motion::fresh(t, 0, now) || !motion::fresh(t, 2, now) {
             return Err("GPIO position/status feedback stale");
         }
+        // Pulse completion must not disable the controller before it lands.
+        // Refresh the still-running ENABLE watchdog throughout settling.
+        if self.phase == GpioPhase::Settling
+            && crate::gpio_trajectory::steps_status() != Status::Complete
+        {
+            return Err("GPIO settling stopped or watchdog expired");
+        }
         if now.wrapping_sub(self.since) >= 5000 {
             return Err(if self.phase == GpioPhase::Synchronize {
                 "GPIO reference did not acknowledge or settle before timeout"
+            } else if self.phase == GpioPhase::Settling {
+                if self
+                    .observed
+                    .is_some_and(|v| Some(v[1]) != self.expected.map(i64::from))
+                {
+                    "GPIO target readback mismatch after 5 s; inspect last test counts"
+                } else {
+                    "GPIO position did not settle with fresh feedback within 5 s"
+                }
             } else {
                 "GPIO test phase timeout"
             });
@@ -185,7 +239,7 @@ impl GpioTest {
                 if self.setup.poll(now, t, idle, send_gpio_line)? {
                     self.phase = GpioPhase::Baseline;
                     self.since = now;
-                    self.query = 0;
+                    self.query_again(now);
                 }
             }
             GpioPhase::Baseline | GpioPhase::Synchronize | GpioPhase::Settling => {
@@ -198,8 +252,8 @@ impl GpioTest {
                 }
                 let fresh = t.samples[..3].iter().all(|s| {
                     s.valid && {
-                        let age = s.ms.wrapping_sub(self.since);
-                        age > 0 && age < 0x8000_0000
+                        let age = s.ms.wrapping_sub(self.query_since);
+                        age > 0 && age < 0x8000_0000 && now.wrapping_sub(s.ms) < 250
                     }
                 });
                 if !idle || self.query < queries.len() || !fresh {
@@ -215,13 +269,13 @@ impl GpioTest {
                     send_gpio_line(frame.pending())?;
                     self.phase = GpioPhase::Synchronize;
                     self.since = now;
-                    self.query = 0;
+                    self.query_again(now);
                 } else if self.phase == GpioPhase::Synchronize {
                     if t.samples[1].value == i64::from(self.origin)
                         && self.reference_confirmed.is_none()
                     {
                         self.reference_confirmed = Some(now);
-                        self.query = 0;
+                        self.query_again(now);
                         return Ok(());
                     }
                     let after_reference = self.reference_confirmed.is_some_and(|confirmed| {
@@ -238,10 +292,10 @@ impl GpioTest {
                         // Await the acknowledged reference and stationary state.
                         // The phase deadline also covers a controller that never
                         // settles. Stop/disconnect always cancels preparation.
-                        self.query = 0;
+                        self.query_again(now);
                         return Ok(());
                     }
-                    self.expected = crate::gpio_control::target(
+                    let expected = crate::gpio_control::target(
                         t,
                         self.positive,
                         self.steps,
@@ -250,16 +304,34 @@ impl GpioTest {
                         self.origin,
                     )?;
                     crate::gpio_trajectory::start_steps(self.positive, self.steps)?;
+                    self.expected = Some(expected);
+                    self.start = t.samples[0].value as i32;
                     self.phase = GpioPhase::Pulsing;
                     self.since = now;
-                } else if t.samples[1].value != i64::from(self.expected) {
-                    return Err("GPIO DPOS mismatch; verify pulse wiring and direction");
-                } else if !motion::moving(t.samples[2].value) && t.samples[2].value & (1 << 10) != 0
-                {
-                    self.restore(now);
                 } else {
-                    // Get another position/status set while the controller settles.
-                    self.query = 0;
+                    // Freeze these readings before STOP / GPIO=0 restoration,
+                    // which may itself change the controller's reported target.
+                    self.observed = Some([t.samples[0].value, t.samples[1].value]);
+                    let complete = self.expected.is_some_and(|expected| {
+                        crate::gpio_control::completed(t, expected, now, self.query_since)
+                    });
+                    if complete {
+                        if self
+                            .matched_since
+                            .is_some_and(|since| now.wrapping_sub(since) >= 100)
+                        {
+                            self.verified = true;
+                            self.restore(now);
+                            return Ok(());
+                        }
+                        self.matched_since.get_or_insert(now);
+                    } else {
+                        self.matched_since = None;
+                    }
+                    // A delayed DPOS is pending feedback, not an immediate
+                    // wiring fault. Require new EPOS/DPOS/STAT on every round;
+                    // the five-second phase deadline is never extended.
+                    self.query_again(now);
                 }
             }
             GpioPhase::Pulsing => match crate::gpio_trajectory::steps_status() {
@@ -267,7 +339,7 @@ impl GpioTest {
                 Status::Complete => {
                     self.phase = GpioPhase::Settling;
                     self.since = now;
-                    self.query = 0;
+                    self.query_again(now);
                 }
                 _ => return Err("GPIO pulse train stopped or watchdog expired"),
             },

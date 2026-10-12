@@ -73,7 +73,13 @@ export function parseMessage(line) {
   else if(m.type==='ack') { if(typeof m.stream!=='boolean') throw Error('Invalid acknowledgement'); }
   else if(m.type==='xeryon_ack') { if(!['move','stop'].includes(m.action)||(m.action==='move'&&!xeryonPosition(m.target))) throw Error('Invalid Xeryon acknowledgement'); }
   else if(m.type==='gpio_ack') { if(m.action!=='accepted'||!Number.isInteger(m.steps)||m.steps<1||m.steps>100)throw Error('Invalid GPIO acknowledgement'); }
-  else if(m.type==='gpio_status') { if(!['idle','stopping','configuring','baseline','pulsing','settling','restoring','failed'].includes(m.state)||typeof m.error!=='string')throw Error('Invalid GPIO status'); }
+  else if(m.type==='gpio_status') {
+    if(!['idle','stopping','configuring','baseline','pulsing','settling','restoring','failed'].includes(m.state)||typeof m.error!=='string')throw Error('Invalid GPIO status');
+    if(m.test!=null){
+      const t=m.test;
+      if(!object(t)||!xeryonPosition(t.start)||!xeryonPosition(t.expected)||typeof t.verified!=='boolean'||!['epos','dpos'].every(k=>t[k]===null||Number.isSafeInteger(t[k]))||(t.epos===null)!==(t.dpos===null)||(t.verified&&t.epos===null))throw Error('Invalid GPIO test feedback');
+    }
+  }
   else if(m.type==='plunger_ack') { if(!['move','stop','zero','limits'].includes(m.action)) throw Error('Invalid plunger acknowledgement'); }
   else if(m.type==='experiment_state') { if(!['dashboard','running','data_ready'].includes(m.state)||!u32(m.run)) throw Error('Invalid experiment state'); }
   else if(m.type==='experiment_ack') { if(!['start','abort','data_received'].includes(m.action)||!u32(m.run)) throw Error('Invalid experiment acknowledgement'); }
@@ -86,7 +92,7 @@ export function parseMessage(line) {
 export class NativeSession {
   constructor(invoke,onMessage,onLost,onError,timeout=2500) {
     Object.assign(this,{invoke,onMessage,onLost,onError,timeout});
-    this.gpioSupported=false;this.gpioOwned=false;this.gpioState=null;this.gpioError='';
+    this.gpioSupported=false;this.gpioOwned=false;this.gpioState=null;this.gpioError='';this.gpioTest=null;
     this.startupSeen=false;this.experimentOwned=false;this.id=0;this.session=null;this.pending=null;this.closed=false;this.coalesced=0;
   }
   async open(port) {
@@ -111,7 +117,7 @@ export class NativeSession {
           // Only a matching status request may release the interlock. A late
           // idle reply from before a move/Stop must never unlock new motion.
           if(m.type==='gpio_status'&&this.pending?.id===m.id&&this.pending.expected==='gpio_status'){
-            this.gpioState=m.state;this.gpioError=m.error;this.gpioOwned=m.state!=='idle';
+            this.gpioState=m.state;this.gpioError=m.error;this.gpioOwned=m.state!=='idle';this.gpioTest=m.test??null;
           }
           if(this.pending&&(m.id===this.pending.id||m.type==='error'&&m.id===0)) {
             const p=this.pending;this.pending=null;clearTimeout(p.timer);
@@ -151,6 +157,7 @@ export class NativeSession {
     if(!validLimits&&!validMove&&!validXeryon&&!validGpio&&!['GPIO_STATUS','HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP','ABORT'].includes(command)) return Promise.reject(Error('Unsupported command'));
     if(validGpio||(command==='XERYON_STOP'&&this.gpioSupported)){
       this.gpioOwned=true;this.gpioState=validGpio?'requesting':'restoring';this.gpioError='';
+      if(validGpio)this.gpioTest=null;
     }
     const [name,...args]=command.split(' ');const arg=args.length?args.join(' '):undefined;const id=this.id=this.id===0xefffffff?1:this.id+1;
     return new Promise((resolve,reject)=>{
