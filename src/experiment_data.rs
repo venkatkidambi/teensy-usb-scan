@@ -12,7 +12,7 @@ pub const MIN_POSITION: i32 = -(1 << 25);
 pub const MAX_POSITION: i32 = (1 << 25) - 1;
 pub const MAX_TRAVEL_NM: u32 = MAX_POSITION as u32 * 78;
 
-/// XD-C manual section 5 recommends at most 20 kHz. Reserve timing headroom
+/// XD-OEM manual section 5 recommends at most 20 kHz. Reserve timing headroom
 /// for 25 us IRQ service, direction setup and pulse high/low intervals.
 pub const MAX_PULSE_HZ: u32 = 10_000;
 pub fn peak_pulse_hz(amplitude_nm: u32, frequency_mhz: u32) -> f64 {
@@ -146,7 +146,11 @@ impl ExperimentConfig {
     /// nm / (um/s) gives milliseconds. Bound even initial positioning.
     pub fn move_timeout(self, distance_nm: u64) -> Result<u32, &'static str> {
         let Some(speed) = self.speed() else {
-            return Ok(MOVE_TIMEOUT_MS);
+            let timeout = (distance_nm.div_ceil(78) * 400).div_ceil(1000) + 1000;
+            if timeout > u64::from(MAX_DURATION_MS) {
+                return Err("GPIO approach exceeds positioning time budget");
+            }
+            return Ok((timeout as u32).max(MOVE_TIMEOUT_MS));
         };
         if !(1..=MAX_SPEED_UM_S).contains(&speed) {
             return Err("Quasi-static speed must be 1..16777215 um/s");

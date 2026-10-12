@@ -60,7 +60,6 @@ export function parseMessage(line) {
     if(m.protocol!==1||m.board!=='Teensy 4.1'||typeof m.firmware!=='string'||typeof m.motion!=='boolean'||typeof m.pressure!=='boolean') throw Error('Incompatible firmware; upload this project’s telemetry build');
     if(m.max_pulse_hz!==undefined&&(!u32(m.max_pulse_hz)||m.max_pulse_hz===0))throw Error('Invalid GPIO pulse limit');
     for(const key of ['sine_serial_displacement','sine_serial_velocity','sine_serial_velocity_position'])if(m[key]!==undefined&&typeof m[key]!=='boolean')throw Error(`Invalid ${key} capability`);
-    if(m.gpio_test!==undefined&&typeof m.gpio_test!=='boolean')throw Error('Invalid GPIO test capability');
     if(m.sine_gpio!==undefined&&typeof m.sine_gpio!=='boolean')throw Error('Invalid sine_gpio capability');
     if(m.sine_position!==undefined&&typeof m.sine_position!=='boolean')throw Error('Invalid sine_position capability');
     if(m.quasi_static_speed!==undefined&&typeof m.quasi_static_speed!=='boolean')throw Error('Invalid quasi_static_speed capability');
@@ -72,14 +71,6 @@ export function parseMessage(line) {
   } else if(m.type==='pong') { if(!u32(m.ms)) throw Error('Invalid pong'); }
   else if(m.type==='ack') { if(typeof m.stream!=='boolean') throw Error('Invalid acknowledgement'); }
   else if(m.type==='xeryon_ack') { if(!['move','stop'].includes(m.action)||(m.action==='move'&&!xeryonPosition(m.target))) throw Error('Invalid Xeryon acknowledgement'); }
-  else if(m.type==='gpio_ack') { if(m.action!=='accepted'||!Number.isInteger(m.steps)||m.steps<1||m.steps>100)throw Error('Invalid GPIO acknowledgement'); }
-  else if(m.type==='gpio_status') {
-    if(!['idle','stopping','configuring','baseline','pulsing','settling','restoring','failed'].includes(m.state)||typeof m.error!=='string')throw Error('Invalid GPIO status');
-    if(m.test!=null){
-      const t=m.test;
-      if(!object(t)||!xeryonPosition(t.start)||!xeryonPosition(t.expected)||typeof t.verified!=='boolean'||!['epos','dpos'].every(k=>t[k]===null||Number.isSafeInteger(t[k]))||(t.epos===null)!==(t.dpos===null)||(t.verified&&t.epos===null))throw Error('Invalid GPIO test feedback');
-    }
-  }
   else if(m.type==='plunger_ack') { if(!['move','stop','zero','limits'].includes(m.action)) throw Error('Invalid plunger acknowledgement'); }
   else if(m.type==='experiment_state') { if(!['dashboard','running','data_ready'].includes(m.state)||!u32(m.run)) throw Error('Invalid experiment state'); }
   else if(m.type==='experiment_ack') { if(!['start','abort','data_received'].includes(m.action)||!u32(m.run)) throw Error('Invalid experiment acknowledgement'); }
@@ -92,7 +83,6 @@ export function parseMessage(line) {
 export class NativeSession {
   constructor(invoke,onMessage,onLost,onError,timeout=2500) {
     Object.assign(this,{invoke,onMessage,onLost,onError,timeout});
-    this.gpioSupported=false;this.gpioOwned=false;this.gpioState=null;this.gpioError='';this.gpioTest=null;
     this.startupSeen=false;this.experimentOwned=false;this.id=0;this.session=null;this.pending=null;this.closed=false;this.coalesced=0;
   }
   async open(port) {
@@ -113,12 +103,6 @@ export class NativeSession {
           if(m.type==='experiment_state') this.experimentOwned=m.state!=='dashboard';
           if(m.type==='experiment_ack'&&m.action==='start') this.experimentOwned=true;
           if(m.type==='experiment_ack'&&m.action==='data_received') this.experimentOwned=false;
-          if(m.type==='hello'){this.gpioSupported=m.gpio_test===true;if(this.gpioSupported&&this.gpioState===null)this.gpioOwned=true;}
-          // Only a matching status request may release the interlock. A late
-          // idle reply from before a move/Stop must never unlock new motion.
-          if(m.type==='gpio_status'&&this.pending?.id===m.id&&this.pending.expected==='gpio_status'){
-            this.gpioState=m.state;this.gpioError=m.error;this.gpioOwned=m.state!=='idle';this.gpioTest=m.test??null;
-          }
           if(this.pending&&(m.id===this.pending.id||m.type==='error'&&m.id===0)) {
             const p=this.pending;this.pending=null;clearTimeout(p.timer);
             if(m.type==='error') p.reject(Error(m.message));
@@ -142,26 +126,18 @@ export class NativeSession {
   request(command) {
     if(this.closed||this.session===null) return Promise.reject(Error('Not connected'));
     if(this.experimentOwned&&command!=='ABORT') return Promise.reject(Error('Experiment owns hardware; only ABORT is allowed'));
-    if(this.gpioOwned&&/^(XERYON_MOVE|GPIO_MOVE) /.test(command))return Promise.reject(Error('GPIO owns motion; wait for idle or press Stop'));
-    if(command.startsWith('GPIO_')&&!this.gpioSupported)return Promise.reject(Error('Firmware does not support GPIO tests'));
     if(command==='ABORT'||command==='PLUNGER_STOP'||command==='XERYON_STOP') this.rejectPending(Error('Interrupted by Stop'));
     if(this.pending) return Promise.reject(Error('Wait for the current request'));
     const move=/^PLUNGER_MOVE [UD] ([0-9]+) ([0-9]+)$/.exec(command);
     const validMove=move&&+move[1]>0&&+move[1]<=255&&Number.isSafeInteger(+move[2])&&+move[2]>0&&Math.floor((+move[2]*16688+500)/1000)<=2147483647;
     const xeryonMove=/^XERYON_MOVE [UD] ([0-9]+)(?: ([0-9]+))?$/.exec(command);
     const validXeryon=xeryonMove&&Number.isSafeInteger(+xeryonMove[1])&&+xeryonMove[1]>=78&&+xeryonMove[1]<=2617245618&&(xeryonMove[2]===undefined||Number.isInteger(+xeryonMove[2])&&+xeryonMove[2]>=1&&+xeryonMove[2]<=16777215);
-    const gpioMove=/^GPIO_MOVE [PN] ([0-9]+)$/.exec(command);
-    const validGpio=gpioMove&&Number.isInteger(+gpioMove[1])&&+gpioMove[1]>=1&&+gpioMove[1]<=100;
     const limits=/^PLUNGER_LIMITS ([0-9]+) ([0-9]+)$/.exec(command);
     const validLimits=limits&&+limits[1]<+limits[2]&&+limits[2]<=100;
-    if(!validLimits&&!validMove&&!validXeryon&&!validGpio&&!['GPIO_STATUS','HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP','ABORT'].includes(command)) return Promise.reject(Error('Unsupported command'));
-    if(validGpio||(command==='XERYON_STOP'&&this.gpioSupported)){
-      this.gpioOwned=true;this.gpioState=validGpio?'requesting':'restoring';this.gpioError='';
-      if(validGpio)this.gpioTest=null;
-    }
+    if(!validLimits&&!validMove&&!validXeryon&&!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP','ABORT'].includes(command)) return Promise.reject(Error('Unsupported command'));
     const [name,...args]=command.split(' ');const arg=args.length?args.join(' '):undefined;const id=this.id=this.id===0xefffffff?1:this.id+1;
     return new Promise((resolve,reject)=>{
-      this.pending={id,resolve,reject,expected:{GPIO_MOVE:'gpio_ack',GPIO_STATUS:'gpio_status',ABORT:'experiment_ack',XERYON_MOVE:'xeryon_ack',XERYON_STOP:'xeryon_ack',HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack',PLUNGER_LIMITS:'plunger_ack',PLUNGER_MOVE:'plunger_ack',PLUNGER_STOP:'plunger_ack',PLUNGER_ZERO:'plunger_ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),(command==='ABORT'||command==='PLUNGER_STOP'||command==='XERYON_STOP')?500:this.timeout)};
+      this.pending={id,resolve,reject,expected:{ABORT:'experiment_ack',XERYON_MOVE:'xeryon_ack',XERYON_STOP:'xeryon_ack',HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack',PLUNGER_LIMITS:'plunger_ack',PLUNGER_MOVE:'plunger_ack',PLUNGER_STOP:'plunger_ack',PLUNGER_ZERO:'plunger_ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),(command==='ABORT'||command==='PLUNGER_STOP'||command==='XERYON_STOP')?500:this.timeout)};
       const send=()=>this.invoke('serial_send',{session:this.session,command:`${name} ${id}${arg===undefined?'':` ${arg}`}`});
       // Preserve native queue order if ABORT preempts an in-flight START IPC.
       const sending=command==='ABORT'&&this.startSubmission?this.startSubmission.then(send,send):send();
@@ -174,7 +150,7 @@ export class NativeSession {
     if(!this.startupSeen)throw Error('No startup state received; reconnect to recover safely');
   }
   startExperiment(config,appendResults=false) {
-    if(this.closed||this.session===null||this.pending||this.experimentOwned||this.gpioOwned) return Promise.reject(Error('Experiment, GPIO motion or request already active'));
+    if(this.closed||this.session===null||this.pending||this.experimentOwned) return Promise.reject(Error('Experiment or request already active'));
     const id=this.id=this.id===0xefffffff?1:this.id+1;
     this.experimentOwned=true;
     return new Promise((resolve,reject)=>{

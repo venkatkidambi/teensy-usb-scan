@@ -33,6 +33,7 @@ pub trait Actuator {
     fn prepare_serial(&mut self, now: u32) -> Result<bool, &'static str>;
     fn serial_commands(&mut self, commands: &[serial_sine::Command]) -> Result<(), &'static str>;
     fn prepare_gpio(&mut self, now: u32) -> Result<bool, &'static str>;
+    fn position_gpio(&mut self, config: ExperimentConfig, now: u32) -> Result<(), &'static str>;
     fn start_gpio(&mut self, config: ExperimentConfig) -> Result<(), &'static str>;
     fn gpio_status(&self) -> crate::trajectory::Status;
     fn stop_gpio(&mut self);
@@ -79,6 +80,7 @@ pub struct Engine<'a> {
     serial: serial_sine::Stream,
     ramp: Option<serial_sine::Ramp>,
     serial_prepared: bool,
+    gpio_positioning: bool,
     final_return: final_return::Diagnostics,
     pub envelope: envelope::Envelope,
     fault_stat: Option<u32>,
@@ -134,6 +136,7 @@ impl<'a> Engine<'a> {
             serial: Default::default(),
             ramp: None,
             serial_prepared: false,
+            gpio_positioning: false,
             final_return: Default::default(),
             envelope: envelope::Envelope::configured(),
             fault_stat: None,
@@ -270,6 +273,7 @@ impl<'a> Engine<'a> {
         self.stopping = false;
         self.serial = Default::default();
         self.serial_prepared = false;
+        self.gpio_positioning = false;
         self.ramp = config.serial().then(|| {
             serial_sine::Ramp::new(t.samples[0].value as i32, target, config.speed().unwrap())
         });
@@ -306,7 +310,26 @@ impl<'a> Engine<'a> {
                 self.feedback_verified = true;
             }
         }
-        if self.config.unwrap().serial() && !self.serial_prepared {
+        if self.config.unwrap().control() == Some(SineControl::Gpio) {
+            match io.prepare_gpio(now) {
+                Ok(false) => {
+                    self.feedback_pending = true;
+                    return;
+                }
+                Err(e) => {
+                    self.finish(State::Fault, e, io);
+                    return;
+                }
+                Ok(true) => {}
+            }
+            self.move_started = now;
+            match io.position_gpio(self.config.unwrap(), now) {
+                Ok(()) => self.gpio_positioning = true,
+                Err(e) => self.finish(State::Fault, e, io),
+            }
+            return;
+        }
+        if !self.serial_prepared {
             match io.prepare_serial(now) {
                 Ok(false) => {
                     self.feedback_pending = true;
@@ -344,8 +367,15 @@ impl<'a> Engine<'a> {
         };
         self.reason = reason;
         // Successful sinusoidal completion already drained the boundary STOP.
-        self.stop_queued = (state == State::Complete && self.stopping) || io.stop().is_ok();
-        if !self.stop_queued && state == State::Complete {
+        self.stop_queued = if self.config.unwrap().control() == Some(SineControl::Gpio) {
+            false // GPIO shutdown is synchronous; no serial STOP or handoff.
+        } else {
+            (state == State::Complete && self.stopping) || io.stop().is_ok()
+        };
+        if !self.stop_queued
+            && state == State::Complete
+            && self.config.unwrap().control() != Some(SineControl::Gpio)
+        {
             self.outcome = "faulted";
             self.reason = "STOP could not be queued";
         }
@@ -395,7 +425,7 @@ impl<'a> Engine<'a> {
         let sine_running = self.state == State::Running
             && matches!(self.config, Some(ExperimentConfig::Sinusoidal { .. }));
         // STOP can clear closed-loop state while its USB transfer drains.
-        let stopped_transition = sine_running && self.stopping;
+        let stopped_transition = sine_running && self.stopping && self.config.unwrap().serial();
         let velocity_running = sine_running
             && self
                 .config
@@ -417,11 +447,25 @@ impl<'a> Engine<'a> {
         .err()
         .or_else(|| (t.epoch != self.epoch).then_some("Xeryon connection changed"))
         .or_else(|| {
+            (self.gpio_positioning
+                && (now.wrapping_sub(t.samples[0].ms) >= 250
+                    || now.wrapping_sub(t.samples[2].ms) >= 250))
+                .then_some("GPIO encoder/status feedback stale")
+        })
+        .or_else(|| {
+            (self.gpio_positioning
+                && t.gpio[2].valid
+                && t.gpio[3].valid
+                && (t.samples[0].value < t.gpio[2].value || t.samples[0].value > t.gpio[3].value))
+                .then_some("GPIO encoder exceeds controller travel limits")
+        })
+        .or_else(|| {
             t.xeryon_motion
                 // During setup this tracker still describes the previous
                 // manual move. The first DPOS starts a new tracked move.
                 .filter(|m| {
-                    m.state == 4
+                    self.config.unwrap().control() != Some(SineControl::Gpio)
+                        && m.state == 4
                         && !self.feedback_pending
                         && !self.speed_pending
                         && !self.timeout_pending
@@ -446,6 +490,28 @@ impl<'a> Engine<'a> {
                 // may satisfy the existing speed verification.
                 self.speed_updates = t.speed_updates;
                 self.begin(now, io);
+                return;
+            }
+            if self.gpio_positioning {
+                if now.wrapping_sub(self.move_started) >= self.move_timeout {
+                    self.finish(State::Fault, "GPIO start positioning deadline", io);
+                    return;
+                }
+                match io.gpio_status() {
+                    crate::trajectory::Status::Running => {}
+                    crate::trajectory::Status::Complete => {
+                        let after = *self.hold_started.get_or_insert(now);
+                        if Self::gpio_arrived(t, self.target, after, now) {
+                            self.state = State::Armed;
+                            self.hold_started = None;
+                        }
+                    }
+                    _ => self.finish(
+                        State::Fault,
+                        "GPIO approach stopped or timing deadline missed",
+                        io,
+                    ),
+                }
                 return;
             }
             if self.speed_pending {
@@ -528,29 +594,26 @@ impl<'a> Engine<'a> {
             return;
         }
         if self.state == State::Armed {
-            if !io.tx_idle() {
-                return;
-            }
             if self.config.unwrap().control() == Some(SineControl::Gpio) {
+                if io.gpio_status() != crate::trajectory::Status::Complete {
+                    self.finish(State::Fault, "GPIO approach lost before arming", io);
+                    return;
+                }
                 if now.wrapping_sub(self.move_started) >= self.move_timeout {
                     self.finish(State::Fault, "Start move deadline", io);
                     return;
                 }
-                if !io.tx_idle() {
+                if !Self::gpio_arrived(t, self.target, self.move_started, now) {
+                    self.finish(State::Fault, "GPIO start position lost before arming", io);
                     return;
-                }
-                match io.prepare_gpio(now) {
-                    Ok(false) => return,
-                    Err(e) => {
-                        self.finish(State::Fault, e, io);
-                        return;
-                    }
-                    Ok(true) => {}
                 }
                 if let Err(e) = io.start_gpio(self.config.unwrap()) {
                     self.finish(State::Fault, e, io);
                     return;
                 }
+            }
+            if self.config.unwrap().control() != Some(SineControl::Gpio) && !io.tx_idle() {
+                return;
             }
             io.start_timing();
             self.last_pressure = p.samples;
@@ -672,6 +735,43 @@ impl<'a> Engine<'a> {
                     Ok(false)
                 }
             }
+            ExperimentConfig::Sinusoidal {
+                control: SineControl::Gpio,
+                ..
+            } => match io.gpio_status() {
+                crate::trajectory::Status::Running => Ok(false),
+                crate::trajectory::Status::Complete => {
+                    if !self.stopping {
+                        self.stopping = true;
+                        self.move_started = now;
+                        self.final_return = final_return::Diagnostics {
+                            boundary: Some(
+                                self.started_ms
+                                    .wrapping_add(self.duration_ms - MOVE_TIMEOUT_MS),
+                            ),
+                            observed: now,
+                            theoretical_counts: self.config.unwrap().start().unwrap(),
+                            target: self.config.unwrap().start().unwrap(),
+                            settings: t.positioning,
+                            deadline: now.wrapping_add(MOVE_TIMEOUT_MS),
+                            ..Default::default()
+                        };
+                        self.final_return.observe(t, io.tx_progress());
+                        self.final_return.boundary_feedback = self.final_return.last;
+                    }
+                    if now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS {
+                        Err("GPIO final settling deadline")
+                    } else {
+                        Ok(Self::gpio_arrived(
+                            t,
+                            self.config.unwrap().start().unwrap(),
+                            self.move_started,
+                            now,
+                        ))
+                    }
+                }
+                _ => Err("GPIO trajectory stopped or timing deadline missed"),
+            },
             ExperimentConfig::Sinusoidal { .. } => {
                 if self.stopping {
                     if now.wrapping_sub(self.move_started) >= MOVE_TIMEOUT_MS {
@@ -680,7 +780,7 @@ impl<'a> Engine<'a> {
                         Ok(io.tx_idle())
                     }
                 } else {
-                    let status = if self.config.unwrap().serial() {
+                    let status = {
                         match self
                             .serial
                             .tick(self.config.unwrap(), elapsed, now, t.samples[0], io)
@@ -692,8 +792,6 @@ impl<'a> Engine<'a> {
                                 return;
                             }
                         }
-                    } else {
-                        io.gpio_status()
                     };
                     match status {
                         crate::trajectory::Status::Running => Ok(false),
@@ -730,6 +828,14 @@ impl<'a> Engine<'a> {
             Err(e) => self.finish(State::Fault, e, io),
             _ => {}
         }
+    }
+    fn gpio_arrived(t: &Telemetry, target: i32, after: u32, now: u32) -> bool {
+        [t.samples[0], t.samples[2]].iter().all(|s| {
+            let age = s.ms.wrapping_sub(after);
+            s.valid && age > 0 && age < 0x8000_0000 && now.wrapping_sub(s.ms) < 250
+        }) && t.samples[0].value == i64::from(target)
+            && t.samples[2].value & (1 << 10) != 0
+            && !xeryon_motion::moving(t.samples[2].value)
     }
     pub fn metadata(&self, out: &mut impl core::fmt::Write, id: u32) -> core::fmt::Result {
         write!(

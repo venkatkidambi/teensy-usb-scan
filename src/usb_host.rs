@@ -25,352 +25,6 @@ static GPIO_SETUP: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::GpioSetup>>
 static FEEDBACK_SETUP: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::FeedbackSetup>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::FeedbackSetup::new()));
 
-// The test owns motion from the first STOP through verified GPIO=0 restoration.
-// A failed restoration keeps the interlock latched until XERYON_STOP retries it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GpioPhase {
-    Idle,
-    Stop,
-    Configure,
-    Baseline,
-    Synchronize,
-    Pulsing,
-    Settling,
-    Restore,
-    Failed,
-}
-struct GpioTest {
-    phase: GpioPhase,
-    setup: crate::xeryon::GpioSetup,
-    positive: bool,
-    steps: u32,
-    expected: Option<i32>,
-    since: u32,
-    query: usize,
-    query_since: u32,
-    origin: i32,
-    start: i32,
-    observed: Option<[i64; 2]>,
-    matched_since: Option<u32>,
-    verified: bool,
-    reference_confirmed: Option<u32>,
-    error: Option<&'static str>,
-}
-static GPIO_TEST: cortex_m::interrupt::Mutex<RefCell<GpioTest>> =
-    cortex_m::interrupt::Mutex::new(RefCell::new(GpioTest {
-        phase: GpioPhase::Idle,
-        setup: crate::xeryon::GpioSetup::new(),
-        positive: true,
-        steps: 0,
-        expected: None,
-        since: 0,
-        query: 0,
-        query_since: 0,
-        origin: 0,
-        start: 0,
-        observed: None,
-        matched_since: None,
-        verified: false,
-        reference_confirmed: None,
-        error: None,
-    }));
-
-pub fn gpio_busy() -> bool {
-    cortex_m::interrupt::free(|cs| GPIO_TEST.borrow(cs).borrow().phase != GpioPhase::Idle)
-}
-
-pub fn gpio_test_status(out: &mut impl fmt::Write, id: u32) -> fmt::Result {
-    cortex_m::interrupt::free(|cs| {
-        let test = GPIO_TEST.borrow(cs).borrow();
-        let state = match test.phase {
-            GpioPhase::Idle => "idle",
-            GpioPhase::Stop => "stopping",
-            GpioPhase::Configure => "configuring",
-            GpioPhase::Baseline | GpioPhase::Synchronize => "baseline",
-            GpioPhase::Pulsing => "pulsing",
-            GpioPhase::Settling => "settling",
-            GpioPhase::Restore => "restoring",
-            GpioPhase::Failed => "failed",
-        };
-        write!(
-            out,
-            "{{\"type\":\"gpio_status\",\"id\":{id},\"state\":\"{state}\",\"error\":\"{}\",\"test\":",
-            test.error.unwrap_or("")
-        )?;
-        if let Some(expected) = test.expected {
-            write!(
-                out,
-                "{{\"start\":{},\"expected\":{expected},\"verified\":{},\"epos\":",
-                test.start, test.verified
-            )?;
-            if let Some([epos, dpos]) = test.observed {
-                write!(out, "{epos},\"dpos\":{dpos}")?;
-            } else {
-                write!(out, "null,\"dpos\":null")?;
-            }
-            write!(out, "}}")?;
-        } else {
-            write!(out, "null")?;
-        }
-        writeln!(out, "}}")
-    })
-}
-
-pub fn start_gpio_test(positive: bool, steps: u32, now: u32) -> Result<(), &'static str> {
-    if gpio_busy() || AUTONOMOUS.load(Ordering::Relaxed) {
-        return Err("GPIO or experiment busy");
-    }
-    crate::gpio_control::Burst::new(steps)?;
-    let t = telemetry();
-    if t.xeryon_motion.is_some_and(|m| m.state == 1) {
-        return Err("USB motion busy");
-    }
-    crate::xeryon_motion::target(&t, positive, steps * 78, now)?;
-    if !unsafe { usb_serial_tx_idle() } {
-        return Err("USB transmit busy");
-    }
-    crate::gpio_trajectory::stop();
-    // An accepted test starts with STOP, never with a pulse or an index command.
-    send_gpio_line(b"STOP\n")?;
-    cortex_m::interrupt::free(|cs| {
-        *GPIO_TEST.borrow(cs).borrow_mut() = GpioTest {
-            phase: GpioPhase::Stop,
-            setup: crate::xeryon::GpioSetup::new(),
-            positive,
-            steps,
-            expected: None,
-            since: now,
-            query: 0,
-            query_since: now,
-            origin: 0,
-            start: 0,
-            observed: None,
-            matched_since: None,
-            verified: false,
-            reference_confirmed: None,
-            error: None,
-        };
-    });
-    Ok(())
-}
-
-fn send_gpio_line(bytes: &[u8]) -> Result<(), &'static str> {
-    // Foreground only; C copies a complete bounded line. STOP discards queued TX.
-    if unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, bytes == b"STOP\n") } {
-        Ok(())
-    } else {
-        Err("GPIO USB transmit unavailable")
-    }
-}
-
-impl GpioTest {
-    fn query_again(&mut self, now: u32) {
-        self.query = 0;
-        self.query_since = now;
-    }
-
-    fn restore(&mut self, now: u32) {
-        crate::gpio_trajectory::stop();
-        self.phase = GpioPhase::Restore;
-        self.setup = crate::xeryon::GpioSetup::new();
-        self.since = now;
-    }
-
-    fn poll(&mut self, t: &crate::protocol::Telemetry, now: u32) -> Result<(), &'static str> {
-        use crate::{trajectory::Status, xeryon_motion as motion};
-        if matches!(self.phase, GpioPhase::Idle | GpioPhase::Failed) {
-            return Ok(());
-        }
-        let idle = unsafe { usb_serial_tx_idle() };
-        if !motion::ready(t) || unsafe { usb_serial_tx_failed() } {
-            return Err("GPIO USB connection lost or transmit failed");
-        }
-        if self.phase == GpioPhase::Restore {
-            if now.wrapping_sub(self.since) >= 5000 {
-                return Err("GPIO restore timeout; retry XERYON_STOP");
-            }
-            // A priority STOP may still be draining from the preceding poll.
-            if !idle {
-                return Ok(());
-            }
-            if self.setup.poll_serial(now, t, idle, send_gpio_line)? {
-                self.phase = GpioPhase::Idle;
-            }
-            return Ok(());
-        }
-        if let Some(reason) = motion::controller_fault(t.samples[2].value) {
-            return Err(reason);
-        }
-        if !motion::fresh(t, 0, now) || !motion::fresh(t, 2, now) {
-            return Err("GPIO position/status feedback stale");
-        }
-        // Pulse completion must not disable the controller before it lands.
-        // Refresh the still-running ENABLE watchdog throughout settling.
-        if self.phase == GpioPhase::Settling
-            && crate::gpio_trajectory::steps_status() != Status::Complete
-        {
-            return Err("GPIO settling stopped or watchdog expired");
-        }
-        if now.wrapping_sub(self.since) >= 5000 {
-            return Err(if self.phase == GpioPhase::Synchronize {
-                "GPIO reference did not acknowledge or settle before timeout"
-            } else if self.phase == GpioPhase::Settling {
-                if self.observed.is_some_and(|v| {
-                    Some(v[1]) != self.expected.map(i64::from) && v[1] != i64::from(self.origin)
-                }) {
-                    "GPIO target readback mismatch after 5 s; inspect last test counts"
-                } else {
-                    "GPIO endpoint not confirmed within 5 s; inspect last test counts and status"
-                }
-            } else {
-                "GPIO test phase timeout"
-            });
-        }
-        match self.phase {
-            GpioPhase::Stop if idle => {
-                self.phase = GpioPhase::Configure;
-                self.since = now;
-            }
-            GpioPhase::Configure => {
-                if !idle {
-                    return Ok(());
-                }
-                if self.setup.poll(now, t, idle, send_gpio_line)? {
-                    self.phase = GpioPhase::Baseline;
-                    self.since = now;
-                    self.query_again(now);
-                }
-            }
-            GpioPhase::Baseline | GpioPhase::Synchronize | GpioPhase::Settling => {
-                // Explicit queries work even when a parameter is not streamed.
-                let queries: &[&[u8]] = &[b"EPOS=?\n", b"DPOS=?\n", b"STAT=?\n"];
-                if idle && self.query < queries.len() {
-                    send_gpio_line(queries[self.query])?;
-                    self.query += 1;
-                    return Ok(());
-                }
-                let fresh = t.samples[..3].iter().all(|s| {
-                    s.valid && {
-                        let age = s.ms.wrapping_sub(self.query_since);
-                        age > 0 && age < 0x8000_0000 && now.wrapping_sub(s.ms) < 250
-                    }
-                });
-                if !idle || self.query < queries.len() || !fresh {
-                    return Ok(());
-                }
-                if self.phase == GpioPhase::Baseline {
-                    self.origin = crate::gpio_control::position(t, now, self.since)?;
-                    // ENABLE/PULSE remain low throughout this serialized USB
-                    // preparation. Hold the measured position, not the retained
-                    // old target; never change tuning or reset the encoder.
-                    let mut frame = crate::protocol::Frame::new();
-                    crate::xeryon_motion::write_move(&mut frame, self.origin, None)?;
-                    send_gpio_line(frame.pending())?;
-                    self.phase = GpioPhase::Synchronize;
-                    self.since = now;
-                    self.query_again(now);
-                } else if self.phase == GpioPhase::Synchronize {
-                    if t.samples[1].value == i64::from(self.origin)
-                        && self.reference_confirmed.is_none()
-                    {
-                        self.reference_confirmed = Some(now);
-                        self.query_again(now);
-                        return Ok(());
-                    }
-                    let after_reference = self.reference_confirmed.is_some_and(|confirmed| {
-                        t.samples[..3].iter().all(|s| {
-                            let age = s.ms.wrapping_sub(confirmed);
-                            age > 0 && age < 0x8000_0000
-                        })
-                    });
-                    if t.samples[1].value != i64::from(self.origin)
-                        || motion::moving(t.samples[2].value)
-                        || t.samples[2].value & (1 << 10) == 0
-                        || !after_reference
-                    {
-                        // Await the acknowledged reference and stationary state.
-                        // The phase deadline also covers a controller that never
-                        // settles. Stop/disconnect always cancels preparation.
-                        self.query_again(now);
-                        return Ok(());
-                    }
-                    let expected = crate::gpio_control::target(
-                        t,
-                        self.positive,
-                        self.steps,
-                        now,
-                        self.reference_confirmed.unwrap(),
-                        self.origin,
-                    )?;
-                    crate::gpio_trajectory::start_steps(self.positive, self.steps)?;
-                    self.expected = Some(expected);
-                    self.start = t.samples[0].value as i32;
-                    self.phase = GpioPhase::Pulsing;
-                    self.since = now;
-                } else {
-                    // Freeze these readings before STOP / GPIO=0 restoration,
-                    // which may itself change the controller's reported target.
-                    self.observed = Some([t.samples[0].value, t.samples[1].value]);
-                    let complete = self.expected.is_some_and(|expected| {
-                        crate::gpio_control::completed(
-                            t,
-                            expected,
-                            self.origin,
-                            now,
-                            self.query_since,
-                        )
-                    });
-                    if complete {
-                        if self
-                            .matched_since
-                            .is_some_and(|since| now.wrapping_sub(since) >= 100)
-                        {
-                            self.verified = true;
-                            self.restore(now);
-                            return Ok(());
-                        }
-                        self.matched_since.get_or_insert(now);
-                    } else {
-                        self.matched_since = None;
-                    }
-                    // DPOS may lag or retain the serial reference. Require
-                    // new EPOS/DPOS/STAT on every confirmation round;
-                    // the five-second phase deadline is never extended.
-                    self.query_again(now);
-                }
-            }
-            GpioPhase::Pulsing => match crate::gpio_trajectory::steps_status() {
-                Status::Running => {}
-                Status::Complete => {
-                    self.phase = GpioPhase::Settling;
-                    self.since = now;
-                    self.query_again(now);
-                }
-                _ => return Err("GPIO pulse train stopped or watchdog expired"),
-            },
-            _ => {}
-        }
-        Ok(())
-    }
-}
-
-fn poll_gpio_test(t: &crate::protocol::Telemetry, now: u32) {
-    cortex_m::interrupt::free(|cs| {
-        let mut test = GPIO_TEST.borrow(cs).borrow_mut();
-        if let Err(reason) = test.poll(t, now) {
-            crate::gpio_trajectory::stop();
-            let _ = send_gpio_line(b"STOP\n");
-            test.error = Some(reason);
-            if test.phase == GpioPhase::Restore {
-                test.phase = GpioPhase::Failed;
-            } else {
-                test.restore(now);
-            }
-            log::warn!("GPIO test: {}", reason);
-        }
-    });
-}
-
 pub fn telemetry() -> crate::protocol::Telemetry {
     cortex_m::interrupt::free(|cs| {
         let mut t = *CACHE.borrow(cs).borrow();
@@ -394,8 +48,8 @@ pub fn heartbeat(now: u32) {
 }
 
 pub fn move_xeryon(up: bool, nm: u32, speed: Option<u32>, now: u32) -> Result<i32, &'static str> {
-    if gpio_busy() {
-        return Err("GPIO owns motion; wait for idle or XERYON_STOP");
+    if AUTONOMOUS.load(Ordering::Relaxed) {
+        return Err("Experiment owns motion");
     }
     let t = telemetry();
     if t.xeryon_motion.is_some_and(|m| m.state == 1) {
@@ -405,6 +59,17 @@ pub fn move_xeryon(up: bool, nm: u32, speed: Option<u32>, now: u32) -> Result<i3
     let mut frame = crate::protocol::Frame::new();
     crate::xeryon_motion::write_move(&mut frame, target, speed)?;
     let bytes = frame.pending();
+    crate::gpio_trajectory::stop();
+    crate::gpio_trajectory::invalidate_reference();
+    // Only a subsequent explicit manual move leaves GPIO mode. Experiments
+    // never restore serial motion during positioning, acquisition or settling.
+    if t.gpio[0].valid && t.gpio[0].value == 2 {
+        for command in [b"STOP\n".as_slice(), b"GPIO=0\n"] {
+            if !unsafe { usb_serial_send(command.as_ptr(), command.len() as u32, false) } {
+                return Err("Serial mode setup transmit unavailable");
+            }
+        }
+    }
     if speed.is_some() {
         // Flush SSPD and DPOS as separate USB transfers. The XD-C processes
         // each line on newline, and the working DPOS-only path uses one packet.
@@ -430,12 +95,7 @@ pub fn move_xeryon(up: bool, nm: u32, speed: Option<u32>, now: u32) -> Result<i3
 
 pub fn stop_xeryon() -> Result<(), &'static str> {
     crate::gpio_trajectory::stop();
-    cortex_m::interrupt::free(|cs| {
-        let mut test = GPIO_TEST.borrow(cs).borrow_mut();
-        if test.phase != GpioPhase::Idle {
-            test.restore(millis());
-        }
-    });
+    crate::gpio_trajectory::invalidate_reference();
     if !crate::xeryon_motion::ready(&telemetry()) {
         return Err("Xeryon is not connected");
     }
@@ -451,7 +111,7 @@ pub fn stop_xeryon() -> Result<(), &'static str> {
 
 pub fn disconnect_xeryon() {
     let active = cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow().state == 1);
-    if (active || gpio_busy()) && !AUTONOMOUS.load(Ordering::Relaxed) {
+    if active && !AUTONOMOUS.load(Ordering::Relaxed) {
         let _ = stop_xeryon();
     }
 }
@@ -556,7 +216,6 @@ pub fn poll() {
     // SAFETY: host task is called only from the single main-loop context.
     unsafe { scanner_task() };
     let t = telemetry();
-    poll_gpio_test(&t, millis());
     let stop = cortex_m::interrupt::free(|cs| {
         let mut motion = MOTION.borrow(cs).borrow_mut();
         if AUTONOMOUS.load(Ordering::Relaxed) {
@@ -597,10 +256,8 @@ pub fn rx_pending() -> bool {
 pub struct ExperimentActuator;
 impl crate::experiment::Actuator for ExperimentActuator {
     fn prepare_serial(&mut self, now: u32) -> Result<bool, &'static str> {
-        if gpio_busy() {
-            return Err("GPIO test owns motion");
-        }
         crate::gpio_trajectory::stop();
+        crate::gpio_trajectory::invalidate_reference();
         let t = telemetry();
         cortex_m::interrupt::free(|cs| {
             GPIO_SETUP
@@ -620,9 +277,6 @@ impl crate::experiment::Actuator for ExperimentActuator {
         &mut self,
         commands: &[crate::experiment::serial_sine::Command],
     ) -> Result<(), &'static str> {
-        if gpio_busy() {
-            return Err("GPIO test owns motion");
-        }
         if !self.tx_idle() {
             return Err("Serial waveform previous transmit incomplete");
         }
@@ -674,9 +328,6 @@ impl crate::experiment::Actuator for ExperimentActuator {
         crate::experiment::final_return::TxProgress(values)
     }
     fn prepare_gpio(&mut self, now: u32) -> Result<bool, &'static str> {
-        if gpio_busy() {
-            return Err("GPIO test owns motion");
-        }
         let t = telemetry();
         cortex_m::interrupt::free(|cs| {
             GPIO_SETUP
@@ -691,13 +342,21 @@ impl crate::experiment::Actuator for ExperimentActuator {
                 })
         })
     }
+    fn position_gpio(
+        &mut self,
+        config: crate::experiment_data::ExperimentConfig,
+        now: u32,
+    ) -> Result<(), &'static str> {
+        let t = telemetry();
+        let origin =
+            crate::trajectory::gpio_origin(config, &t, crate::gpio_trajectory::position(), now)?;
+        let start = config.start()?;
+        crate::gpio_trajectory::approach(origin, start)
+    }
     fn start_gpio(
         &mut self,
         config: crate::experiment_data::ExperimentConfig,
     ) -> Result<(), &'static str> {
-        if gpio_busy() {
-            return Err("GPIO test owns motion");
-        }
         crate::gpio_trajectory::start(config)
     }
     fn gpio_status(&self) -> crate::trajectory::Status {
@@ -738,9 +397,6 @@ impl crate::experiment::Actuator for ExperimentActuator {
         Ok(())
     }
     fn target(&mut self, target: i32, now: u32, track: bool) -> Result<(), &'static str> {
-        if gpio_busy() {
-            return Err("GPIO test owns motion");
-        }
         // SAFETY: foreground-only query into the existing C transport. Fault
         // instead of queuing a target behind an unfinished USB transfer.
         if !unsafe { usb_serial_tx_idle() } {
@@ -835,6 +491,7 @@ extern "C" fn scanner_bus_event(event: u32) {
         }
         1 => {
             crate::gpio_trajectory::stop();
+            crate::gpio_trajectory::invalidate_reference();
             REMOVES.fetch_add(1, Ordering::Relaxed);
         }
         _ => {}
@@ -878,6 +535,7 @@ extern "C" fn scanner_device(
 #[unsafe(no_mangle)]
 extern "C" fn scanner_removed(address: u8) {
     crate::gpio_trajectory::stop();
+    crate::gpio_trajectory::invalidate_reference();
     XD_C.store(false, Ordering::Relaxed);
     reset_telemetry();
     cortex_m::interrupt::free(|cs| {
@@ -891,6 +549,7 @@ extern "C" fn scanner_removed(address: u8) {
 extern "C" fn scanner_serial_event(event: u8, address: u8, interface: u8) {
     if event >= 2 {
         crate::gpio_trajectory::stop();
+        crate::gpio_trajectory::invalidate_reference();
     }
     reset_telemetry();
     cortex_m::interrupt::free(|cs| {

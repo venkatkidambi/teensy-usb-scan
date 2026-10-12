@@ -55,6 +55,7 @@ impl Input {
         {
             *control = match self.sine_control.as_deref() {
                 None | Some("displacement") => data::SineControl::Displacement,
+                Some("gpio") => data::SineControl::Gpio,
                 Some("velocity") => data::SineControl::Velocity,
                 Some("velocity_position") => data::SineControl::VelocityPosition,
                 _ => return Err("Unknown sine control mode".into()),
@@ -75,6 +76,7 @@ impl Input {
         }
         if let Some(control) = config.control() {
             command.push_str(match control {
+                data::SineControl::Gpio => " G",
                 data::SineControl::Velocity => " V",
                 data::SineControl::VelocityPosition => " VP",
                 _ => " D",

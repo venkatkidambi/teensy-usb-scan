@@ -18,8 +18,6 @@ pub enum Command {
     Zero(u32),
     XeryonMove(u32, bool, u32, Option<u32>),
     XeryonStop(u32),
-    GpioMove(u32, bool, u32),
-    GpioStatus(u32),
 }
 
 impl Command {
@@ -39,9 +37,7 @@ impl Command {
             | Self::Stop(id)
             | Self::Zero(id)
             | Self::XeryonMove(id, _, _, _)
-            | Self::XeryonStop(id)
-            | Self::GpioMove(id, _, _)
-            | Self::GpioStatus(id) => id,
+            | Self::XeryonStop(id) => id,
         }
     }
     pub fn parse(line: &[u8]) -> Result<Self, ()> {
@@ -79,6 +75,7 @@ impl Command {
                     *control = match optional {
                         None | Some("D") => crate::experiment_data::SineControl::Displacement,
                         Some("V") => crate::experiment_data::SineControl::Velocity,
+                        Some("G") => crate::experiment_data::SineControl::Gpio,
                         Some("VP") => crate::experiment_data::SineControl::VelocityPosition,
                         _ => return Err(()),
                     };
@@ -98,19 +95,6 @@ impl Command {
                 words.next().ok_or(())?.parse().map_err(|_| ())?,
                 words.next().ok_or(())?.parse().map_err(|_| ())?,
             ),
-            "GPIO_STATUS" => Self::GpioStatus(id),
-            "GPIO_MOVE" => {
-                let positive = match words.next() {
-                    Some("P") => true,
-                    Some("N") => false,
-                    _ => return Err(()),
-                };
-                let steps = words.next().ok_or(())?.parse::<u32>().map_err(|_| ())?;
-                if !(1..=100).contains(&steps) {
-                    return Err(());
-                }
-                Self::GpioMove(id, positive, steps)
-            }
             "XERYON_STOP" => Self::XeryonStop(id),
             "XERYON_MOVE" => {
                 let up = match words.next() {

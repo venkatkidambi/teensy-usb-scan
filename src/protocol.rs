@@ -73,8 +73,8 @@ pub struct Telemetry {
     pub settings: [Sample; 2], // INFO, POLI
     pub setting_updates: [u32; 2],
     pub feedback_before: [Option<i64>; 2],
-    pub gpio: [Sample; 2], // GPIO, STPS readbacks
-    pub gpio_updates: [u32; 2],
+    pub gpio: [Sample; 4], // GPIO, STPS, LLIM, HLIM readbacks
+    pub gpio_updates: [u32; 4],
     pub positioning: [Sample; 4], // PTOL, PTO2, TOUT, DLAY; read only
     pub positioning_updates: [u32; 4],
     pub timing_active: bool,
@@ -113,8 +113,8 @@ impl Telemetry {
                 value: 0,
                 ms: 0,
                 valid: false,
-            }; 2],
-            gpio_updates: [0; 2],
+            }; 4],
+            gpio_updates: [0; 4],
             positioning: [Sample {
                 value: 0,
                 ms: 0,
@@ -202,7 +202,10 @@ impl Telemetry {
             };
             self.positioning_updates[i] = self.positioning_updates[i].wrapping_add(1);
         }
-        if let Some(i) = [b"GPIO", b"STPS"].iter().position(|s| *s == tag) {
+        if let Some(i) = [b"GPIO", b"STPS", b"LLIM", b"HLIM"]
+            .iter()
+            .position(|s| *s == tag)
+        {
             self.gpio[i] = Sample {
                 value,
                 ms: now,

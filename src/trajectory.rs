@@ -36,6 +36,60 @@ fn cosine(phase: u64) -> i64 {
     (x * p / Q).clamp(-Q, Q)
 }
 
+/// Validate controller limits and establish an exact pulse reference before ENABLE.
+/// The cached DPOS is read-only diagnostics; no serial target is ever sent.
+pub fn gpio_origin(
+    config: ExperimentConfig,
+    t: &crate::protocol::Telemetry,
+    reference: Option<i32>,
+    now: u32,
+) -> Result<i32, &'static str> {
+    use crate::experiment_data::{MAX_POSITION, MIN_POSITION, counts};
+    config.validate()?;
+    let ExperimentConfig::Sinusoidal {
+        center_nm,
+        amplitude_nm,
+        ..
+    } = config
+    else {
+        return Err("GPIO requires sinusoidal configuration");
+    };
+    if !t.gpio.iter().all(|s| s.valid) || t.gpio[0].value != 2 || t.gpio[1].value != 1 {
+        return Err("GPIO configuration or travel limits unconfirmed");
+    }
+    let low = t.gpio[2].value;
+    let high = t.gpio[3].value;
+    let start = config.start()?;
+    let end = counts(center_nm + i64::from(amplitude_nm))?;
+    if low < i64::from(MIN_POSITION)
+        || high > i64::from(MAX_POSITION)
+        || low >= high
+        || [i64::from(start), i64::from(end), t.samples[0].value]
+            .iter()
+            .any(|p| *p < low || *p > high)
+    {
+        return Err("GPIO trajectory exceeds controller travel limits");
+    }
+    if [t.samples[0], t.samples[2]]
+        .iter()
+        .any(|s| !s.valid || now.wrapping_sub(s.ms) >= 250)
+        || crate::xeryon_motion::moving(t.samples[2].value)
+    {
+        return Err("GPIO requires fresh stationary encoder/status feedback");
+    }
+    let origin = match reference {
+        Some(position) => i64::from(position),
+        None if t.samples[1].valid && now.wrapping_sub(t.samples[1].ms) < 250 => t.samples[1].value,
+        None => return Err("GPIO reference diagnostic is stale"),
+    };
+    if origin != t.samples[0].value {
+        return Err(
+            "GPIO reference unconfirmed; encoder and retained target must agree before START",
+        );
+    }
+    Ok(origin as i32)
+}
+
 #[derive(Clone, Copy)]
 pub struct Trajectory {
     center_nm: i64,
@@ -43,6 +97,7 @@ pub struct Trajectory {
     frequency_mhz: u32,
     pub duration_us: u32,
     pub start: i32,
+    approach: Option<i32>,
 }
 impl Trajectory {
     pub fn new(config: ExperimentConfig) -> Result<Self, &'static str> {
@@ -63,7 +118,33 @@ impl Trajectory {
             frequency_mhz,
             duration_us: (u64::from(cycles) * TURN).div_ceil(u64::from(frequency_mhz)) as u32,
             start: config.start()?,
+            approach: None,
         })
+    }
+    /// Half-cosine approach: zero endpoint velocity, peak <4 kHz.
+    pub fn approach(from: i32, to: i32) -> Result<Self, &'static str> {
+        use crate::experiment_data::{MAX_DURATION_MS, MAX_POSITION, MIN_POSITION};
+        if [from, to]
+            .iter()
+            .any(|p| !(MIN_POSITION..=MAX_POSITION).contains(p))
+        {
+            return Err("GPIO approach exceeds encoder range");
+        }
+        let duration = u64::from(from.abs_diff(to)) * 400;
+        if duration + 1_000_000 > u64::from(MAX_DURATION_MS) * 1000 {
+            return Err("GPIO approach exceeds positioning time budget");
+        }
+        Ok(Self {
+            center_nm: 0,
+            amplitude_nm: 0,
+            frequency_mhz: 0,
+            duration_us: duration.max(1000) as u32,
+            start: from,
+            approach: Some(to),
+        })
+    }
+    pub fn end(&self) -> i32 {
+        self.approach.unwrap_or(self.start)
     }
     /// Derivative in um/s; integer phase avoids accumulated timing drift.
     pub fn velocity(&self, elapsed_us: u32) -> f64 {
@@ -77,7 +158,13 @@ impl Trajectory {
     }
     pub fn position(&self, elapsed_us: u32) -> i32 {
         if elapsed_us >= self.duration_us {
-            return self.start;
+            return self.end();
+        }
+        if let Some(to) = self.approach {
+            let phase = u64::from(elapsed_us) * TURN / (2 * u64::from(self.duration_us));
+            let delta = i64::from(to) - i64::from(self.start);
+            let displacement = delta * (Q - cosine(phase));
+            return self.start + ((displacement + if delta < 0 { -Q } else { Q }) / (2 * Q)) as i32;
         }
         let phase = u64::from(elapsed_us) * u64::from(self.frequency_mhz) % TURN;
         let nm = self.center_nm * Q - i64::from(self.amplitude_nm) * cosine(phase);
@@ -132,7 +219,7 @@ impl Pulses {
         let terminal = elapsed >= self.trajectory.duration_us;
         if self.high {
             self.high = false;
-            if terminal && self.position == self.trajectory.start {
+            if terminal && self.position == self.trajectory.end() {
                 self.status = Status::Complete;
             }
             return;
@@ -177,6 +264,58 @@ mod tests {
             cycles: n,
             control: crate::experiment_data::SineControl::Gpio,
         }
+    }
+    #[test]
+    fn gpio_preflight_checks_limits_reference_and_freshness_before_enable() {
+        let mut t = crate::protocol::Telemetry::new();
+        for (tag, value) in [
+            (b"GPIO", 2),
+            (b"STPS", 1),
+            (b"LLIM", -2000),
+            (b"HLIM", 2000),
+            (b"EPOS", 1000),
+            (b"DPOS", 1000),
+            (b"STAT", 1344),
+        ] {
+            t.record(tag, value, u32::MAX - 10);
+        }
+        assert_eq!(gpio_origin(config(7800, 1000, 1), &t, None, 1), Ok(1000));
+        t.record(b"DPOS", -1000, 1);
+        assert!(gpio_origin(config(7800, 1000, 1), &t, None, 1).is_err());
+        assert_eq!(
+            gpio_origin(config(7800, 1000, 1), &t, Some(1000), 1),
+            Ok(1000)
+        );
+        assert!(gpio_origin(config(7800, 1000, 1), &t, Some(1000), 251).is_err());
+        t.record(b"HLIM", 1050, 1);
+        assert!(gpio_origin(config(7800, 1000, 1), &t, Some(1000), 1).is_err());
+        t.record(b"HLIM", 2000, 1);
+        t.record(b"LLIM", 950, 1);
+        assert!(gpio_origin(config(7800, 1000, 1), &t, Some(1000), 1).is_err());
+    }
+    #[test]
+    fn approach_is_bounded_monotonic_and_returns_exact_pulse_count_with_irq_jitter() {
+        for (from, to) in [(0, 1), (1, 0), (-1000, 1000), (1000, -1000), (0, 0)] {
+            let t = Trajectory::approach(from, to).unwrap();
+            let mut p = Pulses::new(t);
+            let mut elapsed = 0;
+            let mut rises = 0;
+            while p.status == Status::Running {
+                elapsed += 28; // includes bounded interrupt work/jitter
+                p.tick(elapsed);
+                if p.high {
+                    rises += 1;
+                }
+                assert!((from.min(to)..=from.max(to)).contains(&p.position));
+                assert!(elapsed < t.duration_us + 200);
+            }
+            assert_eq!(p.status, Status::Complete);
+            assert_eq!(p.position, to);
+            assert_eq!(rises, from.abs_diff(to));
+            assert!(!p.high);
+        }
+        assert!(Trajectory::approach(i32::MIN, 0).is_err());
+        assert!(Trajectory::approach(0, 1_000_000).is_err());
     }
     #[test]
     fn conversion_cardinals_rate_and_bounds() {

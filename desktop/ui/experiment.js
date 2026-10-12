@@ -8,7 +8,7 @@ let mode='dashboard',view='dashboard',showResults=false,dataset=null,context=nul
 let sweep=null,history=[],selectedIndex=null,sweepTimer=null,historyLoading=false,validationCancelled=false;
 let phaseCache=new WeakMap(),sweepPhases=[];
 const plotNames=['position','pressure','sweep-phase'];
-const modes=['dashboard','quasi_static','sinusoidal','data','wip'];
+const modes=['dashboard','quasi_static','sinusoidal','data'];
 const fields=['start','increment','timing','repeats','speed'];
 const configurations={quasi_static:['0','1','1','3','10'],sinusoidal:['0','1','1','3','10']};
 function startBlocked({session,connected,hello,experimentUnresolved}) {
@@ -17,12 +17,11 @@ function startBlocked({session,connected,hello,experimentUnresolved}) {
   if(sweep)return 'Frequency sweep in progress. Press ABORT to stop it.';
   if(saving)return 'Wait for export to finish.';
   if(!connected||!session)return 'Connect the Teensy to start an experiment.';
-  if(session.gpioOwned)return 'GPIO owns motion. Wait for idle in WIP, or press its Stop button.';
   if(session.experimentOwned)return 'An experiment owns the hardware. Wait for its results or press ABORT.';
   if(experimentUnresolved)return 'Reconnect to recover the previous experiment before starting another.';
   if(!hello?.experiments)return 'Update the Teensy firmware to enable experiments.';
   if(mode==='quasi_static'&&!hello?.quasi_static_speed)return 'Update the Teensy firmware to enable quasi-static speed control.';
-  if(mode==='sinusoidal'&&!hello?.[`sine_serial_${$('experiment-control').value||'displacement'}`])return 'Update the Teensy firmware to enable the selected serial sine control mode.';
+  if(mode==='sinusoidal'&&!hello?.[$('experiment-control').value==='gpio'?'sine_gpio':`sine_serial_${$('experiment-control').value||'displacement'}`])return 'Update the Teensy firmware to enable the selected sine control mode.';
   if(session.pending)return 'Waiting for the current Teensy request to finish…';
   return '';
 }
@@ -63,7 +62,7 @@ export function experimentControls() {
   $('experiment-start-button').title=blocked;
   text('experiment-start-reason',blocked);
   $('experiment-start-reason').hidden=!blocked;
-  text('experiment-motion-detail',mode==='sinusoidal'?`${$('experiment-control').value==='velocity_position'?'Serial velocity control adds a bounded, gradual encoder position correction to reduce drift.':$('experiment-control').value==='velocity'?'Serial velocity control varies scan speed in 1 µm/s steps; position can drift.':'Serial displacement control uses small position targets and a varying speed limit to reduce jerking.'} All modes use a smooth approach ramp and start the sine at center − amplitude. They finish at the last cycle endpoint without returning to center. No GPIO wiring required. Lower frequencies allow more serial updates per cycle.`:'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.');
+  text('experiment-motion-detail',mode==='sinusoidal'?($('experiment-control').value==='gpio'?`GPIO Pulse/Direction controls the approach and x = center − A·cos(2πft) on the Teensy. Starts and finishes at center − amplitude; waits for encoder confirmation. Peak pulse limit: ${hello?.max_pulse_hz??10000} Hz.`:`${$('experiment-control').value==='velocity_position'?'Serial velocity control adds a bounded, gradual encoder position correction to reduce drift.':$('experiment-control').value==='velocity'?'Serial velocity control varies scan speed in 1 µm/s steps; position can drift.':'Serial displacement control uses small position targets and a varying speed limit to reduce jerking.'} All modes use a smooth approach ramp and start the sine at center − amplitude. They finish at the last cycle endpoint without returning to center. No GPIO wiring required. Lower frequencies allow more serial updates per cycle.`):'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.');
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
   $('experiment-abort').disabled=!connected||!owned;
   $('experiment-save').disabled=!!saving||owned||!dataset;
@@ -81,10 +80,9 @@ export function experimentControls() {
 function tab(next) {
   if(configurations[mode])configurations[mode]=fields.map(k=>$(`experiment-${k}`).value);
   view=next;
-  if(next!=='data'&&next!=='wip')mode=next;
+  if(next!=='data')mode=next;
   for(const name of modes)$(`tab-${name}`).setAttribute('aria-selected',String(view===name));
   $('dashboard-panel').hidden=view!=='dashboard';
-  $('wip-panel').hidden=view!=='wip';
   $('experiment-panel').hidden=!configurations[view];
   $('experiment-data-panel').hidden=view!=='data';
   if(configurations[view]){
@@ -100,7 +98,7 @@ function tab(next) {
 }
 export function experimentMessage(message) {
   if(message.type==='experiment_state') {
-    if(message.state!=='dashboard'&&(view==='dashboard'||view==='data'||view==='wip'))tab(configurations[mode]?mode:'quasi_static');
+    if(message.state!=='dashboard'&&(view==='dashboard'||view==='data'))tab(configurations[mode]?mode:'quasi_static');
     $('experiment-state').textContent=message.state==='running'?`Run ${message.run}: Teensy controlling experiment. Live telemetry paused.`:message.state==='data_ready'?`Run ${message.run}: downloading retained dataset…`:'Ready to configure an experiment.';
   }
   if(message.type==='experiment_ack') {
@@ -135,7 +133,7 @@ export function experimentMessage(message) {
     text('experiment-data-status','');
     text('experiment-data-summary',`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s`);
     text('experiment-force-calibration',dataset.samples.length?forceRangeLabel(dataset.samples.map(s=>s[2])):'No force samples');
-    $('experiment-result-summary').textContent=`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.reason} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s · CRC verified · missed samples ${m.missed_samples} · max logging lateness ${m.max_lateness_ms} ms${m.stop_queued?'':' · STOP could not be queued'}`;
+    $('experiment-result-summary').textContent=`${m.outcome.toUpperCase()} · Run ${m.run} · ${m.config.kind.replaceAll('_',' ')} · ${m.reason} · ${m.count} samples · ${(m.elapsed_ms/1000).toFixed(3)} s · CRC verified · missed samples ${m.missed_samples} · max logging lateness ${m.max_lateness_ms} ms${m.config.control==='gpio_pulse_direction'?' · GPIO output disabled':m.stop_queued?'':' · STOP could not be queued'}`;
     if(m.fault_stat!==undefined)$('experiment-result-summary').textContent+=` · Fault STAT ${m.fault_stat}`;
     if(m.timing){const t=m.timing;
       $('experiment-result-summary').textContent+=` · EPOS ${(t.epos.rate_millihz/1000).toFixed(1)} Hz (${t.epos.updates} updates), max gap ${t.epos.max_ms} ms, max receipt age ${t.max_epos_age_ms} ms, ${t.epos_repeated_records} repeated records · pressure ${(t.pressure.rate_millihz/1000).toFixed(1)} Hz · USB max service gap ${t.max_usb_service_gap_ms} ms, RX peak ${t.rx_peak_bytes} B · feedback settings ${t.feedback_verified?'verified':'unverified'}`;

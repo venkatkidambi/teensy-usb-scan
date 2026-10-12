@@ -16,6 +16,7 @@ mod tests {
         usb_failed: bool,
         gpio: Option<Status>,
         gpio_preparing: bool,
+        gpio_targets: Vec<i32>,
     }
     impl Actuator for Io {
         fn prepare_serial(&mut self, _: u32) -> Result<bool, &'static str> {
@@ -42,6 +43,11 @@ mod tests {
         fn prepare_gpio(&mut self, _: u32) -> Result<bool, &'static str> {
             assert!(self.serial.is_empty());
             Ok(!self.gpio_preparing && !self.busy)
+        }
+        fn position_gpio(&mut self, config: ExperimentConfig, _: u32) -> Result<(), &'static str> {
+            self.gpio_targets.push(config.start()?);
+            self.gpio = Some(Status::Complete);
+            Ok(())
         }
         fn start_gpio(&mut self, _: ExperimentConfig) -> Result<(), &'static str> {
             self.gpio = Some(Status::Running);
@@ -625,6 +631,9 @@ mod tests {
         let (t, p) = feedback(now, 0, true);
         e.accept(config, &t, p, false, now).unwrap();
         e.begin(now, io);
+        if config.control() == Some(SineControl::Gpio) {
+            e.poll(now, &t, p, io);
+        }
         if let Some(speed) = config.speed() {
             let (mut t, p) = feedback(now, 0, true);
             t.record(b"SSPD", i64::from(speed), now);
@@ -728,6 +737,9 @@ mod tests {
         t.record(b"STAT", 1089, 0);
         e.accept(sinusoidal(), &t, p, false, 0).unwrap();
         e.begin(0, &mut io);
+        e.poll(0, &t, p, &mut io);
+        t.record(b"EPOS", -100, 1);
+        t.record(b"STAT", 1089, 1);
         t.xeryon_motion.as_mut().unwrap().target = Some(-100);
         e.poll(1, &t, p, &mut io);
         e.poll(2, &t, p, &mut io);
@@ -737,6 +749,7 @@ mod tests {
         // STOP can leave both closed-loop and reached clear. DPOS re-enters
         // positioning; pre-command feedback must not immediately fault it.
         let mut e = Engine::new(&mut records);
+        t.record(b"EPOS", -100, 0);
         t.record(b"STAT", 1 | (1 << 5), 0);
         assert_eq!(
             e.accept(sinusoidal(), &t, p, false, 0),
@@ -749,6 +762,7 @@ mod tests {
         e.poll(1, &t, p, &mut io);
         assert_eq!(e.state, State::MoveToStart);
         t.record(b"STAT", 1089, 2);
+        t.record(b"EPOS", -100, 2);
         t.xeryon_motion.as_mut().unwrap().state = 2;
         e.poll(2, &t, p, &mut io);
         e.poll(3, &t, p, &mut io);
@@ -1011,7 +1025,9 @@ mod tests {
             e.poll(1, &t, p, &mut io);
             assert_eq!(e.state, State::MoveToStart);
             if config == sinusoidal() {
-                assert_eq!(io.targets, [(-100, 0, true)]);
+                assert!(io.targets.is_empty());
+                assert_eq!(io.gpio_targets, [-100]);
+                t.record(b"EPOS", -100, 2);
                 t.record(b"STAT", 1344, 2);
                 t.xeryon_motion.as_mut().unwrap().state = 2;
                 e.poll(2, &t, p, &mut io);
@@ -1077,7 +1093,7 @@ mod tests {
             assert!(e.data_ready(), "{condition}");
             // At 40 ms the due record is retained before the trajectory deadline faults.
             assert_eq!(e.len, if condition == 6 { 2 } else { 1 });
-            assert_eq!(io.stops, 1);
+            assert_eq!(io.stops, 0);
             assert_eq!(io.gpio, Some(Status::Stopped));
             if condition == 1 {
                 assert_eq!(e.reason, "Xeryon encoder error");
@@ -1191,7 +1207,7 @@ mod tests {
         );
     }
     #[test]
-    fn gpio_start_waits_for_arrival_then_finishes_after_stop_without_return() {
+    fn gpio_approach_and_completion_require_new_endpoint_feedback_without_serial_motion() {
         for begin in [0, u32::MAX - 900] {
             let mut records = [Record::EMPTY; 1024];
             let mut e = Engine::new(&mut records);
@@ -1202,44 +1218,44 @@ mod tests {
             let (t, p) = feedback(begin, 0, true);
             e.accept(sinusoidal(), &t, p, false, begin).unwrap();
             e.begin(begin, &mut io);
-            let (t, p) = feedback(begin.wrapping_add(1), -100, false);
             e.poll(begin.wrapping_add(1), &t, p, &mut io);
-            assert!(io.gpio.is_none());
-            let (t, p) = feedback(begin.wrapping_add(2), -100, true);
-            e.poll(begin.wrapping_add(2), &t, p, &mut io);
-            e.poll(begin.wrapping_add(3), &t, p, &mut io);
-            assert_eq!(e.state, State::Armed);
-            assert!(io.gpio.is_none());
+            assert!(io.gpio.is_none() && io.gpio_targets.is_empty());
             io.gpio_preparing = false;
+            e.poll(begin.wrapping_add(2), &t, p, &mut io);
+            assert_eq!(io.gpio_targets, [-100]);
+            // Stale reached and an off-target encoder cannot arm the waveform.
+            e.poll(begin.wrapping_add(3), &t, p, &mut io);
+            assert_eq!(e.state, State::MoveToStart);
+            let (t, p) = feedback(begin.wrapping_add(4), -99, true);
             e.poll(begin.wrapping_add(4), &t, p, &mut io);
+            assert_eq!(e.state, State::MoveToStart);
+            let (t, p) = feedback(begin.wrapping_add(5), -100, true);
+            e.poll(begin.wrapping_add(5), &t, p, &mut io);
+            assert_eq!(e.state, State::Armed);
+            e.poll(begin.wrapping_add(6), &t, p, &mut io);
             assert_eq!(io.gpio, Some(Status::Running));
-            assert!(io.speeds.is_empty());
             let boundary = e.started_ms.wrapping_add(1000);
             let (t, p) = feedback(boundary, -100, true);
             io.gpio = Some(Status::Complete);
-            io.busy = true;
+            io.busy = true; // USB transmit completion is irrelevant to GPIO arrival.
             e.poll(boundary, &t, p, &mut io);
-            assert_eq!(io.gpio, Some(Status::Stopped));
-            assert_eq!(io.stops, 1);
+            assert_eq!(io.gpio, Some(Status::Complete));
             e.poll(boundary.wrapping_add(1), &t, p, &mut io);
-            assert_eq!(io.targets.len(), 1);
             assert!(!e.data_ready());
-            io.busy = false;
-            let (mut t, p) = feedback(boundary.wrapping_add(2), -100, false);
-            t.record(b"STAT", 0, boundary.wrapping_add(2));
+            let (t, p) = feedback(boundary.wrapping_add(2), -100, true);
             e.poll(boundary.wrapping_add(2), &t, p, &mut io);
             assert_eq!(e.outcome, "completed");
             assert!(e.data_ready());
-            assert_eq!(io.targets.len(), 1);
-            assert_eq!(io.targets[0].0, -100);
-            assert_eq!(e.target, -100);
-            assert_eq!(io.stops, 1);
+            assert_eq!(io.gpio, Some(Status::Stopped));
+            assert!(io.targets.is_empty() && io.speeds.is_empty() && io.serial.is_empty());
+            assert_eq!(io.stops, 0);
+            assert!(!e.stop_queued);
             let mut metadata = crate::protocol::Frame::new();
             e.metadata(&mut metadata, 1).unwrap();
         }
     }
     #[test]
-    fn final_stop_timeout_or_abort_stops_gpio_and_retains_data() {
+    fn gpio_settling_timeout_or_abort_disables_output_and_retains_data() {
         for abort in [false, true] {
             let mut records = [Record::EMPTY; 1024];
             let mut e = Engine::new(&mut records);
@@ -1264,10 +1280,10 @@ mod tests {
                 if abort {
                     "PC ABORT"
                 } else {
-                    "Final STOP deadline"
+                    "GPIO final settling deadline"
                 }
             );
-            assert_eq!(io.targets.len(), 1);
+            assert!(io.targets.is_empty());
         }
     }
 }

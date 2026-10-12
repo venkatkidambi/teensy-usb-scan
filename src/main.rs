@@ -7,7 +7,6 @@ mod console;
 mod experiment;
 mod experiment_data;
 mod fault;
-mod gpio_control;
 mod gpio_trajectory;
 mod line;
 mod motor;

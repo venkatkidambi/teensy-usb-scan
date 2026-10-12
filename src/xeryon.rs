@@ -325,9 +325,11 @@ mod tests {
     fn gpio_setup_requires_ordered_fresh_matching_readbacks_and_times_out() {
         let mut t = crate::protocol::Telemetry::new();
         let mut s = GpioSetup::new();
-        for (i, expected) in ["STPS=1\n", "GPIO=2\n", "STPS=?\n", "GPIO=?\n"]
-            .iter()
-            .enumerate()
+        for (i, expected) in [
+            "STPS=1\n", "GPIO=2\n", "STPS=?\n", "GPIO=?\n", "LLIM=?\n", "HLIM=?\n",
+        ]
+        .iter()
+        .enumerate()
         {
             let now = i as u32 * 10;
             assert!(
@@ -341,12 +343,12 @@ mod tests {
             if i >= 2 {
                 assert!(!s.poll(now + 2, &t, true, |_| panic!()).unwrap());
                 t.record(
-                    if i == 2 { b"STPS" } else { b"GPIO" },
+                    [b"STPS", b"GPIO", b"LLIM", b"HLIM"][i - 2],
                     if i == 2 { 1 } else { 2 },
                     now + 3,
                 );
             }
-            assert_eq!(s.poll(now + 4, &t, true, |_| panic!()).unwrap(), i == 3);
+            assert_eq!(s.poll(now + 4, &t, true, |_| panic!()).unwrap(), i == 5);
         }
         for mismatch in [false, true] {
             let mut s = GpioSetup::new();
@@ -518,15 +520,28 @@ impl GpioSetup {
         idle: bool,
         mut send: impl FnMut(&[u8]) -> Result<(), &'static str>,
     ) -> Result<bool, &'static str> {
-        const COMMANDS: [&[u8]; 4] = [b"STPS=1\n", b"GPIO=2\n", b"STPS=?\n", b"GPIO=?\n"];
-        if self.step == 4 {
+        const COMMANDS: [&[u8]; 6] = [
+            b"STPS=1\n",
+            b"GPIO=2\n",
+            b"STPS=?\n",
+            b"GPIO=?\n",
+            b"LLIM=?\n",
+            b"HLIM=?\n",
+        ];
+        if self.step == 6 {
             return Ok(true);
         }
-        let index = if self.step % 2 == 0 { 1 } else { 0 };
+        let index = match self.step {
+            0 | 2 => 1,
+            1 | 3 => 0,
+            n => n - 2,
+        };
         if self.pending {
             let fresh = t.gpio[index].valid && t.gpio_updates[index] != self.generation;
             if idle && (self.step < 2 || fresh) {
-                if self.step >= 2 && t.gpio[index].value != if index == 0 { 2 } else { 1 } {
+                if (2..4).contains(&self.step)
+                    && t.gpio[index].value != if index == 0 { 2 } else { 1 }
+                {
                     return Err("GPIO/STPS readback mismatch");
                 }
                 self.step += 1;
@@ -542,6 +557,6 @@ impl GpioSetup {
         } else {
             return Err("GPIO setup transmit busy");
         }
-        Ok(self.step == 4)
+        Ok(self.step == 6)
     }
 }

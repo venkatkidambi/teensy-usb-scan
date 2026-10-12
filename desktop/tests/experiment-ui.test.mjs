@@ -73,10 +73,9 @@ test('START explains blockers, validates fields, submits once, and reports failu
       [state,'connected',false,/Connect the Teensy/],
       [state,'experimentUnresolved',true,/Reconnect/],
       [state.hello,'experiments',false,/enable experiments/],
-      [state.hello,'sine_serial_displacement',false,/serial sine control/],
+      [state.hello,'sine_serial_displacement',false,/sine control/],
       [state.session,'pending',true,/current Teensy request/],
       [state.session,'experimentOwned',true,/owns the hardware/],
-      [state.session,'gpioOwned',true,/GPIO owns motion/],
     ]){
       const old=object[key];object[key]=value;experimentControls();
       assert.equal(node('experiment-start-button').disabled,true);
@@ -95,16 +94,6 @@ test('START explains blockers, validates fields, submits once, and reports failu
     assert.equal(calls.length,0);
     node('experiment-repeats').reportValidity=()=>true;
     for(const [key,value] of Object.entries({start:'374.556',increment:'5',timing:'1',repeats:'5'}))node(`experiment-${key}`).value=value;
-    node('tab-wip').onclick();
-    assert.equal(node('wip-panel').hidden,false);
-    assert.equal(node('experiment-panel').hidden,true);
-    assert.equal(node('dashboard-panel').hidden,true);
-    node('tab-data').onclick();
-    assert.equal(node('wip-panel').hidden,true);
-    assert.equal(node('experiment-data-panel').hidden,false);
-    assert.equal(node('experiment-data-empty').hidden,false);
-    assert.equal(node('experiment-panel').hidden,true);
-    assert.equal(node('dashboard-panel').hidden,true);
     node('tab-sinusoidal').onclick();
     assert.equal(node('experiment-data-panel').hidden,true);
     assert.equal(node('experiment-panel').hidden,false);
@@ -131,12 +120,20 @@ test('START explains blockers, validates fields, submits once, and reports failu
     assert.equal(selected.sine_control,'velocity');
     assert.equal(node('experiment-state').textContent,'START failed: Bridge unavailable');
     assert.equal(node('experiment-start-button').disabled,false);
+    node('experiment-control').value='gpio';
+    experimentControls();
+    assert.equal(node('experiment-start-button').disabled,true);
+    state.hello.sine_gpio=true;experimentControls();
+    assert.equal(node('experiment-start-button').disabled,false);
+    assert.match(node('experiment-motion-detail').textContent,/GPIO Pulse\/Direction/);
+    await submit();
+    assert.equal(selected.sine_control,'gpio');
     node('experiment-control').value='velocity_position';
     node('experiment-control').onchange();
     assert.match(node('experiment-motion-detail').textContent,/gradual encoder position correction/);
     assert.equal(node('experiment-start-button').disabled,true);
     await submit();
-    assert.equal(selected.sine_control,'velocity');
+    assert.equal(selected.sine_control,'gpio');
     state.hello.sine_serial_velocity_position=true;experimentControls();
     assert.equal(node('experiment-start-button').disabled,false);
     await submit();

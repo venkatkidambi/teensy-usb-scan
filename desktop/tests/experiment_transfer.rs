@@ -153,7 +153,12 @@ impl engine::Actuator for Io {
     fn prepare_gpio(&mut self, _: u32) -> Result<bool, &'static str> {
         Ok(true)
     }
+    fn position_gpio(&mut self, _: ExperimentConfig, _: u32) -> Result<(), &'static str> {
+        self.complete = true;
+        Ok(())
+    }
     fn start_gpio(&mut self, _: ExperimentConfig) -> Result<(), &'static str> {
+        self.complete = false;
         Ok(())
     }
     fn gpio_status(&self) -> trajectory::Status {
@@ -325,10 +330,23 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         .unwrap();
     let mut io = Io { complete: false };
     e.begin(0, &mut io);
-    e.poll(1, &telemetry(1), pressure(1), &mut io);
+    e.poll(0, &telemetry(0), pressure(0), &mut io);
+    let endpoint = |now| {
+        let mut t = telemetry(now);
+        t.record(b"EPOS", -10, now);
+        t
+    };
+    e.poll(1, &endpoint(1), pressure(1), &mut io);
     for now in 2..=1012 {
-        io.complete = now >= 1002;
-        e.poll(now, &telemetry(now), pressure(now), &mut io);
+        if now > 2 {
+            io.complete = now >= 1002;
+        }
+        let t = if now == 2 || now > 1002 {
+            endpoint(now)
+        } else {
+            telemetry(now)
+        };
+        e.poll(now, &t, pressure(now), &mut io);
     }
     e.abort(&mut io); // A late ABORT cannot overwrite a completed run.
     assert_eq!(e.len, 51);
@@ -384,7 +402,7 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     }
     let dataset = dataset.unwrap();
     assert_eq!(dataset.samples.len(), 51);
-    assert_eq!(dataset.samples[0][1], -123);
+    assert_eq!(dataset.samples[0][1], -10);
     assert_eq!(dataset.samples[0][7], -10); // negative extremum at rest
     assert_eq!(dataset.samples[12][7], -1); // approaching center at t=240 ms
     assert_eq!(dataset.samples[25][7], 10); // positive extremum at half-cycle
@@ -395,8 +413,8 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         Some("-0.780")
     );
     assert_eq!(dataset.metadata["outcome"], "completed");
-    assert_eq!(dataset.metadata["final_return"]["error_counts"], -113);
-    assert_eq!(dataset.metadata["final_return"]["error_um"], -8.814);
+    assert_eq!(dataset.metadata["final_return"]["error_counts"], 0);
+    assert_eq!(dataset.metadata["final_return"]["error_um"], 0.0);
     assert_eq!(dataset.metadata["final_return"]["finished_ms"], 1003);
     assert_eq!(dataset.metadata["final_return"]["expired"], false);
     assert!(dataset.csv().contains("final_feedback"));
@@ -608,6 +626,7 @@ fn serial_selection_round_trips_from_ui_to_firmware() {
     }
     for (selection, suffix, control) in [
         (None, "D", experiment_data::SineControl::Displacement),
+        (Some("gpio"), "G", experiment_data::SineControl::Gpio),
         (
             Some("displacement"),
             "D",
@@ -634,7 +653,7 @@ fn serial_selection_round_trips_from_ui_to_firmware() {
         assert_eq!(config.control(), Some(control));
         assert!(config.validate().is_ok());
     }
-    let input: receiver::Input = serde_json::from_value(json!({"kind":"sinusoidal", "start_um":0, "increment_um":1, "timing":1, "repeats":1, "sine_control":"gpio"})).unwrap();
+    let input: receiver::Input = serde_json::from_value(json!({"kind":"sinusoidal", "start_um":0, "increment_um":1, "timing":1, "repeats":1, "sine_control":"unknown"})).unwrap();
     assert!(input.command(1).is_err());
 }
 #[path = "../../src/xeryon.rs"]

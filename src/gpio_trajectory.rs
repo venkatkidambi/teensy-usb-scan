@@ -31,9 +31,9 @@ struct Driver {
     direction: hal::gpio::Output,
     enable: hal::gpio::Output,
     run: Option<Pulses>,
-    burst: Option<crate::gpio_control::Burst>,
+    reference: Option<i32>,
+    positive: bool,
     index: hal::gpio::Output,
-    last_edge: u32,
     epoch: u32,
     heartbeat: u32,
     last_rise: u32,
@@ -43,7 +43,6 @@ impl Driver {
         self.enable.clear();
         self.pulse.clear();
         self.index.clear();
-        self.last_edge = self.timer.count();
         self.timer.set_output_interrupt_on_compare(Ocr::OCR1, false);
     }
 }
@@ -95,9 +94,9 @@ pub fn init(
             direction,
             enable,
             run: None,
-            burst: None,
+            reference: None,
+            positive: false,
             index,
-            last_edge: 0,
             epoch: 0,
             heartbeat: 0,
             last_rise: 0,
@@ -110,23 +109,52 @@ pub fn init(
 }
 pub fn start(config: ExperimentConfig) -> Result<(), &'static str> {
     let trajectory = Trajectory::new(config)?;
+    if position() != Some(trajectory.start) {
+        return Err("GPIO start reference mismatch");
+    }
+    activate(trajectory)
+}
+pub fn approach(from: i32, to: i32) -> Result<(), &'static str> {
+    activate(Trajectory::approach(from, to)?)
+}
+pub fn position() -> Option<i32> {
+    interrupt::free(|cs| {
+        DRIVER
+            .borrow(cs)
+            .borrow()
+            .as_ref()
+            .and_then(|d| d.reference)
+    })
+}
+pub fn invalidate_reference() {
+    interrupt::free(|cs| {
+        if let Some(d) = DRIVER.borrow(cs).borrow_mut().as_mut() {
+            d.reference = None;
+        }
+    });
+}
+fn activate(trajectory: Trajectory) -> Result<(), &'static str> {
     interrupt::free(|cs| {
         let mut slot = DRIVER.borrow(cs).borrow_mut();
         let d = slot.as_mut().ok_or("GPIO unavailable")?;
-        if d.burst
-            .as_ref()
-            .is_some_and(|b| matches!(b.status, Status::Running | Status::Complete))
-        {
-            return Err("GPIO pulse test busy");
+        if d.run.as_ref().is_some_and(|p| p.status == Status::Running) {
+            return Err("GPIO busy");
         }
-        d.burst = None;
-        d.low();
-        d.direction.set();
-        d.run = Some(Pulses::new(trajectory));
-        d.epoch = d.timer.count();
-        d.heartbeat = d.epoch;
-        d.last_rise = d.epoch;
+        // Preserve ENABLE and direction from the completed approach. No serial
+        // handoff, pulse, or direction transition occurs between trajectories.
+        let enabled = d.run.as_ref().is_some_and(|p| p.status == Status::Complete);
+        let mut pulses = Pulses::new(trajectory);
+        pulses.positive = d.positive;
+        d.run = Some(pulses);
+        d.reference = Some(trajectory.start);
+        d.pulse.clear();
         d.enable.set();
+        cortex_m::asm::dsb();
+        let now = d.timer.count();
+        // On first enable, allow 500 us setup before starting trajectory time.
+        d.epoch = now.wrapping_add(if enabled { 0 } else { 500 });
+        d.heartbeat = now;
+        d.last_rise = now;
         d.timer.clear_elapsed(Ocr::OCR1);
         d.timer
             .set_output_compare_count(Ocr::OCR1, d.epoch.wrapping_add(TICK_US));
@@ -148,63 +176,15 @@ pub fn stop() {
     interrupt::free(|cs| {
         if let Some(d) = DRIVER.borrow(cs).borrow_mut().as_mut() {
             d.low();
-            if let Some(b) = d.burst.as_mut() {
-                b.stop(Status::Stopped);
-            }
             if let Some(p) = d.run.as_mut() {
+                if p.status != Status::Complete {
+                    d.reference = None;
+                }
                 p.stop();
             }
         }
     });
 }
-/// Called only after the USB coordinator verifies configuration and takes ownership.
-pub fn start_steps(positive: bool, steps: u32) -> Result<(), &'static str> {
-    let burst = crate::gpio_control::Burst::new(steps)?;
-    interrupt::free(|cs| {
-        let mut slot = DRIVER.borrow(cs).borrow_mut();
-        let d = slot.as_mut().ok_or("GPIO unavailable")?;
-        if d.run.as_ref().is_some_and(|p| p.status == Status::Running)
-            || d.burst
-                .as_ref()
-                .is_some_and(|b| matches!(b.status, Status::Running | Status::Complete))
-            || d.timer.count().wrapping_sub(d.last_edge) < crate::gpio_control::HALF_US
-        {
-            return Err("GPIO busy or direction hold incomplete");
-        }
-        d.low();
-        d.run = None;
-        if positive {
-            d.direction.set();
-        } else {
-            d.direction.clear();
-        }
-        d.burst = Some(burst);
-        d.enable.set();
-        cortex_m::asm::dsb();
-        // Both DIR and ENABLE settle for >=500 us before the first rising edge.
-        d.last_edge = d.timer.count();
-        d.heartbeat = d.last_edge;
-        d.timer.clear_elapsed(Ocr::OCR1);
-        d.timer.set_output_compare_count(
-            Ocr::OCR1,
-            d.last_edge.wrapping_add(crate::gpio_control::HALF_US),
-        );
-        d.timer.set_output_interrupt_on_compare(Ocr::OCR1, true);
-        Ok(())
-    })
-}
-
-pub fn steps_status() -> Status {
-    interrupt::free(|cs| {
-        let mut slot = DRIVER.borrow(cs).borrow_mut();
-        let Some(d) = slot.as_mut() else {
-            return Status::Stopped;
-        };
-        d.heartbeat = d.timer.count();
-        d.burst.as_ref().map_or(Status::Stopped, |b| b.status)
-    })
-}
-
 /// Terminal fault path: interrupts are already disabled; never borrow state.
 pub fn emergency_low() {
     use hal::iomuxc::gpio::Pin;
@@ -227,53 +207,22 @@ extern "C" fn GPT1() {
             }
             d.timer.clear_elapsed(Ocr::OCR1);
             let now = d.timer.count();
-            if let Some(b) = d.burst.as_mut() {
-                if now.wrapping_sub(d.heartbeat) > 10_000 {
-                    b.stop(Status::Fault);
-                } else if now.wrapping_sub(d.last_edge) >= crate::gpio_control::HALF_US {
-                    b.tick();
-                }
-                if b.status == Status::Complete {
-                    // The pulse train is complete, but the XD-OEM may still be
-                    // tracking its last target. Keep ENABLE / DIR stable while
-                    // the coordinator waits for fresh position-reached feedback.
-                    // Continue servicing the timer so loss of the foreground
-                    // heartbeat still enforces the 10 ms watchdog deadline.
-                    d.pulse.clear();
-                    d.index.clear();
-                    d.timer.set_output_compare_count(
-                        Ocr::OCR1,
-                        d.timer.count().wrapping_add(crate::gpio_control::HALF_US),
-                    );
-                } else if b.status != Status::Running {
-                    d.low();
-                } else {
-                    if b.high {
-                        d.pulse.set();
-                    } else {
-                        d.pulse.clear();
-                    }
-                    cortex_m::asm::dsb();
-                    d.last_edge = d.timer.count();
-                    d.timer.set_output_compare_count(
-                        Ocr::OCR1,
-                        d.last_edge.wrapping_add(crate::gpio_control::HALF_US),
-                    );
-                }
-                return;
-            }
             if let Some(p) = d.run.as_mut() {
-                p.tick(now.wrapping_sub(d.epoch));
+                if p.status == Status::Running {
+                    p.tick(now.wrapping_sub(d.epoch));
+                }
                 if now.wrapping_sub(d.heartbeat) > 10_000 {
                     p.status = Status::Fault;
                     p.high = false;
                 }
-                if p.status != Status::Running {
+                if matches!(p.status, Status::Fault | Status::Stopped) {
+                    d.reference = None;
                     d.low();
                 } else {
                     if !p.high {
                         d.pulse.clear();
                     }
+                    d.positive = p.positive;
                     if p.positive {
                         d.direction.set();
                     } else {
@@ -285,12 +234,16 @@ extern "C" fn GPT1() {
                         if d.timer.count().wrapping_sub(d.last_rise) < 50 {
                             p.status = Status::Fault;
                             p.high = false;
+                            d.reference = None;
                             d.low();
                             return;
                         }
                         d.pulse.set();
                         d.last_rise = d.timer.count();
+                        d.reference = Some(p.position);
                     }
+                    // Complete holds ENABLE until fresh endpoint confirmation;
+                    // the watchdog remains active throughout settling.
                     // Schedule from the hardware clock after bounded work. The
                     // trajectory phase always uses actual time, never IRQ count.
                     d.timer
