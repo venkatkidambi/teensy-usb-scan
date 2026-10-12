@@ -240,6 +240,8 @@ test('GPIO commands validate, retain ownership until confirmed idle, and allow S
   const result={start:4295,expected:4395,epos:4394,dpos:4395,verified:true};
   const statusMessage={type:'gpio_status',id:1,state:'idle',error:'',test:result};
   assert.deepEqual(parseMessage(JSON.stringify(statusMessage)).test,result);
+  const retainedReference={start:25291,expected:25391,epos:25391,dpos:25291,verified:true};
+  assert.deepEqual(parseMessage(JSON.stringify({...statusMessage,test:retainedReference})).test,retainedReference);
   for(const test of [{...result,expected:33554432},{...result,epos:null},{...result,verified:'true'},{...result,epos:null,dpos:null}])assert.throws(()=>parseMessage(JSON.stringify({...statusMessage,test})),/GPIO test feedback/);
   assert.doesNotThrow(()=>parseMessage(JSON.stringify({...statusMessage,test:null})));
   for(const m of [

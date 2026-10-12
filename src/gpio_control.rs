@@ -80,13 +80,21 @@ pub fn target(
     Ok(target as i32)
 }
 
-/// A DPOS sample can still describe the previous target after the last pulse.
-/// Keep polling until fresh feedback confirms the requested target and the
-/// controller's position-reached flag. The coordinator bounds this wait.
-pub fn completed(t: &crate::protocol::Telemetry, expected: i32, now: u32, since: u32) -> bool {
-    position(t, now, since).is_ok()
-        && t.samples[1].value == i64::from(expected)
-        && t.samples[2].value & (1 << 10) != 0
+/// Some controllers retain the serial reference in USB DPOS after GPIO moves.
+/// Accept that readback only when EPOS exactly matches the pulse endpoint.
+/// Otherwise require matching DPOS and the controller's positioning tolerance.
+/// Both paths require fresh, stationary, fault-free, position-reached feedback;
+/// the coordinator confirms it across query rounds for at least 100 ms.
+pub fn completed(
+    t: &crate::protocol::Telemetry,
+    expected: i32,
+    origin: i32,
+    now: u32,
+    since: u32,
+) -> bool {
+    let target_confirmed = t.samples[1].value == i64::from(expected)
+        || (t.samples[1].value == i64::from(origin) && t.samples[0].value == i64::from(expected));
+    position(t, now, since).is_ok() && target_confirmed && t.samples[2].value & (1 << 10) != 0
 }
 
 pub struct Burst {
@@ -247,25 +255,61 @@ mod tests {
     }
 
     #[test]
-    fn completion_waits_for_target_feedback_and_stationary_reached_status() {
+    fn completion_accepts_retained_reference_only_at_exact_encoder_endpoint() {
         let mut t = baseline();
-        // Encoder has moved 100 counts, but USB still reports the old target.
-        t.record(b"EPOS", 4395, 201);
-        t.record(b"DPOS", 4295, 201);
+        // Reported hardware case: +100 counts, USB DPOS stays at the reference.
+        t.record(b"EPOS", 25391, 201);
+        t.record(b"DPOS", 25291, 201);
         t.record(b"STAT", 1344, 201);
-        assert!(!completed(&t, 4395, 202, 200));
-        t.record(b"DPOS", 4395, 203);
-        assert!(completed(&t, 4395, 204, 200));
+        assert!(completed(&t, 25391, 25291, 202, 200));
+        for epos in [25291, 25191, 25390, 25392] {
+            t.record(b"EPOS", epos, 201);
+            assert!(!completed(&t, 25391, 25291, 202, 200));
+        }
+        t.record(b"EPOS", 25391, 201);
+        t.record(b"DPOS", 25292, 201);
+        assert!(!completed(&t, 25391, 25291, 202, 200));
+        // The same rule works for negative travel.
+        t.record(b"EPOS", 25191, 201);
+        t.record(b"DPOS", 25291, 201);
+        assert!(completed(&t, 25191, 25291, 202, 200));
+    }
+
+    #[test]
+    fn both_completion_paths_require_fresh_stationary_fault_free_reached_feedback() {
+        for dpos in [4295, 4395] {
+            let mut t = baseline();
+            t.record(b"EPOS", 4395, 201);
+            t.record(b"DPOS", dpos, 201);
+            t.record(b"STAT", 1344, 201);
+            assert!(completed(&t, 4395, 4295, 202, 200));
+            for index in 0..3 {
+                let mut stale = t;
+                stale.samples[index].ms = 200;
+                assert!(!completed(&stale, 4395, 4295, 202, 200));
+                stale.samples[index].valid = false;
+                assert!(!completed(&stale, 4395, 4295, 202, 200));
+            }
+            assert!(!completed(&t, 4395, 4295, 451, 200));
+            for stat in [1 << 5, 1344 | (1 << 9), 1344 | (1 << 12)] {
+                t.record(b"STAT", stat, 201);
+                assert!(!completed(&t, 4395, 4295, 202, 200));
+            }
+            t.record(b"STAT", 1344, 201);
+            t.mounted = false;
+            assert!(!completed(&t, 4395, 4295, 202, 200));
+        }
+    }
+
+    #[test]
+    fn matching_dpos_preserves_controller_positioning_tolerance() {
+        let mut t = baseline();
+        t.record(b"EPOS", 4394, 201);
+        t.record(b"DPOS", 4395, 201);
+        t.record(b"STAT", 1344, 201);
+        assert!(completed(&t, 4395, 4295, 202, 200));
         // A new query round cannot reuse an old position-reached indication.
-        assert!(!completed(&t, 4395, 204, 202));
-        t.record(b"EPOS", 4394, 205);
-        t.record(b"STAT", 1 << 5, 205);
-        assert!(!completed(&t, 4395, 206, 200));
-        t.record(b"STAT", 1344, 207);
-        assert!(completed(&t, 4395, 208, 200));
-        assert!(!completed(&t, 4395, 500, 200));
-        t.record(b"STAT", 1344 | (1 << 12), 208);
-        assert!(!completed(&t, 4395, 209, 200));
+        assert!(!completed(&t, 4395, 4295, 204, 202));
     }
 
     #[test]

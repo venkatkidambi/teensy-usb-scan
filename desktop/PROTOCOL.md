@@ -112,6 +112,29 @@ Physical stop cannot be guaranteed if USB2 is unavailable. Desktop Stop preempts
 pending requests and closes USB1 if unacknowledged after 500 ms. Pausing snapshots
 does not pause firmware motion monitoring; periodic PING keeps its heartbeat alive.
 
+### Manual GPIO completion
+
+The WIP pulse test uses the synchronized serial reference plus signed pulse count
+as its expected endpoint. It polls EPOS, DPOS and STAT after pulsing, requiring
+each sample to be newer than the query round and less than 250 ms old. Completion
+requires stationary, fault-free, Position Reached feedback over at least 100 ms,
+within a five-second settling deadline. Target confirmation accepts either:
+
+- DPOS equals the expected endpoint, using the controller's positioning tolerance.
+- DPOS retains the confirmed serial reference and EPOS equals the expected
+  endpoint exactly. An unrelated DPOS or an encoder offset does not qualify for
+  this fallback.
+
+The second case covers the observed hardware result: start EPOS 25291, expected
+25391, measured EPOS 25391, USB DPOS 25291. `gpio_status.test` retains these raw
+counts before STOP / GPIO=0 restoration. A verified result may therefore contain
+different `dpos` and `expected` values. The desktop displays encoder endpoint
+error separately from USB DPOS difference. Preparation still requires DPOS to
+acknowledge the serial reference; GPIO ownership lasts through verified serial
+mode restoration.
+
+### Plunger feedback
+
 Plunger-enabled firmware reports `motion: true`. Snapshots include an additive
 `plunger` object: signed 32-bit `counts`, `counts_per_mm: 16688`, boolean `running`
 and `up`, PWM `speed` (0–255), and 12-bit `pot` (or null when unavailable).

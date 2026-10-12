@@ -215,13 +215,12 @@ impl GpioTest {
             return Err(if self.phase == GpioPhase::Synchronize {
                 "GPIO reference did not acknowledge or settle before timeout"
             } else if self.phase == GpioPhase::Settling {
-                if self
-                    .observed
-                    .is_some_and(|v| Some(v[1]) != self.expected.map(i64::from))
-                {
+                if self.observed.is_some_and(|v| {
+                    Some(v[1]) != self.expected.map(i64::from) && v[1] != i64::from(self.origin)
+                }) {
                     "GPIO target readback mismatch after 5 s; inspect last test counts"
                 } else {
-                    "GPIO position did not settle with fresh feedback within 5 s"
+                    "GPIO endpoint not confirmed within 5 s; inspect last test counts and status"
                 }
             } else {
                 "GPIO test phase timeout"
@@ -313,7 +312,13 @@ impl GpioTest {
                     // which may itself change the controller's reported target.
                     self.observed = Some([t.samples[0].value, t.samples[1].value]);
                     let complete = self.expected.is_some_and(|expected| {
-                        crate::gpio_control::completed(t, expected, now, self.query_since)
+                        crate::gpio_control::completed(
+                            t,
+                            expected,
+                            self.origin,
+                            now,
+                            self.query_since,
+                        )
                     });
                     if complete {
                         if self
@@ -328,8 +333,8 @@ impl GpioTest {
                     } else {
                         self.matched_since = None;
                     }
-                    // A delayed DPOS is pending feedback, not an immediate
-                    // wiring fault. Require new EPOS/DPOS/STAT on every round;
+                    // DPOS may lag or retain the serial reference. Require
+                    // new EPOS/DPOS/STAT on every confirmation round;
                     // the five-second phase deadline is never extended.
                     self.query_again(now);
                 }

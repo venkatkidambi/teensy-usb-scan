@@ -70,12 +70,13 @@ function gpioControls(){
   text('gpio-state',demo?'Demo':!connected?'Disconnected':!hello?.gpio_test?'Unavailable':labels[session?.gpioState]??'Checking status');
   $('gpio-state').className=`pill ${session?.gpioError?'warn':ready&&session?.gpioState==='idle'?'live':''}`;
   const test=session?.gpioTest;
-  text('gpio-message',session?.gpioError?`${session.gpioError}. ${reason||'Serial control restored; check feedback before retrying.'}`:reason||(test?.verified?'GPIO target confirmed; controller reported position reached. Serial control restored.':'Ready. Choose a direction, then check encoder and target feedback.'));
+  const confirmed=test?.verified?(test.dpos!==test.expected?'GPIO endpoint confirmed by encoder; USB DPOS retained the serial reference. Controller reported position reached. Serial control restored.':'GPIO target confirmed; controller reported position reached. Serial control restored.'):null;
+  text('gpio-message',session?.gpioError?`${session.gpioError}. ${reason||'Serial control restored; check feedback before retrying.'}`:reason||confirmed||'Ready. Choose a direction, then check encoder and target feedback.');
   text('gpio-distance',valid?`${+$('gpio-count').value} pulses · ${position(+$('gpio-count').value)} µm nominal travel`:'Enter a whole pulse count from 1 to 100.');
   for(const [id,tag] of [['gpio-epos','EPOS'],['gpio-dpos','DPOS']])text(id,age(snapshot?.values[tag])<3000?position(snapshot.values[tag].value):'—');
   text('gpio-expected',test?position(test.expected):'—');
   const delta=test?.epos==null?null:test.epos-test.start;
-  text('gpio-result',test?`Last test counts: start EPOS ${test.start}; expected target ${test.expected}; ${delta===null?'awaiting post-pulse feedback.':`measured EPOS ${test.epos} (${delta>=0?'+':''}${delta} counts / ${position(delta)} µm); USB DPOS ${test.dpos} (target difference ${test.dpos-test.expected} counts).`}`:'Last test readings will appear here, captured before serial control is restored.');
+  text('gpio-result',test?`Last test counts: start EPOS ${test.start}; expected target ${test.expected}; ${delta===null?'awaiting post-pulse feedback.':`measured EPOS ${test.epos} (${delta>=0?'+':''}${delta} counts / ${position(delta)} µm; endpoint error ${test.epos-test.expected} counts); USB DPOS ${test.dpos} (target difference ${test.dpos-test.expected} counts).`}`:'Last test readings will appear here, captured before serial control is restored.');
   text('gpio-feedback',ageText(snapshot?.values.EPOS));
 }
 function reset(){lastGpioPoll=0;limitsInitialized=false;pressureHistory=[];lastPressure=null;snapshot=null;hello=null;history=[];epoch=null;lastSample=null;lastPong=0;lastPing=0;streaming=true;text('rtt','—');text('session-label','NO SESSION');render();draw();}
