@@ -46,6 +46,7 @@ struct GpioTest {
     expected: i32,
     since: u32,
     query: usize,
+    tolerance_generations: [u32; 2],
     error: Option<&'static str>,
 }
 static GPIO_TEST: cortex_m::interrupt::Mutex<RefCell<GpioTest>> =
@@ -57,6 +58,7 @@ static GPIO_TEST: cortex_m::interrupt::Mutex<RefCell<GpioTest>> =
         expected: 0,
         since: 0,
         query: 0,
+        tolerance_generations: [0; 2],
         error: None,
     }));
 
@@ -108,6 +110,7 @@ pub fn start_gpio_test(positive: bool, steps: u32, now: u32) -> Result<(), &'sta
             expected: 0,
             since: now,
             query: 0,
+            tolerance_generations: [0; 2],
             error: None,
         };
     });
@@ -173,15 +176,29 @@ impl GpioTest {
                 }
                 if self.setup.poll(now, t, idle, send_gpio_line)? {
                     self.phase = GpioPhase::Baseline;
+                    self.tolerance_generations =
+                        [t.positioning_updates[0], t.positioning_updates[1]];
                     self.since = now;
                     self.query = 0;
                 }
             }
             GpioPhase::Baseline | GpioPhase::Settling => {
                 // Explicit queries work even when a parameter is not streamed.
-                const QUERIES: [&[u8]; 3] = [b"EPOS=?\n", b"DPOS=?\n", b"STAT=?\n"];
-                if idle && self.query < QUERIES.len() {
-                    send_gpio_line(QUERIES[self.query])?;
+                // Read tolerance first so the position/status baseline is recent.
+                // These are queries only; never change tuning or rebase DPOS.
+                let queries: &[&[u8]] = if self.phase == GpioPhase::Baseline {
+                    &[
+                        b"PTOL=?\n",
+                        b"PTO2=?\n",
+                        b"EPOS=?\n",
+                        b"DPOS=?\n",
+                        b"STAT=?\n",
+                    ]
+                } else {
+                    &[b"EPOS=?\n", b"DPOS=?\n", b"STAT=?\n"]
+                };
+                if idle && self.query < queries.len() {
+                    send_gpio_line(queries[self.query])?;
                     self.query += 1;
                     return Ok(());
                 }
@@ -191,33 +208,23 @@ impl GpioTest {
                         age > 0 && age < 0x8000_0000
                     }
                 });
-                if !idle || self.query < 3 || !fresh {
+                let tolerances_fresh = self.phase != GpioPhase::Baseline
+                    || (0..2).all(|i| {
+                        t.positioning[i].valid
+                            && t.positioning_updates[i] != self.tolerance_generations[i]
+                    });
+                if !idle || self.query < queries.len() || !fresh || !tolerances_fresh {
                     return Ok(());
                 }
                 if self.phase == GpioPhase::Baseline {
-                    motion::target(t, self.positive, self.steps * 78, now)?;
-                    // Pulses increment DPOS, not EPOS. Refuse a retained distant
-                    // target rather than enabling an unexpected catch-up move.
-                    if !(i64::from(motion::MIN_POSITION)..=i64::from(motion::MAX_POSITION))
-                        .contains(&t.samples[1].value)
-                    {
-                        return Err("GPIO DPOS out of range");
-                    }
-                    if (t.samples[1].value - t.samples[0].value).abs() > 1 {
-                        return Err("GPIO requires DPOS within one count of EPOS");
-                    }
-                    let target = t.samples[1].value
-                        + if self.positive {
-                            i64::from(self.steps)
-                        } else {
-                            -i64::from(self.steps)
-                        };
-                    if !(i64::from(motion::MIN_POSITION)..=i64::from(motion::MAX_POSITION))
-                        .contains(&target)
-                    {
-                        return Err("GPIO target out of range");
-                    }
-                    self.expected = target as i32;
+                    self.expected = crate::gpio_control::target(
+                        t,
+                        self.positive,
+                        self.steps,
+                        now,
+                        self.since,
+                        self.tolerance_generations,
+                    )?;
                     crate::gpio_trajectory::start_steps(self.positive, self.steps)?;
                     self.phase = GpioPhase::Pulsing;
                     self.since = now;
