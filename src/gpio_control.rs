@@ -6,52 +6,61 @@ use crate::trajectory::Status;
 pub const HALF_US: u32 = 500; // <= 1 kHz, below the manual's recommended 20 kHz
 pub const MAX_STEPS: u32 = 100; // 7.8 um with this setup's 78 nm encoder
 
-/// GPIO increments the existing target. A settled encoder need not equal it:
-/// XD-OEM PTOL / PTO2 define the controller's accepted positioning error.
-/// Keep an independent 100-count offset ceiling even with permissive tuning.
+/// A stopped controller can retain a target that differs from the encoder.
+/// Capture a fresh, stationary encoder reference before setting DPOS to it with
+/// GPIO disabled. This is preparation only; the requested increment uses pulses.
+pub fn position(t: &crate::protocol::Telemetry, now: u32, since: u32) -> Result<i32, &'static str> {
+    use crate::xeryon_motion as motion;
+    if !motion::ready(t) {
+        return Err("Xeryon is not connected");
+    }
+    let after = |s: crate::protocol::Sample| {
+        let age = s.ms.wrapping_sub(since);
+        s.valid && age > 0 && age < 0x8000_0000 && now.wrapping_sub(s.ms) < 250
+    };
+    if !t.samples[..3].iter().copied().all(after) {
+        return Err("GPIO baseline feedback stale");
+    }
+    if let Some(reason) = motion::controller_fault(t.samples[2].value) {
+        return Err(reason);
+    }
+    if motion::moving(t.samples[2].value) {
+        return Err("Xeryon is already moving");
+    }
+    for sample in &t.samples[..2] {
+        if !(i64::from(motion::MIN_POSITION)..=i64::from(motion::MAX_POSITION))
+            .contains(&sample.value)
+        {
+            return Err("GPIO position out of range");
+        }
+    }
+    Ok(t.samples[0].value as i32)
+}
+
+/// Verify the new reference before ENABLE is asserted. Tuning tolerances are
+/// completion criteria, not a prerequisite that the old target already match.
+/// Bound the entire target path, including preparation drift, to 100 counts
+/// from the latest encoder reading (7.8 um with this setup's 78 nm encoder).
 pub fn target(
     t: &crate::protocol::Telemetry,
     positive: bool,
     steps: u32,
     now: u32,
     since: u32,
-    generations: [u32; 2],
+    origin: i32,
 ) -> Result<i32, &'static str> {
     use crate::xeryon_motion as motion;
     if !(1..=MAX_STEPS).contains(&steps) {
         return Err("GPIO steps must be 1..100");
     }
-    motion::target(t, positive, steps * 78, now)?;
-    let after = |s: crate::protocol::Sample| {
-        let age = s.ms.wrapping_sub(since);
-        s.valid && age > 0 && age < 0x8000_0000 && now.wrapping_sub(s.ms) < 3000
-    };
-    if !t.samples[..3].iter().copied().all(after) {
-        return Err("GPIO baseline feedback stale");
+    let epos = i64::from(position(t, now, since)?);
+    if t.samples[1].value != i64::from(origin) {
+        return Err("GPIO reference DPOS readback mismatch");
     }
-    let mut tolerance = 0;
-    for (i, generation) in generations.into_iter().enumerate() {
-        let sample = t.positioning[i];
-        if !after(sample) || t.positioning_updates[i] == generation {
-            return Err("GPIO positioning tolerance readback missing or stale");
-        }
-        if !(0..=65535).contains(&sample.value) {
-            return Err("Invalid GPIO positioning tolerance");
-        }
-        tolerance = tolerance.max(sample.value);
+    if t.samples[2].value & (1 << 10) == 0 {
+        return Err("GPIO reference has not reached position");
     }
-    let dpos = t.samples[1].value;
-    if !(i64::from(motion::MIN_POSITION)..=i64::from(motion::MAX_POSITION)).contains(&dpos) {
-        return Err("GPIO DPOS out of range");
-    }
-    let gap = (dpos - t.samples[0].value).abs();
-    if gap > i64::from(MAX_STEPS) {
-        return Err("GPIO target offset exceeds 100 counts; check position using USB control");
-    }
-    if gap > tolerance {
-        return Err("GPIO target offset exceeds PTOL/PTO2; settle using USB control first");
-    }
-    let target = dpos
+    let target = i64::from(origin)
         + if positive {
             i64::from(steps)
         } else {
@@ -59,6 +68,14 @@ pub fn target(
         };
     if !(i64::from(motion::MIN_POSITION)..=i64::from(motion::MAX_POSITION)).contains(&target) {
         return Err("GPIO target out of range");
+    }
+    if (i64::from(origin) - epos).abs() > i64::from(MAX_STEPS)
+        || (target - epos).abs() > i64::from(MAX_STEPS)
+    {
+        return Err("GPIO reference drift exceeds test travel limit; retry with fewer pulses");
+    }
+    if (positive && target <= epos) || (!positive && target >= epos) {
+        return Err("GPIO reference drift opposes requested direction; check encoder feedback");
     }
     Ok(target as i32)
 }
@@ -126,55 +143,73 @@ mod tests {
     }
 
     #[test]
-    fn three_count_settled_offset_uses_reported_tolerance_and_preserves_target() {
+    fn stopped_offset_is_synchronized_before_pulses_even_with_tight_tuning() {
         let mut t = baseline();
-        assert_eq!(target(&t, true, 10, 102, 100, [0; 2]), Ok(4302));
-        assert_eq!(target(&t, false, 10, 102, 100, [0; 2]), Ok(4282));
-        // PTOL may be the larger setting; both values are controller readbacks.
-        t.record(b"PTOL", 3, 101);
+        // Both settings smaller than the reported three-count gap. Neither
+        // setting is changed or used to waive the preparation readback.
+        t.record(b"PTOL", 1, 101);
         t.record(b"PTO2", 2, 101);
-        assert!(target(&t, true, 10, 102, 100, [0; 2]).is_ok());
-        t.record(b"PTOL", 2, 101);
-        assert!(target(&t, true, 10, 102, 100, [0; 2]).is_err());
+        let origin = position(&t, 102, 100).unwrap();
+        assert_eq!(origin, 4295); // measured position, not retained DPOS 4292
+        assert!(target(&t, true, 10, 102, 100, origin).is_err());
+        // Post-command EPOS / DPOS / STAT must all arrive after preparation.
+        t.record(b"DPOS", i64::from(origin), 104);
+        assert!(target(&t, true, 10, 105, 102, origin).is_err());
+        t.record(b"EPOS", i64::from(origin), 104);
+        t.record(b"STAT", 1344, 104);
+        assert_eq!(target(&t, true, 10, 105, 102, origin), Ok(4305));
+        assert_eq!(target(&t, false, 10, 105, 102, origin), Ok(4285));
+        // Preparation must settle; motor-on without reached blocks ENABLE.
+        t.record(b"STAT", 1 << 5, 104);
+        assert!(target(&t, true, 10, 105, 102, origin).is_err());
     }
 
     #[test]
-    fn tolerance_preflight_rejects_stale_invalid_and_distant_baselines() {
-        let t = baseline();
-        for i in 0..2 {
-            let mut invalid = t;
-            invalid.positioning[i].valid = false;
-            assert!(target(&invalid, true, 10, 102, 100, [0; 2]).is_err());
-            invalid = t;
-            invalid.positioning[i].ms = 100;
-            assert!(target(&invalid, true, 10, 102, 100, [0; 2]).is_err());
-            invalid = t;
-            for value in [-1, 65536] {
-                invalid.positioning[i].value = value;
-                assert!(target(&invalid, true, 10, 102, 100, [0; 2]).is_err());
-            }
-            let mut generations = [0; 2];
-            generations[i] = t.positioning_updates[i];
-            assert!(target(&t, true, 10, 102, 100, generations).is_err());
+    fn preparation_rejects_stale_faulted_invalid_or_drifting_feedback() {
+        let mut t = baseline();
+        t.record(b"DPOS", 4295, 101);
+        t.record(b"STAT", 1344, 101);
+        for index in 0..3 {
+            let mut stale = t;
+            stale.samples[index].ms = 100;
+            assert!(position(&stale, 102, 100).is_err());
+            stale.samples[index].valid = false;
+            assert!(position(&stale, 102, 100).is_err());
         }
-        let mut distant = t;
-        distant.record(b"PTO2", 65535, 101);
-        distant.record(b"DPOS", 4396, 101); // 101 counts: independent safety cap
-        assert!(target(&distant, true, 10, 102, 100, [0; 2]).is_err());
-        distant.record(b"DPOS", i64::MIN, 101);
-        assert!(target(&distant, true, 10, 102, 100, [0; 2]).is_err());
-        let mut stale = t;
-        stale.samples[1].ms = 100;
-        assert!(target(&stale, true, 10, 102, 100, [0; 2]).is_err());
-        assert!(target(&t, true, 10, 4000, 100, [0; 2]).is_err());
+        assert!(position(&t, 351, 100).is_err());
+        let mut invalid = t;
+        invalid.record(b"DPOS", i64::MIN, 101);
+        assert!(position(&invalid, 102, 100).is_err());
+        invalid = t;
+        invalid.record(b"STAT", 1 << 12, 101);
+        assert!(position(&invalid, 102, 100).is_err());
+        // Range, direction, and total travel include the measured drift.
+        invalid = t;
+        invalid.record(b"EPOS", 4306, 101);
+        assert!(target(&invalid, true, 10, 102, 100, 4295).is_err());
+        invalid.record(b"EPOS", 4396, 101);
+        assert!(target(&invalid, true, 100, 102, 100, 4295).is_err());
+        invalid.record(b"EPOS", 4296, 101);
+        assert!(target(&invalid, false, 100, 102, 100, 4295).is_err());
+        assert_eq!(target(&invalid, false, 99, 102, 100, 4295), Ok(4196));
+        invalid.record(b"EPOS", i64::from(crate::xeryon_motion::MAX_POSITION), 101);
+        invalid.record(b"DPOS", i64::from(crate::xeryon_motion::MAX_POSITION), 101);
+        assert!(
+            target(
+                &invalid,
+                true,
+                1,
+                102,
+                100,
+                crate::xeryon_motion::MAX_POSITION
+            )
+            .is_err()
+        );
         let mut wrapped = t;
         for sample in &mut wrapped.samples[..3] {
             sample.ms = 1;
         }
-        for sample in &mut wrapped.positioning[..2] {
-            sample.ms = 1;
-        }
-        assert_eq!(target(&wrapped, true, 10, 2, u32::MAX, [0; 2]), Ok(4302));
+        assert_eq!(target(&wrapped, true, 10, 2, u32::MAX, 4295), Ok(4305));
     }
 
     #[test]
