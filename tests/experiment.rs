@@ -1208,7 +1208,7 @@ mod tests {
     }
     #[test]
     fn gpio_approach_and_completion_require_new_endpoint_feedback_without_serial_motion() {
-        for begin in [0, u32::MAX - 900] {
+        for (begin, offset) in [(0, 0), (0, -1), (u32::MAX - 900, 1)] {
             let mut records = [Record::EMPTY; 1024];
             let mut e = Engine::new(&mut records);
             let mut io = Io {
@@ -1226,23 +1226,27 @@ mod tests {
             // Stale reached and an off-target encoder cannot arm the waveform.
             e.poll(begin.wrapping_add(3), &t, p, &mut io);
             assert_eq!(e.state, State::MoveToStart);
-            let (t, p) = feedback(begin.wrapping_add(4), -99, true);
+            let (mut t, p) = feedback(begin.wrapping_add(4), -97, true);
+            t.record(b"PTOL", 1, begin.wrapping_add(4));
             e.poll(begin.wrapping_add(4), &t, p, &mut io);
             assert_eq!(e.state, State::MoveToStart);
-            let (t, p) = feedback(begin.wrapping_add(5), -100, true);
+            let (mut t, p) = feedback(begin.wrapping_add(5), -100 + offset, true);
+            t.record(b"PTOL", 1, begin.wrapping_add(5));
             e.poll(begin.wrapping_add(5), &t, p, &mut io);
             assert_eq!(e.state, State::Armed);
             e.poll(begin.wrapping_add(6), &t, p, &mut io);
             assert_eq!(io.gpio, Some(Status::Running));
             let boundary = e.started_ms.wrapping_add(1000);
-            let (t, p) = feedback(boundary, -100, true);
+            let (mut t, p) = feedback(boundary, -100 + offset, true);
+            t.record(b"PTOL", 1, boundary);
             io.gpio = Some(Status::Complete);
             io.busy = true; // USB transmit completion is irrelevant to GPIO arrival.
             e.poll(boundary, &t, p, &mut io);
             assert_eq!(io.gpio, Some(Status::Complete));
             e.poll(boundary.wrapping_add(1), &t, p, &mut io);
             assert!(!e.data_ready());
-            let (t, p) = feedback(boundary.wrapping_add(2), -100, true);
+            let (mut t, p) = feedback(boundary.wrapping_add(2), -100 + offset, true);
+            t.record(b"PTOL", 1, boundary.wrapping_add(2));
             e.poll(boundary.wrapping_add(2), &t, p, &mut io);
             assert_eq!(e.outcome, "completed");
             assert!(e.data_ready());

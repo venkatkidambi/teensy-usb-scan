@@ -835,7 +835,7 @@ impl<'a> Engine<'a> {
         [t.samples[0], t.samples[2]].iter().all(|s| {
             let age = s.ms.wrapping_sub(after);
             s.valid && age > 0 && age < 0x8000_0000 && now.wrapping_sub(s.ms) < 250
-        }) && t.samples[0].value == i64::from(target)
+        }) && crate::trajectory::gpio_within_ptol(t, target)
             && t.samples[2].value & (1 << 10) != 0
             && !xeryon_motion::moving(t.samples[2].value)
     }

@@ -36,6 +36,19 @@ fn cosine(phase: u64) -> i64 {
     (x * p / Q).clamp(-Q, Q)
 }
 
+/// Check physical settling without changing the commanded pulse coordinate.
+/// Setup reads PTOL from the controller; absent/invalid readback never widens
+/// exact equality. Do not assume the looser PTO2 fallback has become active.
+pub fn gpio_within_ptol(t: &crate::protocol::Telemetry, target: i32) -> bool {
+    let ptol = t.positioning[0];
+    let tolerance = if ptol.valid && (0..=65535).contains(&ptol.value) {
+        ptol.value as u64
+    } else {
+        0
+    };
+    t.samples[0].valid && t.samples[0].value.abs_diff(i64::from(target)) <= tolerance
+}
+
 /// Validate controller limits and establish an exact pulse reference before ENABLE.
 /// The cached DPOS is read-only diagnostics; no serial target is ever sent.
 pub fn gpio_origin(
@@ -82,9 +95,17 @@ pub fn gpio_origin(
         None if t.samples[1].valid && now.wrapping_sub(t.samples[1].ms) < 250 => t.samples[1].value,
         None => return Err("GPIO reference diagnostic is stale"),
     };
-    if origin != t.samples[0].value {
+    if origin < low || origin > high {
+        return Err("GPIO pulse reference exceeds controller travel limits");
+    }
+    // Pulses increment the controller target, not the measured encoder count.
+    // PTOL permits a small physical error at rest; never rebase the pulse count
+    // onto EPOS, which would shift every commanded point by that error.
+    if !gpio_within_ptol(t, origin as i32)
+        || (origin != t.samples[0].value && t.samples[2].value & (1 << 10) == 0)
+    {
         return Err(
-            "GPIO reference unconfirmed; encoder and retained target must agree before START",
+            "GPIO reference unconfirmed; encoder must be settled within PTOL of pulse target",
         );
     }
     Ok(origin as i32)
@@ -287,6 +308,49 @@ mod tests {
         t.record(b"HLIM", 2000, 1);
         t.record(b"LLIM", 950, 1);
         assert!(gpio_origin(config(7800, 1000, 1), &t, Some(1000), 1).is_err());
+    }
+    #[test]
+    fn gpio_reference_keeps_target_counts_when_encoder_settles_within_ptol() {
+        let mut t = crate::protocol::Telemetry::new();
+        for (tag, value) in [
+            (b"GPIO", 2),
+            (b"STPS", 1),
+            (b"LLIM", -2000),
+            (b"HLIM", 2000),
+            (b"EPOS", 999),
+            (b"DPOS", 1000),
+            (b"STAT", 1344),
+            (b"PTOL", 1),
+        ] {
+            t.record(tag, value, u32::MAX - 10);
+        }
+        for encoder in [999, 1000, 1001] {
+            t.record(b"EPOS", encoder, 1);
+            assert_eq!(gpio_origin(config(7800, 1000, 1), &t, None, 1), Ok(1000));
+            assert_eq!(
+                gpio_origin(config(7800, 1000, 1), &t, Some(1000), 1),
+                Ok(1000)
+            );
+        }
+        t.record(b"EPOS", 998, 1);
+        t.record(b"PTO2", 10, 1); // cannot assume fallback tolerance is active
+        assert!(gpio_origin(config(7800, 1000, 1), &t, None, 1).is_err());
+        t.record(b"EPOS", 999, 1);
+        t.record(b"STAT", 320, 1); // stationary but not position-reached
+        assert!(gpio_origin(config(7800, 1000, 1), &t, None, 1).is_err());
+        t.record(b"STAT", 1344, 1);
+        for ptol in [0, -1, 65536] {
+            t.record(b"PTOL", ptol, 1);
+            assert!(gpio_origin(config(7800, 1000, 1), &t, None, 1).is_err());
+        }
+        t.record(b"PTOL", 1, 1);
+        t.positioning[0].valid = false;
+        assert!(gpio_origin(config(7800, 1000, 1), &t, None, 1).is_err());
+        t.positioning[0].valid = true;
+        assert!(gpio_origin(config(7800, 1000, 1), &t, None, 251).is_err());
+        t.record(b"DPOS", 2001, 1);
+        t.record(b"EPOS", 2000, 1);
+        assert!(gpio_origin(config(7800, 1000, 1), &t, None, 1).is_err());
     }
     #[test]
     fn approach_is_bounded_monotonic_and_returns_exact_pulse_count() {
