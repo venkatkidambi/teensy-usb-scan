@@ -182,6 +182,26 @@ mod command_tests {
     #[test]
     fn xeryon_commands_are_bounded() {
         assert_eq!(
+            Command::parse(b"GPIO_MOVE 4 P 1"),
+            Ok(Command::GpioMove(4, true, 1))
+        );
+        assert_eq!(
+            Command::parse(b"GPIO_MOVE 5 N 100"),
+            Ok(Command::GpioMove(5, false, 100))
+        );
+        assert_eq!(Command::parse(b"GPIO_STATUS 6"), Ok(Command::GpioStatus(6)));
+        for bad in [
+            "GPIO_MOVE 1 P 0",
+            "GPIO_MOVE 1 P 101",
+            "GPIO_MOVE 0 N 1",
+            "GPIO_MOVE 1 X 1",
+            "GPIO_MOVE 1 N -1",
+            "GPIO_MOVE 1 P 1 extra",
+            "GPIO_STATUS 1 extra",
+        ] {
+            assert!(Command::parse(bad.as_bytes()).is_err(), "{bad}");
+        }
+        assert_eq!(
             Command::parse(b"XERYON_MOVE 1 U 10000 10000"),
             Ok(Command::XeryonMove(1, true, 10000, Some(10000)))
         );
@@ -443,3 +463,6 @@ mod xeryon_motion_tests {
 
 #[path = "../src/trajectory.rs"]
 mod trajectory;
+
+#[path = "../src/gpio_control.rs"]
+mod gpio_control;

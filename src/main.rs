@@ -7,6 +7,7 @@ mod console;
 mod experiment;
 mod experiment_data;
 mod fault;
+mod gpio_control;
 mod gpio_trajectory;
 mod line;
 mod motor;
@@ -47,16 +48,19 @@ fn main() -> ! {
         | (1 << <common::P12 as Pin<2>>::OFFSET)
         | (1 << <common::P7 as Pin<2>>::OFFSET)
         | (1 << <common::P8 as Pin<2>>::OFFSET)
-        | (1 << <common::P9 as Pin<2>>::OFFSET);
+        | (1 << <common::P9 as Pin<2>>::OFFSET)
+        | (1 << <common::P10 as Pin<2>>::OFFSET);
     const MOTOR_GPIO4_PINS: u32 =
         (1 << <common::P4 as Pin<4>>::OFFSET) | (1 << <common::P5 as Pin<4>>::OFFSET);
+    // Clear the standard-bank latches before selecting them, including warm starts.
+    gpio_trajectory::emergency_low();
     ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR27, |v| v
         & !MOTOR_GPIO2_PINS);
     ral::modify_reg!(ral::iomuxc_gpr, iomuxc_gpr, GPR29, |v| v
         & !MOTOR_GPIO4_PINS);
     cortex_m::asm::dsb();
 
-    gpio_trajectory::init(gpt1, &mut gpio2, pins.p7, pins.p8, pins.p9);
+    gpio_trajectory::init(gpt1, &mut gpio2, pins.p7, pins.p8, pins.p9, pins.p10);
     motor::init(
         motor::Pins {
             pwm: pins.p2,

@@ -25,6 +25,244 @@ static GPIO_SETUP: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::GpioSetup>>
 static FEEDBACK_SETUP: cortex_m::interrupt::Mutex<RefCell<crate::xeryon::FeedbackSetup>> =
     cortex_m::interrupt::Mutex::new(RefCell::new(crate::xeryon::FeedbackSetup::new()));
 
+// The test owns motion from the first STOP through verified GPIO=0 restoration.
+// A failed restoration keeps the interlock latched until XERYON_STOP retries it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GpioPhase {
+    Idle,
+    Stop,
+    Configure,
+    Baseline,
+    Pulsing,
+    Settling,
+    Restore,
+    Failed,
+}
+struct GpioTest {
+    phase: GpioPhase,
+    setup: crate::xeryon::GpioSetup,
+    positive: bool,
+    steps: u32,
+    expected: i32,
+    since: u32,
+    query: usize,
+    error: Option<&'static str>,
+}
+static GPIO_TEST: cortex_m::interrupt::Mutex<RefCell<GpioTest>> =
+    cortex_m::interrupt::Mutex::new(RefCell::new(GpioTest {
+        phase: GpioPhase::Idle,
+        setup: crate::xeryon::GpioSetup::new(),
+        positive: true,
+        steps: 0,
+        expected: 0,
+        since: 0,
+        query: 0,
+        error: None,
+    }));
+
+pub fn gpio_busy() -> bool {
+    cortex_m::interrupt::free(|cs| GPIO_TEST.borrow(cs).borrow().phase != GpioPhase::Idle)
+}
+
+pub fn gpio_test_status() -> (&'static str, Option<&'static str>) {
+    cortex_m::interrupt::free(|cs| {
+        let test = GPIO_TEST.borrow(cs).borrow();
+        (
+            match test.phase {
+                GpioPhase::Idle => "idle",
+                GpioPhase::Stop => "stopping",
+                GpioPhase::Configure => "configuring",
+                GpioPhase::Baseline => "baseline",
+                GpioPhase::Pulsing => "pulsing",
+                GpioPhase::Settling => "settling",
+                GpioPhase::Restore => "restoring",
+                GpioPhase::Failed => "failed",
+            },
+            test.error,
+        )
+    })
+}
+
+pub fn start_gpio_test(positive: bool, steps: u32, now: u32) -> Result<(), &'static str> {
+    if gpio_busy() || AUTONOMOUS.load(Ordering::Relaxed) {
+        return Err("GPIO or experiment busy");
+    }
+    crate::gpio_control::Burst::new(steps)?;
+    let t = telemetry();
+    if t.xeryon_motion.is_some_and(|m| m.state == 1) {
+        return Err("USB motion busy");
+    }
+    crate::xeryon_motion::target(&t, positive, steps * 78, now)?;
+    if !unsafe { usb_serial_tx_idle() } {
+        return Err("USB transmit busy");
+    }
+    crate::gpio_trajectory::stop();
+    // An accepted test starts with STOP, never with a pulse or an index command.
+    send_gpio_line(b"STOP\n")?;
+    cortex_m::interrupt::free(|cs| {
+        *GPIO_TEST.borrow(cs).borrow_mut() = GpioTest {
+            phase: GpioPhase::Stop,
+            setup: crate::xeryon::GpioSetup::new(),
+            positive,
+            steps,
+            expected: 0,
+            since: now,
+            query: 0,
+            error: None,
+        };
+    });
+    Ok(())
+}
+
+fn send_gpio_line(bytes: &[u8]) -> Result<(), &'static str> {
+    // Foreground only; C copies a complete bounded line. STOP discards queued TX.
+    if unsafe { usb_serial_send(bytes.as_ptr(), bytes.len() as u32, bytes == b"STOP\n") } {
+        Ok(())
+    } else {
+        Err("GPIO USB transmit unavailable")
+    }
+}
+
+impl GpioTest {
+    fn restore(&mut self, now: u32) {
+        crate::gpio_trajectory::stop();
+        self.phase = GpioPhase::Restore;
+        self.setup = crate::xeryon::GpioSetup::new();
+        self.since = now;
+    }
+
+    fn poll(&mut self, t: &crate::protocol::Telemetry, now: u32) -> Result<(), &'static str> {
+        use crate::{trajectory::Status, xeryon_motion as motion};
+        if matches!(self.phase, GpioPhase::Idle | GpioPhase::Failed) {
+            return Ok(());
+        }
+        let idle = unsafe { usb_serial_tx_idle() };
+        if !motion::ready(t) || unsafe { usb_serial_tx_failed() } {
+            return Err("GPIO USB connection lost or transmit failed");
+        }
+        if self.phase == GpioPhase::Restore {
+            if now.wrapping_sub(self.since) >= 5000 {
+                return Err("GPIO restore timeout; retry XERYON_STOP");
+            }
+            // A priority STOP may still be draining from the preceding poll.
+            if !idle {
+                return Ok(());
+            }
+            if self.setup.poll_serial(now, t, idle, send_gpio_line)? {
+                self.phase = GpioPhase::Idle;
+            }
+            return Ok(());
+        }
+        if let Some(reason) = motion::controller_fault(t.samples[2].value) {
+            return Err(reason);
+        }
+        if !motion::fresh(t, 0, now) || !motion::fresh(t, 2, now) {
+            return Err("GPIO position/status feedback stale");
+        }
+        if now.wrapping_sub(self.since) >= 5000 {
+            return Err("GPIO test phase timeout");
+        }
+        match self.phase {
+            GpioPhase::Stop if idle => {
+                self.phase = GpioPhase::Configure;
+                self.since = now;
+            }
+            GpioPhase::Configure => {
+                if !idle {
+                    return Ok(());
+                }
+                if self.setup.poll(now, t, idle, send_gpio_line)? {
+                    self.phase = GpioPhase::Baseline;
+                    self.since = now;
+                    self.query = 0;
+                }
+            }
+            GpioPhase::Baseline | GpioPhase::Settling => {
+                // Explicit queries work even when a parameter is not streamed.
+                const QUERIES: [&[u8]; 3] = [b"EPOS=?\n", b"DPOS=?\n", b"STAT=?\n"];
+                if idle && self.query < QUERIES.len() {
+                    send_gpio_line(QUERIES[self.query])?;
+                    self.query += 1;
+                    return Ok(());
+                }
+                let fresh = t.samples[..3].iter().all(|s| {
+                    s.valid && {
+                        let age = s.ms.wrapping_sub(self.since);
+                        age > 0 && age < 0x8000_0000
+                    }
+                });
+                if !idle || self.query < 3 || !fresh {
+                    return Ok(());
+                }
+                if self.phase == GpioPhase::Baseline {
+                    motion::target(t, self.positive, self.steps * 78, now)?;
+                    // Pulses increment DPOS, not EPOS. Refuse a retained distant
+                    // target rather than enabling an unexpected catch-up move.
+                    if !(i64::from(motion::MIN_POSITION)..=i64::from(motion::MAX_POSITION))
+                        .contains(&t.samples[1].value)
+                    {
+                        return Err("GPIO DPOS out of range");
+                    }
+                    if (t.samples[1].value - t.samples[0].value).abs() > 1 {
+                        return Err("GPIO requires DPOS within one count of EPOS");
+                    }
+                    let target = t.samples[1].value
+                        + if self.positive {
+                            i64::from(self.steps)
+                        } else {
+                            -i64::from(self.steps)
+                        };
+                    if !(i64::from(motion::MIN_POSITION)..=i64::from(motion::MAX_POSITION))
+                        .contains(&target)
+                    {
+                        return Err("GPIO target out of range");
+                    }
+                    self.expected = target as i32;
+                    crate::gpio_trajectory::start_steps(self.positive, self.steps)?;
+                    self.phase = GpioPhase::Pulsing;
+                    self.since = now;
+                } else if t.samples[1].value != i64::from(self.expected) {
+                    return Err("GPIO DPOS mismatch; verify pulse wiring and direction");
+                } else if !motion::moving(t.samples[2].value) && t.samples[2].value & (1 << 10) != 0
+                {
+                    self.restore(now);
+                } else {
+                    // Get another position/status set while the controller settles.
+                    self.query = 0;
+                }
+            }
+            GpioPhase::Pulsing => match crate::gpio_trajectory::steps_status() {
+                Status::Running => {}
+                Status::Complete => {
+                    self.phase = GpioPhase::Settling;
+                    self.since = now;
+                    self.query = 0;
+                }
+                _ => return Err("GPIO pulse train stopped or watchdog expired"),
+            },
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+fn poll_gpio_test(t: &crate::protocol::Telemetry, now: u32) {
+    cortex_m::interrupt::free(|cs| {
+        let mut test = GPIO_TEST.borrow(cs).borrow_mut();
+        if let Err(reason) = test.poll(t, now) {
+            crate::gpio_trajectory::stop();
+            let _ = send_gpio_line(b"STOP\n");
+            test.error = Some(reason);
+            if test.phase == GpioPhase::Restore {
+                test.phase = GpioPhase::Failed;
+            } else {
+                test.restore(now);
+            }
+            log::warn!("GPIO test: {}", reason);
+        }
+    });
+}
+
 pub fn telemetry() -> crate::protocol::Telemetry {
     cortex_m::interrupt::free(|cs| {
         let mut t = *CACHE.borrow(cs).borrow();
@@ -48,6 +286,9 @@ pub fn heartbeat(now: u32) {
 }
 
 pub fn move_xeryon(up: bool, nm: u32, speed: Option<u32>, now: u32) -> Result<i32, &'static str> {
+    if gpio_busy() {
+        return Err("GPIO owns motion; wait for idle or XERYON_STOP");
+    }
     let t = telemetry();
     if t.xeryon_motion.is_some_and(|m| m.state == 1) {
         return Err("Wait for the Xeryon move to finish or press Stop");
@@ -81,6 +322,12 @@ pub fn move_xeryon(up: bool, nm: u32, speed: Option<u32>, now: u32) -> Result<i3
 
 pub fn stop_xeryon() -> Result<(), &'static str> {
     crate::gpio_trajectory::stop();
+    cortex_m::interrupt::free(|cs| {
+        let mut test = GPIO_TEST.borrow(cs).borrow_mut();
+        if test.phase != GpioPhase::Idle {
+            test.restore(millis());
+        }
+    });
     if !crate::xeryon_motion::ready(&telemetry()) {
         return Err("Xeryon is not connected");
     }
@@ -96,7 +343,7 @@ pub fn stop_xeryon() -> Result<(), &'static str> {
 
 pub fn disconnect_xeryon() {
     let active = cortex_m::interrupt::free(|cs| MOTION.borrow(cs).borrow().state == 1);
-    if active && !AUTONOMOUS.load(Ordering::Relaxed) {
+    if (active || gpio_busy()) && !AUTONOMOUS.load(Ordering::Relaxed) {
         let _ = stop_xeryon();
     }
 }
@@ -201,6 +448,7 @@ pub fn poll() {
     // SAFETY: host task is called only from the single main-loop context.
     unsafe { scanner_task() };
     let t = telemetry();
+    poll_gpio_test(&t, millis());
     let stop = cortex_m::interrupt::free(|cs| {
         let mut motion = MOTION.borrow(cs).borrow_mut();
         if AUTONOMOUS.load(Ordering::Relaxed) {
@@ -241,6 +489,9 @@ pub fn rx_pending() -> bool {
 pub struct ExperimentActuator;
 impl crate::experiment::Actuator for ExperimentActuator {
     fn prepare_serial(&mut self, now: u32) -> Result<bool, &'static str> {
+        if gpio_busy() {
+            return Err("GPIO test owns motion");
+        }
         crate::gpio_trajectory::stop();
         let t = telemetry();
         cortex_m::interrupt::free(|cs| {
@@ -261,6 +512,9 @@ impl crate::experiment::Actuator for ExperimentActuator {
         &mut self,
         commands: &[crate::experiment::serial_sine::Command],
     ) -> Result<(), &'static str> {
+        if gpio_busy() {
+            return Err("GPIO test owns motion");
+        }
         if !self.tx_idle() {
             return Err("Serial waveform previous transmit incomplete");
         }
@@ -312,6 +566,9 @@ impl crate::experiment::Actuator for ExperimentActuator {
         crate::experiment::final_return::TxProgress(values)
     }
     fn prepare_gpio(&mut self, now: u32) -> Result<bool, &'static str> {
+        if gpio_busy() {
+            return Err("GPIO test owns motion");
+        }
         let t = telemetry();
         cortex_m::interrupt::free(|cs| {
             GPIO_SETUP
@@ -330,6 +587,9 @@ impl crate::experiment::Actuator for ExperimentActuator {
         &mut self,
         config: crate::experiment_data::ExperimentConfig,
     ) -> Result<(), &'static str> {
+        if gpio_busy() {
+            return Err("GPIO test owns motion");
+        }
         crate::gpio_trajectory::start(config)
     }
     fn gpio_status(&self) -> crate::trajectory::Status {
@@ -370,6 +630,9 @@ impl crate::experiment::Actuator for ExperimentActuator {
         Ok(())
     }
     fn target(&mut self, target: i32, now: u32, track: bool) -> Result<(), &'static str> {
+        if gpio_busy() {
+            return Err("GPIO test owns motion");
+        }
         // SAFETY: foreground-only query into the existing C transport. Fault
         // instead of queuing a target behind an unfinished USB transfer.
         if !unsafe { usb_serial_tx_idle() } {

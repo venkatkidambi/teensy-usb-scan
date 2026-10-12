@@ -269,6 +269,18 @@ impl Console {
                         .error(id, "Experiment busy; retained data must be acknowledged");
                     return;
                 }
+                if crate::usb_host::gpio_busy()
+                    && matches!(
+                        command,
+                        Ok(Command::Start(..) | Command::XeryonMove(..) | Command::GpioMove(..))
+                    )
+                {
+                    let id = command.as_ref().map(|c| c.id()).unwrap_or(0);
+                    let _ = self
+                        .tx
+                        .error(id, "GPIO owns motion; wait for idle or XERYON_STOP");
+                    return;
+                }
                 if command.is_ok() && !experiment.owns_hardware() {
                     crate::motor::heartbeat(now);
                     crate::usb_host::heartbeat(now);
@@ -361,12 +373,29 @@ impl Console {
                     }
                     Ok(Command::Hello(id)) => writeln!(
                         self.tx,
-                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"quasi_static_speed\":true,\"sine_position\":true,\"sine_gpio\":false,\"sine_serial_displacement\":true,\"sine_serial_velocity\":true,\"sine_serial_velocity_position\":true,\"max_pulse_hz\":{}}}",
+                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"quasi_static_speed\":true,\"sine_position\":true,\"sine_gpio\":false,\"gpio_test\":true,\"sine_serial_displacement\":true,\"sine_serial_velocity\":true,\"sine_serial_velocity_position\":true,\"max_pulse_hz\":{}}}",
                         env!("CARGO_PKG_VERSION"),
                         crate::experiment_data::MAX_PULSE_HZ
                     ),
                     Ok(Command::Ping(id)) => {
                         writeln!(self.tx, "{{\"type\":\"pong\",\"id\":{id},\"ms\":{now}}}")
+                    }
+                    Ok(Command::GpioMove(id, positive, steps)) => {
+                        match crate::usb_host::start_gpio_test(positive, steps, now) {
+                            Ok(()) => writeln!(
+                                self.tx,
+                                "{{\"type\":\"gpio_ack\",\"id\":{id},\"action\":\"accepted\",\"steps\":{steps}}}"
+                            ),
+                            Err(message) => self.tx.error(id, message),
+                        }
+                    }
+                    Ok(Command::GpioStatus(id)) => {
+                        let (state, error) = crate::usb_host::gpio_test_status();
+                        writeln!(
+                            self.tx,
+                            "{{\"type\":\"gpio_status\",\"id\":{id},\"state\":\"{state}\",\"error\":\"{}\"}}",
+                            error.unwrap_or("")
+                        )
                     }
                     Ok(Command::XeryonMove(id, up, nm, speed)) => {
                         match crate::usb_host::move_xeryon(up, nm, speed, now) {

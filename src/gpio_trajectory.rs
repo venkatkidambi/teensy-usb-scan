@@ -1,12 +1,9 @@
-//! XD-C v3.0 manual sections 5.1 / 7.2 (2025-07-28): GPIO=2, STPS=1.
-//! Teensy 7 -> bank 1 pin 23 DI0/PULSE, 8 -> pin 25 DI1/DIRECTION,
-//! 9 -> pin 27 DI2/ENABLE; Teensy GND -> pin 19 GND. These inputs are
-//! documented 3.3 V, matching Teensy outputs: no level shifter for this XD-C.
-//! Never connect 5 V/48 V pins to Teensy. Verify bank/revision before wiring;
-//! a different controller with higher-voltage inputs requires a suitable buffer.
-//! External 10k pulldowns on PULSE and ENABLE keep them inactive during reset.
-//! Hold INDEX (pin 30) low to prevent unintended index searches.
-//! Direction high selects increment; verify physical positive direction unloaded.
+//! XD-OEM manual sections 5.1 / 7.3: GPIO=2, STPS=1, 3.3 V logic.
+//! Teensy 7/8/9/10 -> XD-OEM 13 PULSE / 14 DIRECTION / 15 ENABLE / 16 INDEX.
+//! Ground is shared through USB host. INDEX is always driven low, never pulsed.
+//! External pulldowns on PULSE, ENABLE and INDEX are needed to hold them low
+//! before firmware initialization / during reset (internal pulls start at init).
+//! Direction high is used for positive steps; verify sign against EPOS unloaded.
 //! GPT1 free-runs at 1 MHz. Compare IRQs evaluate absolute elapsed time, with
 //! at most one edge each; no catch-up bursts, USB calls, allocation, or waits.
 use crate::{
@@ -34,6 +31,9 @@ struct Driver {
     direction: hal::gpio::Output,
     enable: hal::gpio::Output,
     run: Option<Pulses>,
+    burst: Option<crate::gpio_control::Burst>,
+    index: hal::gpio::Output,
+    last_edge: u32,
     epoch: u32,
     heartbeat: u32,
     last_rise: u32,
@@ -42,6 +42,8 @@ impl Driver {
     fn low(&mut self) {
         self.enable.clear();
         self.pulse.clear();
+        self.index.clear();
+        self.last_edge = self.timer.count();
         self.timer.set_output_interrupt_on_compare(Ocr::OCR1, false);
     }
 }
@@ -51,6 +53,7 @@ pub fn init(
     mut pulse: common::P7,
     mut direction: common::P8,
     mut enable: common::P9,
+    mut index: common::P10,
 ) {
     let cfg = hal::iomuxc::Config::zero()
         .set_drive_strength(hal::iomuxc::DriveStrength::R0_7)
@@ -58,14 +61,26 @@ pub fn init(
     hal::iomuxc::configure(&mut pulse, cfg);
     hal::iomuxc::configure(&mut direction, cfg);
     hal::iomuxc::configure(&mut enable, cfg);
+    hal::iomuxc::configure(&mut index, cfg);
     // Clear output latches before switching pad direction, including warm starts.
     emergency_low();
+    // Direction latch is also cleared before muxing it to an output.
+    use hal::iomuxc::gpio::Pin;
+    let bank = unsafe { &*ral::gpio::GPIO2 };
+    ral::write_reg!(
+        ral::gpio,
+        bank,
+        DR_CLEAR,
+        1 << <common::P8 as Pin<2>>::OFFSET
+    );
     let pulse = gpio.output(pulse).unwrap();
     pulse.clear();
     let direction = gpio.output(direction).unwrap();
     direction.clear();
     let enable = gpio.output(enable).unwrap();
     enable.clear();
+    let index = gpio.output(index).unwrap();
+    index.clear();
     timer.disable();
     timer.set_clock_source(ClockSource::PeripheralClock);
     timer.set_divider(board::PERCLK_FREQUENCY / 1_000_000);
@@ -80,6 +95,9 @@ pub fn init(
             direction,
             enable,
             run: None,
+            burst: None,
+            index,
+            last_edge: 0,
             epoch: 0,
             heartbeat: 0,
             last_rise: 0,
@@ -95,6 +113,13 @@ pub fn start(config: ExperimentConfig) -> Result<(), &'static str> {
     interrupt::free(|cs| {
         let mut slot = DRIVER.borrow(cs).borrow_mut();
         let d = slot.as_mut().ok_or("GPIO unavailable")?;
+        if d.burst
+            .as_ref()
+            .is_some_and(|b| b.status == Status::Running)
+        {
+            return Err("GPIO pulse test busy");
+        }
+        d.burst = None;
         d.low();
         d.direction.set();
         d.run = Some(Pulses::new(trajectory));
@@ -123,12 +148,63 @@ pub fn stop() {
     interrupt::free(|cs| {
         if let Some(d) = DRIVER.borrow(cs).borrow_mut().as_mut() {
             d.low();
+            if let Some(b) = d.burst.as_mut() {
+                b.stop(Status::Stopped);
+            }
             if let Some(p) = d.run.as_mut() {
                 p.stop();
             }
         }
     });
 }
+/// Called only after the USB coordinator verifies configuration and takes ownership.
+pub fn start_steps(positive: bool, steps: u32) -> Result<(), &'static str> {
+    let burst = crate::gpio_control::Burst::new(steps)?;
+    interrupt::free(|cs| {
+        let mut slot = DRIVER.borrow(cs).borrow_mut();
+        let d = slot.as_mut().ok_or("GPIO unavailable")?;
+        if d.run.as_ref().is_some_and(|p| p.status == Status::Running)
+            || d.burst
+                .as_ref()
+                .is_some_and(|b| b.status == Status::Running)
+            || d.timer.count().wrapping_sub(d.last_edge) < crate::gpio_control::HALF_US
+        {
+            return Err("GPIO busy or direction hold incomplete");
+        }
+        d.low();
+        d.run = None;
+        if positive {
+            d.direction.set();
+        } else {
+            d.direction.clear();
+        }
+        d.burst = Some(burst);
+        d.enable.set();
+        cortex_m::asm::dsb();
+        // Both DIR and ENABLE settle for >=500 us before the first rising edge.
+        d.last_edge = d.timer.count();
+        d.heartbeat = d.last_edge;
+        d.timer.clear_elapsed(Ocr::OCR1);
+        d.timer.set_output_compare_count(
+            Ocr::OCR1,
+            d.last_edge.wrapping_add(crate::gpio_control::HALF_US),
+        );
+        d.timer.set_output_interrupt_on_compare(Ocr::OCR1, true);
+        Ok(())
+    })
+}
+
+pub fn steps_status() -> Status {
+    interrupt::free(|cs| {
+        let mut slot = DRIVER.borrow(cs).borrow_mut();
+        let Some(d) = slot.as_mut() else {
+            return Status::Stopped;
+        };
+        d.heartbeat = d.timer.count();
+        d.burst.as_ref().map_or(Status::Stopped, |b| b.status)
+    })
+}
+
 /// Terminal fault path: interrupts are already disabled; never borrow state.
 pub fn emergency_low() {
     use hal::iomuxc::gpio::Pin;
@@ -137,15 +213,43 @@ pub fn emergency_low() {
         ral::gpio,
         gpio,
         DR_CLEAR,
-        (1 << <common::P7 as Pin<2>>::OFFSET) | (1 << <common::P9 as Pin<2>>::OFFSET)
+        (1 << <common::P7 as Pin<2>>::OFFSET)
+            | (1 << <common::P9 as Pin<2>>::OFFSET)
+            | (1 << <common::P10 as Pin<2>>::OFFSET)
     );
 }
 #[unsafe(no_mangle)]
 extern "C" fn GPT1() {
     interrupt::free(|cs| {
         if let Some(d) = DRIVER.borrow(cs).borrow_mut().as_mut() {
+            if !d.timer.is_elapsed(Ocr::OCR1) {
+                return;
+            }
             d.timer.clear_elapsed(Ocr::OCR1);
             let now = d.timer.count();
+            if let Some(b) = d.burst.as_mut() {
+                if now.wrapping_sub(d.heartbeat) > 10_000 {
+                    b.stop(Status::Fault);
+                } else if now.wrapping_sub(d.last_edge) >= crate::gpio_control::HALF_US {
+                    b.tick();
+                }
+                if b.status != Status::Running {
+                    d.low();
+                } else {
+                    if b.high {
+                        d.pulse.set();
+                    } else {
+                        d.pulse.clear();
+                    }
+                    cortex_m::asm::dsb();
+                    d.last_edge = d.timer.count();
+                    d.timer.set_output_compare_count(
+                        Ocr::OCR1,
+                        d.last_edge.wrapping_add(crate::gpio_control::HALF_US),
+                    );
+                }
+                return;
+            }
             if let Some(p) = d.run.as_mut() {
                 p.tick(now.wrapping_sub(d.epoch));
                 if now.wrapping_sub(d.heartbeat) > 10_000 {
