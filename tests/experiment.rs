@@ -130,7 +130,7 @@ mod tests {
     }
     #[test]
     fn records_distinguish_fresh_stationary_epos_from_reused_cache_and_keep_ages() {
-        let mut records = [Record::EMPTY; 1024];
+        let mut records = [Record::EMPTY; CAPACITY];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         start(&mut e, sinusoidal(), 0, &mut io);
@@ -147,18 +147,19 @@ mod tests {
             t.record(b"STAT", 1344, now);
             e.poll(now, &t, p, &mut io);
         }
-        assert_eq!(e.len, 8);
+        assert_eq!(e.len, 16);
         assert_eq!(e.samples[1].epos_generation, 2);
         assert_eq!(e.samples[2].epos_generation, 2);
-        assert_eq!(e.samples[3].epos_generation, 3);
-        assert_eq!(e.samples[1].epos_age_ms, 19);
-        assert_eq!(e.samples[1].pressure_age_ms, 18);
+        assert_eq!(e.samples[5].epos_generation, 2);
+        assert_eq!(e.samples[6].epos_generation, 3);
+        assert_eq!(e.samples[1].epos_age_ms, 9);
+        assert_eq!(e.samples[1].pressure_age_ms, 8);
         assert_eq!(
             i64::from(e.samples[1].elapsed_ms) - i64::from(e.samples[1].epos_age_ms),
             1
         );
-        assert_eq!(e.repeated_epos, 5);
-        assert_eq!(e.repeated_pressure, 6);
+        assert_eq!(e.repeated_epos, 13);
+        assert_eq!(e.repeated_pressure, 14);
         assert_eq!(e.epos_arrivals.count, 2);
         assert_eq!(e.pressure_arrivals.count, 1);
         assert_eq!(e.max_epos_age, 99);
@@ -170,7 +171,7 @@ mod tests {
     }
     #[test]
     fn feedback_preparation_blocks_motion_and_old_speed_replies() {
-        let mut records = [Record::EMPTY; 1024];
+        let mut records = [Record::EMPTY; CAPACITY];
         let mut e = Engine::new(&mut records);
         let mut io = Io {
             preparing: true,
@@ -724,7 +725,7 @@ mod tests {
         assert_eq!(e.run, 0);
         assert_eq!(counts(-117), Ok(-2));
 
-        let mut records = [Record::EMPTY; 1024];
+        let mut records = [Record::EMPTY; CAPACITY];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         let (mut t, p) = feedback(0, 0, true);
@@ -868,14 +869,14 @@ mod tests {
     #[test]
     fn slow_moves_use_speed_budget_for_start_steps_and_storage_across_clock_wrap() {
         let config = ExperimentConfig::QuasiStatic {
-            start_nm: 39_000,
-            step_nm: -39_000,
+            start_nm: 19_000,
+            step_nm: -19_000,
             hold_ms: 50,
             steps: 1,
             speed_um_s: 1,
         };
-        assert_eq!(config.step_timeout(), Ok(79_156));
-        assert_eq!(config.validate(), Ok(79_206));
+        assert_eq!(config.step_timeout(), Ok(39_156));
+        assert_eq!(config.validate(), Ok(39_206));
         let mut records = [Record::EMPTY; CAPACITY];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
@@ -887,25 +888,25 @@ mod tests {
         e.poll(begin, &t, p, &mut io);
         t.record(b"TOU2", 120, begin);
         e.poll(begin, &t, p, &mut io);
-        let later = begin.wrapping_add(60_001);
+        let later = begin.wrapping_add(30_001);
         let (t, p) = feedback(later, e.target, false);
         let mut motion = xeryon_motion::Motion::new();
         motion.start(e.target, begin);
         assert!(!motion.poll_policy(&t, later, true));
         e.poll(later, &t, p, &mut io);
         assert_eq!(e.state, State::MoveToStart);
-        let now = begin.wrapping_add(70_000);
+        let now = begin.wrapping_add(35_000);
         let (t, p) = feedback(now, e.target, true);
         e.poll(now, &t, p, &mut io);
         e.poll(now, &t, p, &mut io);
         assert_eq!(e.state, State::Running);
         assert_eq!(io.targets.last().unwrap().0, 0);
-        assert_eq!(e.required_samples, 3961);
-        let later = now.wrapping_add(60_001);
+        assert_eq!(e.required_samples, 3921);
+        let later = now.wrapping_add(30_001);
         let (t, p) = feedback(later, e.target, false);
         e.poll(later, &t, p, &mut io);
         assert_eq!(e.state, State::Running);
-        let deadline = now.wrapping_add(79_156);
+        let deadline = now.wrapping_add(39_156);
         let (t, p) = feedback(deadline, e.target, false);
         e.poll(deadline, &t, p, &mut io);
         assert_eq!(e.reason, "Step move deadline");
@@ -913,8 +914,8 @@ mod tests {
         assert!(config.move_timeout(200_000).is_err());
         assert!(
             ExperimentConfig::QuasiStatic {
-                start_nm: 39_000,
-                step_nm: -39_000,
+                start_nm: 19_000,
+                step_nm: -19_000,
                 hold_ms: 50,
                 steps: 3,
                 speed_um_s: 1,
@@ -969,11 +970,11 @@ mod tests {
             [0, -10, -20]
         );
         assert_eq!(e.elapsed_ms, 400);
-        assert_eq!(e.len, 21);
+        assert_eq!(e.len, 41);
         assert!(
             e.samples[..e.len]
                 .windows(2)
-                .all(|pair| pair[1].elapsed_ms - pair[0].elapsed_ms == 20)
+                .all(|pair| pair[1].elapsed_ms - pair[0].elapsed_ms == 10)
         );
         assert!(e.samples[..e.len].iter().any(|r| r.stat & (1 << 10) == 0));
         assert!(io.gpio.is_none());
@@ -985,7 +986,7 @@ mod tests {
             i64::from(MAX_POSITION) * 78,
             i64::MIN,
         ] {
-            let mut records = [Record::EMPTY; 1024];
+            let mut records = [Record::EMPTY; CAPACITY];
             let mut e = Engine::new(&mut records);
             let config = ExperimentConfig::Sinusoidal {
                 center_nm,
@@ -1013,7 +1014,7 @@ mod tests {
                 speed_um_s: 1000,
             },
         ] {
-            let mut records = [Record::EMPTY; 1024];
+            let mut records = [Record::EMPTY; CAPACITY];
             let mut e = Engine::new(&mut records);
             let mut io = Io::default();
             let (mut t, p) = feedback(0, -100, false);
@@ -1036,7 +1037,7 @@ mod tests {
             }
         }
         for extra in [1 << 5, (1 << 5) | (1 << 10), 1 << 9, 1 << 12, 1 << 18] {
-            let mut records = [Record::EMPTY; 1024];
+            let mut records = [Record::EMPTY; CAPACITY];
             let mut e = Engine::new(&mut records);
             let (mut t, p) = feedback(0, -100, true);
             t.record(b"STAT", 8513 | extra, 0);
@@ -1046,7 +1047,7 @@ mod tests {
     #[test]
     fn faults_abort_and_deadline_preserve_partial_data() {
         for condition in 0..9 {
-            let mut records = [Record::EMPTY; 1024];
+            let mut records = [Record::EMPTY; CAPACITY];
             let mut e = Engine::new(&mut records);
             let mut io = Io::default();
             start(&mut e, sinusoidal(), 0, &mut io);
@@ -1113,7 +1114,7 @@ mod tests {
     }
     #[test]
     fn transfer_never_releases_on_wrong_or_premature_ack_and_can_restart() {
-        let mut records = [Record::EMPTY; 1024];
+        let mut records = [Record::EMPTY; CAPACITY];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
         start(&mut e, sinusoidal(), 0, &mut io);
@@ -1170,7 +1171,7 @@ mod tests {
         };
         start(&mut e, config, 0, &mut io);
         assert_eq!(e.required_samples, CAPACITY);
-        assert_eq!(config.validate(), Ok(81_900));
+        assert_eq!(config.validate(), Ok(40_950));
         assert!(
             ExperimentConfig::QuasiStatic {
                 speed_um_s: 10,
@@ -1185,8 +1186,8 @@ mod tests {
         let (t, p) = feedback(202, 1, true);
         e.poll(202, &t, p, &mut io);
         assert_eq!(e.len, 2);
-        assert_eq!(e.missed_samples, 9);
-        for elapsed in (220..=MAX_DURATION_MS).step_by(20) {
+        assert_eq!(e.missed_samples, 19);
+        for elapsed in (210..=MAX_DURATION_MS).step_by(SAMPLE_MS as usize) {
             let now = e.started_ms + elapsed;
             let (t, p) = feedback(now, e.target, true);
             e.poll(now, &t, p, &mut io);
@@ -1209,7 +1210,7 @@ mod tests {
     #[test]
     fn gpio_approach_and_completion_require_new_endpoint_feedback_without_serial_motion() {
         for (begin, offset) in [(0, 0), (0, -1), (u32::MAX - 900, 1)] {
-            let mut records = [Record::EMPTY; 1024];
+            let mut records = [Record::EMPTY; CAPACITY];
             let mut e = Engine::new(&mut records);
             let mut io = Io {
                 gpio_preparing: true,
@@ -1261,7 +1262,7 @@ mod tests {
     #[test]
     fn gpio_settling_timeout_or_abort_disables_output_and_retains_data() {
         for abort in [false, true] {
-            let mut records = [Record::EMPTY; 1024];
+            let mut records = [Record::EMPTY; CAPACITY];
             let mut e = Engine::new(&mut records);
             let mut io = Io::default();
             start(&mut e, sinusoidal(), 0, &mut io);

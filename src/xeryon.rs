@@ -4,7 +4,7 @@ use crate::line::LineBuffer;
 
 // Conservative starting point. Verify actual EPOS cadence on the connected XD-C;
 // POLI describes data updates, not a guaranteed per-tag acquisition rate.
-pub const EXPERIMENT_POLI_MS: u32 = 20;
+pub const EXPERIMENT_POLI_MS: u32 = crate::experiment_data::SAMPLE_MS;
 // INFO=4 also includes TIME but omits requested parameter readbacks needed for
 // safety/setup. Neither mode promises atomic EPOS/TIME sampling or a clock origin.
 pub const EXPERIMENT_INFO: u32 = 2; // preserves DPOS, Dashboard and requested replies
@@ -210,7 +210,7 @@ mod tests {
             "INFO=?\n",
             "POLI=?\n",
             "INFO=2\n",
-            "POLI=20\n",
+            "POLI=10\n",
             "INFO=?\n",
             "POLI=?\n",
             "PTOL=?\n",
@@ -247,7 +247,7 @@ mod tests {
                 } else if step == 1 {
                     97
                 } else {
-                    20
+                    10
                 };
                 if step < 6 {
                     t.record(if i == 0 { b"INFO" } else { b"POLI" }, value, now + 3);

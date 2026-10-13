@@ -13,7 +13,7 @@ Sinusoidal START accepts an optional final `D` (displacement, default), `V` (vel
 `speed_um_s`. START acknowledges acceptance; controller speed/TOU2 readback
 checks happen before motion and report any failure in the retained dataset.
 
-Experiment preparation queries inherited INFO/POLI, sets INFO=2 and POLI=20 ms,
+Experiment preparation queries inherited INFO/POLI, sets INFO=2 and POLI=10 ms,
 and requires fresh matching readbacks before motion. Each setup step has a
 1.5 s deadline; unavailable original settings are reported as null. Runtime
 settings remain after the run; no SAVE command writes controller nonvolatile memory.
@@ -168,7 +168,7 @@ The LPS22HHTR driver reports `pressure: true`. Its snapshot `pressure` object co
 The sensor uses SDA pin 18, SCL pin 19, 400 kHz I²C and repeated-start register
 reads. Data-ready is checked every millisecond; one five-byte burst reads both
 values only when fresh. Acquisition continues while streaming is paused.
-Dashboard snapshots remain 10 Hz and experiment recording remains 50 Hz.
+Dashboard snapshots remain 10 Hz and experiment recording runs at 100 Hz.
 Update firmware and desktop together for this sensor-specific pressure schema.
 
 Force calibration is a desktop presentation/export conversion; wire units remain
@@ -321,7 +321,9 @@ Dataset v2 contains twelve explicit little-endian 32-bit words per 48-byte recor
 | 40 | epos_generation | u32, publication identity including unchanged values |
 | 44 | pressure_generation | u32, sensor publication identity |
 
-Capacity is 4,096 records at 20 ms sampling. Position receipt time is signed
+Capacity is 4,096 records at 10 ms sampling (40.95 s acquisition budget).
+Update firmware and desktop together; the desktop validates the sampling interval.
+Position receipt time is signed
 `elapsed_ms - epos_age_ms`; signals are asynchronous, not simultaneous measurements.
 The terminal waveform sample and any subsequent samples while STOP drains record
 the original starting extremum; no return-to-center motion is commanded. Version 1 datasets are rejected rather than decoded

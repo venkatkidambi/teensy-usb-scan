@@ -325,7 +325,7 @@ fn independent_signal_times_and_identities_round_trip_into_csv() {
 }
 #[test]
 fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
-    let mut records = [Record::EMPTY; 1024];
+    let mut records = [Record::EMPTY; CAPACITY];
     let mut e = engine::Engine::new(&mut records);
     let config = ExperimentConfig::Sinusoidal {
         center_nm: 0,
@@ -357,7 +357,7 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         e.poll(now, &t, pressure(now), &mut io);
     }
     e.abort(&mut io); // A late ABORT cannot overwrite a completed run.
-    assert_eq!(e.len, 51);
+    assert_eq!(e.len, 101);
     let mut d = receiver::Download::default();
     assert!(d.begin(e.run).starts_with("GET_DATA "));
     e.transfer(e.run).unwrap();
@@ -409,11 +409,11 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         }
     }
     let dataset = dataset.unwrap();
-    assert_eq!(dataset.samples.len(), 51);
+    assert_eq!(dataset.samples.len(), 101);
     assert_eq!(dataset.samples[0][1], -10);
     assert_eq!(dataset.samples[0][7], -10); // negative extremum at rest
-    assert_eq!(dataset.samples[12][7], -1); // approaching center at t=240 ms
-    assert_eq!(dataset.samples[25][7], 10); // positive extremum at half-cycle
+    assert_eq!(dataset.samples[24][7], -1); // approaching center at t=240 ms
+    assert_eq!(dataset.samples[50][7], 10); // positive extremum at half-cycle
     assert!(dataset.csv().contains("-9.594,1193046"));
     let csv = dataset.csv();
     assert_eq!(
@@ -428,12 +428,12 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
     assert!(dataset.csv().contains("final_feedback"));
     assert_eq!(dataset.metadata["sine_control"], "gpio_pulse_direction");
     assert_eq!(dataset.metadata["record_bytes"], RECORD_BYTES);
-    assert_eq!(dataset.metadata["sample_ms"], 20);
+    assert_eq!(dataset.metadata["sample_ms"], 10);
     assert!(
         dataset
             .samples
             .windows(2)
-            .all(|pair| pair[1][0] - pair[0][0] == 20)
+            .all(|pair| pair[1][0] - pair[0][0] == 10)
     );
     let csv = dataset.csv();
     let times: Vec<_> = csv
@@ -441,7 +441,7 @@ fn firmware_download_is_complete_before_ack_and_csv_preserves_raw_values() {
         .skip(2)
         .map(|row| row.split(',').next().unwrap())
         .collect();
-    assert_eq!(&times[..3], &["0.000", "0.020", "0.040"]);
+    assert_eq!(&times[..3], &["0.000", "0.010", "0.020"]);
     assert!(!e.owns_hardware());
 }
 

@@ -4,7 +4,7 @@ pub const RECORD_FIELDS: usize = 12;
 pub const DATA_VERSION: u32 = 2;
 pub const RECORD_BYTES: usize = RECORD_FIELDS * 4;
 pub const CHUNK_RECORDS: usize = 2;
-pub const SAMPLE_MS: u32 = 20; // 50 Hz experiment recording
+pub const SAMPLE_MS: u32 = 10; // 100 Hz experiment recording and requested feedback
 pub const MOVE_TIMEOUT_MS: u32 = 10_000;
 pub const MAX_SPEED_UM_S: u32 = 0x00ff_ffff;
 pub const MAX_DURATION_MS: u32 = (CAPACITY as u32 - 1) * SAMPLE_MS;
@@ -240,7 +240,7 @@ impl ExperimentConfig {
             }
         };
         if duration > u64::from(MAX_DURATION_MS) {
-            return Err("Experiment exceeds fixed sample buffer (81.9 seconds at 50 Hz)");
+            return Err("Experiment exceeds fixed sample buffer (40.95 seconds at 100 Hz)");
         }
         Ok(duration as u32)
     }

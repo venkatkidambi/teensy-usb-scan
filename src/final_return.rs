@@ -1,5 +1,5 @@
 //! Retained final STOP evidence (legacy final_return metadata key). Times are host milliseconds, not
-//! controller execution times. The 50 Hz dataset supplies the EPOS/STAT/TIME
+//! controller execution times. The 100 Hz dataset supplies the EPOS/STAT/TIME
 //! history; these snapshots retain the boundary and between-tick completion.
 #[derive(Clone, Copy, Default)]
 pub struct TxProgress(pub [u32; 6]); // queued, completed, last two queue/done times

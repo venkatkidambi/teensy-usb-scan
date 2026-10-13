@@ -151,7 +151,7 @@ defines SSPD as both scan speed and the speed towards a DPOS target.
   correction settings. Update both firmware and desktop to enable this mode.
 
 Setpoints are scheduled every **5 ms** (up to 200 updates/s), separately from
-50 Hz recording. Phase uses absolute elapsed time; busy transfers coalesce to the
+100 Hz recording. Phase uses absolute elapsed time; busy transfers coalesce to the
 current setpoint instead of replaying stale commands. A control service gap over
 25 ms faults and requests STOP. Actual cadence depends on USB/controller latency;
 `serial_timing` metadata records update batches, skipped ticks, and maximum gap.
@@ -178,8 +178,11 @@ pulse. An arming deadline of 10 µs and a 10 ms foreground watchdog fault safely
 ABORT/fault clears ENABLE, PWM output and timer. These are register-derived
 limits, not oscilloscope validation of the controller/loaded rig.
 
-Experiments record at 50 Hz into 4,096 fixed 48-byte records (192 KiB). The total
-acquisition bound is 81.9 s; sinusoidal runs reserve up to 10 s for the final STOP
+Experiments request controller feedback every 10 ms (`INFO=2`, `POLI=10`) and
+record at 100 Hz into 4,096 fixed 48-byte records (192 KiB). Actual EPOS arrival
+cadence is reported in the results and is not guaranteed by the requested interval.
+Update both firmware and desktop together: the desktop validates the logging interval.
+The total acquisition bound is 40.95 s; sinusoidal runs reserve up to 10 s for the final STOP
 transfer to drain and accept 0.1–10 Hz within the peak-speed limit. USB1 PC disconnect
 stops sinusoidal runs and retains partial data; quasi-static runs retain their
 autonomous disconnect behavior. USB2 disconnect faults motion and retains data. Manual
