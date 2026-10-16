@@ -19,6 +19,11 @@ and requires fresh matching readbacks before motion. Each setup step has a
 settings remain after the run; no SAVE command writes controller nonvolatile memory.
 Quasi-static SSPD/TOU2 readbacks have three-second deadlines. Firmware checks
 TOU2 against the reserved movement budget and does not change that timeout.
+Each quasi-static step reserves and enforces `2 * ceil((abs(step_nm) + 78) /
+speed_um_s) + 1000` ms for movement, plus its hold for acquisition storage.
+The 78 nm allowance covers encoder rounding. Initial positioning retains a
+10 s minimum deadline and occurs outside acquisition; that minimum is not
+multiplied by the number of recorded steps. Total acquisition must fit 40.95 s.
 
 USB1: CDC ACM `5824:27dd`, 115200 8-N-1, no flow control, DTR asserted.
 Baud rate is a CDC setting, not USB throughput. The desktop opens the port natively.

@@ -541,6 +541,33 @@ fn truncated_binary_can_only_recover_with_a_fresh_decoder_and_download() {
     }
 }
 #[test]
+fn native_quasi_static_start_uses_step_travel_budget() {
+    for repeats in [4, 10, 18, 19] {
+        let input: receiver::Input = serde_json::from_value(json!({
+            "kind":"quasi_static", "start_um":0, "increment_um":1,
+            "timing":1, "repeats":repeats, "speed_um_s":10,
+        }))
+        .unwrap();
+        let result = input.command(1);
+        if repeats == 19 {
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("reduce steps/hold/travel or increase speed")
+            );
+        } else {
+            let wire = result.unwrap();
+            assert_eq!(wire, format!("START 1 Q 0 1000 1000 {repeats} 10"));
+            let command::Command::Start(_, config) =
+                command::Command::parse(wire.as_bytes()).unwrap()
+            else {
+                panic!("Expected START");
+            };
+            assert_eq!(config.validate(), Ok(repeats * 2216));
+        }
+    }
+}
+#[test]
 fn native_configuration_is_validated_in_rust() {
     for timing in [0.1, 2.001, 5.0, 10.0] {
         let input: receiver::Input = serde_json::from_value(json!({

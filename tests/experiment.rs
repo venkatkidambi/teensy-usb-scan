@@ -662,7 +662,7 @@ mod tests {
                 steps: 2
             }
             .validate(),
-            Ok(20200)
+            Ok(2264)
         );
         for config in [
             ExperimentConfig::Sinusoidal {
@@ -938,6 +938,70 @@ mod tests {
         }
     }
     #[test]
+    fn short_quasi_static_steps_fit_and_record_a_complete_ten_step_run() {
+        for step_nm in [-1000, 1000] {
+            let config = ExperimentConfig::QuasiStatic {
+                start_nm: 0,
+                step_nm,
+                hold_ms: 1000,
+                steps: 10,
+                speed_um_s: 10,
+            };
+            assert_eq!(config.move_timeout(1000), Ok(10_000));
+            assert_eq!(config.step_timeout(), Ok(1216));
+            assert_eq!(config.validate(), Ok(22_160));
+            let mut records = [Record::EMPTY; CAPACITY];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            start(&mut e, config, 0, &mut io);
+            for now in 3..=22_162 {
+                let reached = now - e.move_started >= 100;
+                let (t, p) = feedback(now, e.target, reached);
+                e.poll(now, &t, p, &mut io);
+                if e.data_ready() {
+                    break;
+                }
+            }
+            assert_eq!(e.outcome, "completed");
+            assert_eq!(e.elapsed_ms, 11_000);
+            assert_eq!(e.len, 1101);
+            assert_eq!(io.targets.len(), 11); // Initial approach plus ten steps.
+            assert_eq!(io.targets.last().unwrap().0, counts(step_nm * 10).unwrap());
+            assert_eq!(io.stops, 1);
+            assert!(
+                e.samples[..e.len]
+                    .windows(2)
+                    .all(|r| r[1].elapsed_ms - r[0].elapsed_ms == SAMPLE_MS)
+            );
+        }
+    }
+    #[test]
+    fn short_step_deadline_matches_storage_reserve_and_retains_partial_data() {
+        let config = ExperimentConfig::QuasiStatic {
+            start_nm: 0,
+            step_nm: 1000,
+            hold_ms: 1000,
+            steps: 10,
+            speed_um_s: 10,
+        };
+        let mut records = [Record::EMPTY; CAPACITY];
+        let mut e = Engine::new(&mut records);
+        let mut io = Io::default();
+        start(&mut e, config, 0, &mut io);
+        for elapsed in 1..=1216 {
+            let now = e.started_ms + elapsed;
+            let (t, p) = feedback(now, e.target, false);
+            e.poll(now, &t, p, &mut io);
+            if elapsed < 1216 {
+                assert_eq!(e.state, State::Running);
+            }
+        }
+        assert_eq!(e.state, State::DataReady);
+        assert_eq!(e.reason, "Step move deadline");
+        assert_eq!(e.len, 122);
+        assert_eq!(io.stops, 1);
+    }
+    #[test]
     fn quasi_static_records_motion_and_holds_and_uses_confirmed_reach() {
         let mut records = [Record::EMPTY; 2048];
         let mut e = Engine::new(&mut records);
@@ -1166,7 +1230,7 @@ mod tests {
             speed_um_s: 10,
             start_nm: 0,
             step_nm: 78,
-            hold_ms: MAX_DURATION_MS - MOVE_TIMEOUT_MS,
+            hold_ms: MAX_DURATION_MS - 1032,
             steps: 1,
         };
         start(&mut e, config, 0, &mut io);
@@ -1177,7 +1241,7 @@ mod tests {
                 speed_um_s: 10,
                 start_nm: 0,
                 step_nm: 78,
-                hold_ms: MAX_DURATION_MS - MOVE_TIMEOUT_MS + 1,
+                hold_ms: MAX_DURATION_MS - 1032 + 1,
                 steps: 1,
             }
             .validate()

@@ -144,12 +144,15 @@ impl ExperimentConfig {
     /// Twice nominal travel time plus 1 s settling, with the existing 10 s floor.
     /// nm / (um/s) gives milliseconds. Bound even initial positioning.
     pub fn move_timeout(self, distance_nm: u64) -> Result<u32, &'static str> {
+        self.motion_timeout(distance_nm, MOVE_TIMEOUT_MS)
+    }
+    fn motion_timeout(self, distance_nm: u64, minimum_ms: u32) -> Result<u32, &'static str> {
         let Some(speed) = self.speed() else {
             let timeout = (distance_nm.div_ceil(78) * 400).div_ceil(1000) + 1000;
             if timeout > u64::from(MAX_DURATION_MS) {
                 return Err("GPIO approach exceeds positioning time budget");
             }
-            return Ok((timeout as u32).max(MOVE_TIMEOUT_MS));
+            return Ok((timeout as u32).max(minimum_ms));
         };
         if !(1..=MAX_SPEED_UM_S).contains(&speed) {
             return Err("Quasi-static speed must be 1..16777215 um/s");
@@ -159,7 +162,7 @@ impl ExperimentConfig {
             .checked_mul(2)
             .and_then(|v| v.checked_add(1000))
             .ok_or("Move duration overflow")?
-            .max(u64::from(MOVE_TIMEOUT_MS));
+            .max(u64::from(minimum_ms));
         if timeout > u64::from(MAX_DURATION_MS) {
             return Err("Move too long at selected speed; increase speed or reduce travel");
         }
@@ -167,12 +170,16 @@ impl ExperimentConfig {
     }
     pub fn step_timeout(self) -> Result<u32, &'static str> {
         match self {
-            // Account for rounding each endpoint to the encoder grid.
-            Self::QuasiStatic { step_nm, .. } => self.move_timeout(
+            // Reserve twice the travel time plus 1 s settling for each step,
+            // including endpoint rounding. The initial approach's 10 s floor
+            // must not be charged to every small step in the recording buffer.
+            // The engine enforces this same budget as the step deadline.
+            Self::QuasiStatic { step_nm, .. } => self.motion_timeout(
                 step_nm
                     .unsigned_abs()
                     .checked_add(78)
                     .ok_or("Trajectory overflow")?,
+                0,
             ),
             Self::Sinusoidal { .. } => Ok(MOVE_TIMEOUT_MS),
         }
@@ -240,6 +247,11 @@ impl ExperimentConfig {
             }
         };
         if duration > u64::from(MAX_DURATION_MS) {
+            if matches!(self, Self::QuasiStatic { .. }) {
+                return Err(
+                    "Quasi-static steps, holds and movement reserve exceed 40.95 s at 100 Hz; reduce steps/hold/travel or increase speed",
+                );
+            }
             return Err("Experiment exceeds fixed sample buffer (40.95 seconds at 100 Hz)");
         }
         Ok(duration as u32)

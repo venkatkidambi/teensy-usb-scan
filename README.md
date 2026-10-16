@@ -182,7 +182,12 @@ Experiments request controller feedback every 10 ms (`INFO=2`, `POLI=10`) and
 record at 100 Hz into 4,096 fixed 48-byte records (192 KiB). Actual EPOS arrival
 cadence is reported in the results and is not guaranteed by the requested interval.
 Update both firmware and desktop together: the desktop validates the logging interval.
-The total acquisition bound is 40.95 s; sinusoidal runs reserve up to 10 s for the final STOP
+The total acquisition bound is 40.95 s. Quasi-static runs reserve each hold plus
+twice the step travel time at the selected speed and 1 s for settling (including
+encoder rounding). This is also the enforced step deadline; only initial
+positioning, outside recording, retains the 10 s minimum movement budget.
+For example, ten 1 µm steps at 10 µm/s with 1 s holds reserve 22.16 s.
+Sinusoidal runs reserve up to 10 s for the final STOP
 transfer to drain and accept 0.1–10 Hz within the peak-speed limit. USB1 PC disconnect
 stops sinusoidal runs and retains partial data; quasi-static runs retain their
 autonomous disconnect behavior. USB2 disconnect faults motion and retains data. Manual
