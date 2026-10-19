@@ -104,7 +104,7 @@ function preparePackage(target) {
   copyFileSync(join(source, `teensy_loader_cli${exe}`), join(root, `desktop/binaries/teensy_loader_cli-${target}${exe}`));
   writeFileSync(join(resources, 'firmware.hex'), firmware);
   // Ship the exact corresponding source and license alongside the separate GPL loader.
-  run('git', ['archive', '--format=zip', `--output=${join(resources, 'teensy-loader-source.zip')}`, loaderCommit], {cwd: source});
+  run(process.platform === 'win32' ? 'python' : 'python3', [join(root, 'desktop/scripts/archive-loader.py'), source, join(resources, 'teensy-loader-source.zip'), join(root, 'docs/RELEASING.md')]);
   copyFileSync(join(source, 'gpl3.txt'), join(resources, 'teensy-loader-GPL-3.0.txt'));
   copyFileSync(join(root, 'docs/RELEASING.md'), join(resources, 'RELEASING.md'));
   const updater = config.bundle.createUpdaterArtifacts;

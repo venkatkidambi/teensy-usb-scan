@@ -161,8 +161,9 @@ Program button. Only connect the target Teensy when flashing.
 
 The loader is a separate executable built from
 <https://github.com/PaulStoffregen/teensy_loader_cli> at
-`03fca4156c244c7ad36bd368cf6e24531dbd566a`. The package includes
-`teensy-loader-source.zip` (that exact source tree) and `teensy-loader-GPL-3.0.txt`
+`03fca4156c244c7ad36bd368cf6e24531dbd566a`, with `desktop/loader-windows.patch`
+adjusting two HID header paths for modern MinGW. The package includes
+`teensy-loader-source.zip` (the actual patched source tree and build instructions) and `teensy-loader-GPL-3.0.txt`
 inside its `release` resources. It is distributed under GPL-3.0 as stated
 in its source. Build from the included archive with:
 
