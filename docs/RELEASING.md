@@ -42,6 +42,35 @@ download a new signed build. The Teensy must then be flashed separately through
 **App & firmware → Install bundled firmware**. The board reports its release
 version and source commit in `HELLO`. Development builds report `local`.
 
+## Automatic changelog
+
+The public release list labels each version **New changes**, **Routine rebuild**,
+or **Initial release**. Each release starts with a “What changed” section linked
+to the previous published release on the same channel. Scheduled and manual
+rebuilds of the same source commit explicitly say that there are no new source
+commits; build tools or packaging can still differ. A scheduled build with new
+commits is labeled **New changes**, just like a push-triggered build.
+
+The publisher reads the previous release's `firmware.json` to find its source
+commit, then lists changes from the source repository's first-parent history.
+This avoids comparing unrelated tags in the separate downloads repository.
+Drafts and the mutable `nightly` update pointer are excluded; stable and nightly
+histories are compared separately. If history was rewritten or is unavailable,
+notes say **Comparison unavailable**, rather than claiming nothing changed.
+An API error or incompatible release metadata fails publication instead of
+silently producing an incorrect changelog.
+
+Write descriptive commit subjects for direct pushes and descriptive PR titles
+for merges, for example `Fix firmware confirmation spacing`. These summaries
+become public release notes; commit bodies, author emails, branch names and
+private source links are not included. GitHub merge commits use the PR title
+instead of the generic merge message. The notes include up to 100 summaries
+and state the number of additional entries if that limit is exceeded.
+
+The same summary is included in the updater manifest and the `nightly` channel
+page, which links to the latest installers. No separate changelog file or
+manual release-note editing is required.
+
 ## GitHub setup
 
 Configure these in the **source** repository's Actions settings:

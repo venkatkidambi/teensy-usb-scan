@@ -4,6 +4,7 @@ import {execFileSync} from 'node:child_process';
 import {readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync, existsSync} from 'node:fs';
 import {resolve, join, basename} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {generateChangelog, releaseTitle, releaseNotes} from './release-notes.mjs';
 
 export const root = fileURLToPath(new URL('../../', import.meta.url));
 export const loaderCommit = '03fca4156c244c7ad36bd368cf6e24531dbd566a';
@@ -155,12 +156,16 @@ function publish() {
     const main = run('gh', ['api', `repos/${first.source_repository}/commits/main`, '--jq', '.sha'], {env: {...process.env, GH_TOKEN: process.env.SOURCE_GH_TOKEN || process.env.GH_TOKEN}});
     if (main !== first.commit) { console.log('A newer main commit exists; skipping this obsolete nightly publication.'); return; }
   }
-  if (manifest) json(join(out, 'latest.json'), manifest);
+  const changes = generateChangelog(first, run);
+  if (manifest) {
+    manifest.notes = `${changes.markdown}\nUpdate the Teensy firmware separately from the app.`;
+    json(join(out, 'latest.json'), manifest);
+  }
   copyFileSync(join(root, 'release-input/firmware.hex'), join(out, 'firmware.hex'));
   copyFileSync(join(root, 'release-input/firmware.json'), join(out, 'firmware.json'));
-  const assets = readdirSync(out).filter(name => name !== 'SHA256SUMS.txt' && name !== 'release-notes.md');
+  const assets = readdirSync(out).filter(name => name !== 'SHA256SUMS.txt' && !name.endsWith('.md'));
   writeFileSync(join(out, 'SHA256SUMS.txt'), assets.map(name => `${sha256(readFileSync(join(out, name)))}  ${name}\n`).join(''));
-  const notes = `${first.channel === 'nightly' ? 'Nightly development build' : 'Stable release'} ${first.version}\n\nSource commit: ${first.commit}\n\nWindows: download the x86_64 setup.exe. macOS: download the aarch64 (Apple Silicon) or x86_64 (Intel) DMG. The app includes matching Teensy 4.1 firmware and its flasher; no compiler or development tools are needed. Open “App & firmware” to flash, and press the Teensy Program button when prompted.\n\n${manifest ? 'Signed in-app updates are enabled for this channel.' : 'In-app updates are disabled for this build; download a newer installer to update.'}\n\nPlatform signing: ${process.env.RELEASE_PLATFORM_SIGNING || 'not configured; macOS Gatekeeper and Windows SmartScreen may require manual approval'}.\n\nFirmware installation is separate from updating the desktop app. Save experiment data and stop the rig before updating.\n`;
+  const notes = releaseNotes(first, changes, {updater: Boolean(manifest), platformSigning: process.env.RELEASE_PLATFORM_SIGNING || undefined});
   writeFileSync(join(out, 'release-notes.md'), notes);
   // Publish only after all builds pass. Stable releases are immutable; a rerun
   // may finish an existing draft, but never overwrite a published stable version.
@@ -169,15 +174,18 @@ function publish() {
   if (existing && !existing.isDraft) throw Error(`Release ${first.tag} already exists; use a new version/run`);
   const sameRepo = first.repository === first.source_repository;
   const targetArgs = sameRepo ? ['--target', first.commit] : [];
-  if (!existing) gh(['release', 'create', first.tag, ...targetArgs, '--draft', '--title', `Teensy Panel ${first.version}`, '--notes-file', join(out, 'release-notes.md'), ...(first.channel === 'nightly' ? ['--prerelease'] : sameRepo ? ['--verify-tag'] : [])]);
+  if (!existing) gh(['release', 'create', first.tag, ...targetArgs, '--draft', '--title', releaseTitle(first, changes), '--notes-file', join(out, 'release-notes.md'), ...(first.channel === 'nightly' ? ['--prerelease'] : sameRepo ? ['--verify-tag'] : [])]);
   gh(['release', 'upload', first.tag, ...assets.map(name => join(out, name)), join(out, 'SHA256SUMS.txt'), '--clobber']);
-  gh(['release', 'edit', first.tag, '--draft=false', `--latest=${first.channel === 'stable'}`, '--notes-file', join(out, 'release-notes.md')]);
+  gh(['release', 'edit', first.tag, '--draft=false', `--latest=${first.channel === 'stable'}`, '--title', releaseTitle(first, changes), '--notes-file', join(out, 'release-notes.md')]);
   if (first.channel === 'nightly' && manifest) {
     // Only the small channel pointer is mutable. Its URLs refer to this complete,
     // immutable nightly release, never a mixture of files from two runs.
     try { gh(['release', 'view', 'nightly']); }
     catch { gh(['release', 'create', 'nightly', ...targetArgs, '--prerelease', '--latest=false', '--title', 'Nightly update channel', '--notes', 'Updater manifest for the newest complete nightly. Installers are in the versioned nightly releases.']); }
     gh(['release', 'upload', 'nightly', join(out, 'latest.json'), '--clobber']);
+    const channelNotes = join(out, 'nightly-channel-notes.md');
+    writeFileSync(channelNotes, `Latest nightly: [Teensy Panel ${first.version}](https://github.com/${first.repository}/releases/tag/${first.tag}). Open that release for installers.\n\n${changes.markdown}`);
+    gh(['release', 'edit', 'nightly', '--notes-file', channelNotes]);
   }
 }
 
