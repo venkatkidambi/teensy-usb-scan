@@ -23,6 +23,14 @@ units, framing, ownership, diagnostics, and CRC/ACK semantics.
 
 ## Toolchains and firmware build
 
+For end users, Windows and Mac installers are built through the
+[stable/nightly release workflow](docs/RELEASING.md). They include the dashboard,
+matching Teensy 4.1 firmware, calibration and a native flasher; no development
+toolchains are needed. **App & firmware** in the installed app provides guided
+flashing and signed app updates. Stable and nightly install separately.
+
+The commands below are for developing and building from source.
+
 Use Rust with edition 2024 support (tested with 1.95.0), Arm GNU `arm-none-eabi-gcc`
 and `arm-none-eabi-ar` (tested with 15.3.Rel1), and cargo-binutils:
 
@@ -93,8 +101,9 @@ npm run build     # Vite assets and native release executable
 ```
 
 The scripts select the native Rust host target, overriding the Teensy default.
-The executable is `desktop/target/HOST/release/teensy-panel[.exe]`; installer
-bundling is disabled. Release apps embed their assets and need no Node or server.
+The executable is `desktop/target/HOST/release/teensy-panel[.exe]`; ordinary local
+builds skip installer bundling. CI enables bundling with a generated release
+configuration. Release apps embed their assets and need no Node or server.
 `desktop\start.cmd` or `./desktop/start.sh` builds/runs with Cargo alone, embedding
 the source UI. Windows `dev.cmd` additionally installs npm dependencies and
 **flashes the firmware** before opening the development app.
@@ -290,6 +299,11 @@ npm run build
 Replace `HOST` with the host reported by `rustc -vV` (for example
 `aarch64-apple-darwin` or `x86_64-pc-windows-msvc`). Native C tests require `cc` or
 `HOST_CC`; the firmware tests use host `rustc`. Optional webview/IPC validation:
-`cargo run --manifest-path desktop/Cargo.toml --target HOST --features smoke-test --locked`.
+build the UI first, then point the native test at those production assets:
+
+```sh
+npm run build:ui
+TAURI_CONFIG='{"build":{"frontendDist":"dist"}}' cargo run --manifest-path desktop/Cargo.toml --target HOST --features smoke-test --locked
+```
 It opens a test window and uses demo data without opening a physical serial port.
 Software checks do not replace loaded-stage timing, tracking, and stop validation.

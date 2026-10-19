@@ -1,6 +1,20 @@
 use std::{env, path::PathBuf};
 
 fn main() {
+    for name in ["FIRMWARE_VERSION", "FIRMWARE_COMMIT"] {
+        println!("cargo:rerun-if-env-changed={name}");
+        if let Ok(value) = env::var(name) {
+            assert!(
+                !value.is_empty()
+                    && value.len() <= 80
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b)),
+                "Invalid {name}"
+            );
+            println!("cargo:rustc-env={name}={value}");
+        }
+    }
     for (name, maximum) in [
         ("SINE_ENVELOPE_MARGIN_NM", u32::MAX),
         ("SINE_ENVELOPE_MAX_AGE_MS", 1000),
