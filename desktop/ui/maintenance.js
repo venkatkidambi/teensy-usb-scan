@@ -56,7 +56,6 @@ export function setupMaintenance({invoke, makeChannel, state, disconnect, refres
     try {
       info = await invoke('app_release_info');
       if(info.repository)$('release-downloads').textContent=`github.com/${info.repository}/releases`;
-      $('app-version').textContent = `${info.version} · ${info.channel} · ${info.commit.slice(0, 12)}`;
       $('bundled-firmware').textContent = info.firmware_sha256 ? `Included firmware: ${info.version} · Teensy 4.1` : 'Firmware flashing is available in packaged releases.';
       status(info.updater ? `Updates stay on the ${info.channel} channel. Firmware is installed separately.` : 'In-app updates are not enabled in this build. Download new installers from the GitHub Releases page.');
     } catch (error) { status(`Could not read release information: ${error.message ?? error}`); }
