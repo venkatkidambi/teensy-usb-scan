@@ -52,7 +52,7 @@ function xeryonBlocked(){
   if(xeryonMoving(stat))return 'Actuator is already moving.';
   return '';
 }
-function reset(){limitsInitialized=false;pressureHistory=[];lastPressure=null;snapshot=null;hello=null;history=[];epoch=null;lastSample=null;lastPong=0;lastPing=0;streaming=true;text('rtt','—');text('session-label','NO SESSION');render();draw();}
+function reset(){limitsInitialized=false;pressureHistory=[];lastPressure=null;snapshot=null;hello=null;history=[];epoch=null;lastSample=null;lastPong=0;lastPing=0;streaming=true;text('rtt','—');render();draw();}
 async function refresh(){
   if(!invoke){notice('Launch Teensy Panel using desktop/start.cmd or desktop/start.sh.',true);return;}
   const previous=$('port').value;$('refresh').disabled=true;
@@ -77,7 +77,7 @@ function accept(m){
     render();return;
   }
   if(m.type==='log'){activity(m.message);return;}
-  if(m.type==='hello'){hello=m;text('session-label','PROTOCOL 01');}
+  if(m.type==='hello'){hello=m;}
   if(m.type==='pong')lastPong=performance.now();
   if(m.type==='snapshot'){
     const now=performance.now();
@@ -272,7 +272,7 @@ $('demo').addEventListener('click',()=>{
   if(session||busy)return;reset();demo=true;const start=performance.now();hello={firmware:'preview',protocol:1,pressure:true,motion:false};epoch=1;
   const make=ms=>({type:'snapshot',id:0,ms,epoch:1,vid:0x04d8,pid:0xef4a,mounted:true,cdc:2,records:Math.floor(ms/10),malformed:0,skipped:0,pressure:{sensor:'lps22hh',address:92,odr_hz:200,who:179,temperature:2500,state:2,errors:0,raw:Math.round(4220000+40000*Math.sin(ms/1800)),average:Math.round(4220000+32000*Math.sin(ms/1800-.4)),ms,samples:Math.floor(ms/5),valid:true},values:Object.fromEntries(Object.entries({EPOS:Math.round(1200+180*Math.sin(ms/6000)),DPOS:1200,STAT:352,SRNO:12345,SOFT:20103}).map(([tag,value])=>[tag,{value,ms}]))});
   for(let i=0;i<600;i++)history.push({time:start-60000+i*100,e:make(i*100).values.EPOS.value,d:1200});
-  accept(make(60000));text('session-label','SIMULATED SESSION');notice('Demo mode — all readings are simulated. No serial port is open.');controls();
+  accept(make(60000));notice('Demo mode — all readings are simulated. No serial port is open.');controls();
   demoTimer=setInterval(()=>accept(make(Math.floor(performance.now()-start)+60000)),100);
 });
 setInterval(()=>{
