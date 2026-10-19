@@ -1,0 +1,196 @@
+name: Stable and nightly releases
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'pull_request' && github.ref || startsWith(github.ref, 'refs/tags/') && github.ref || 'nightly' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: '1.95.0'
+
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      channel: ${{ steps.metadata.outputs.channel }}
+      can_publish: ${{ steps.metadata.outputs.can_publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Set release identity
+        id: metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REPOSITORY: ${{ vars.RELEASE_REPOSITORY }}
+          CROSS_REPO_PUBLISH: ${{ secrets.RELEASE_TOKEN != '' }}
+          BUILD_ONLY: ${{ github.event_name == 'pull_request' }}
+        run: node desktop/scripts/release.mjs metadata
+      - name: Install build tools
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --target thumbv7em-none-eabihf
+          rustup default "$RUST_VERSION"
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+      - run: npm ci
+      - name: Validate firmware and frontend
+        run: |
+          cargo fmt --check
+          cargo fmt --manifest-path desktop/Cargo.toml --check
+          bash tests/run.sh
+          npm test
+          npm run build:ui
+      - name: Build matching firmware
+        env:
+          FIRMWARE_VERSION: ${{ steps.metadata.outputs.version }}
+          FIRMWARE_COMMIT: ${{ github.sha }}
+        run: |
+          cargo build --release --locked
+          mkdir -p target/firmware
+          arm-none-eabi-objcopy -O ihex target/thumbv7em-none-eabihf/release/teensy-usb-scan target/firmware/firmware.hex
+          node desktop/scripts/release.mjs firmware
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: release-input/
+          if-no-files-found: error
+
+  desktop:
+    needs: firmware
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: PaulStoffregen/teensy_loader_cli
+          ref: 03fca4156c244c7ad36bd368cf6e24531dbd566a
+          path: loader-source
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: release-input
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install Rust
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "$BUILD_TARGET"
+          rustup default "$RUST_VERSION"
+      - run: npm ci
+      - name: Apply modern Windows HID header compatibility
+        run: git -C loader-source apply ../desktop/loader-windows.patch
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: MINGW64
+          update: false
+          install: make mingw-w64-x86_64-gcc
+      - name: Build standalone Windows flasher
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: make -C loader-source OS=WINDOWS CC=gcc CFLAGS='-O2 -Wall -static -static-libgcc'
+      - name: Build Mac flasher
+        if: runner.os == 'macOS'
+        run: make -C loader-source OS=MACOSX CC=clang CFLAGS='-O2 -Wall -mmacosx-version-min=12.0'
+      - name: Desktop regression tests
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: cargo test --manifest-path desktop/Cargo.toml --target "$BUILD_TARGET" --locked
+      - name: Prepare release bundle
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          TAURI_SIGNING_PUBLIC_KEY: ${{ github.event_name != 'pull_request' && vars.TAURI_SIGNING_PUBLIC_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+        run: node desktop/scripts/release.mjs package "$BUILD_TARGET"
+      - name: Build installer
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          MACOSX_DEPLOYMENT_TARGET: '12.0'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          APPLE_CERTIFICATE: ${{ github.event_name != 'pull_request' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ github.event_name != 'pull_request' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ github.event_name != 'pull_request' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ github.event_name != 'pull_request' && secrets.APPLE_TEAM_ID || '' }}
+        run: |
+          # Empty optional secrets should behave as unset, including unsigned builds.
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then unset "$name"; fi
+          done
+          npm run build -- --target "$BUILD_TARGET" --config tauri.release.json --features bundled-release -- --locked
+          node desktop/scripts/release.mjs collect "$BUILD_TARGET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.target }}
+          path: release-out/
+          if-no-files-found: error
+
+  publish:
+    needs: [firmware, desktop]
+    if: needs.firmware.outputs.can_publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: release-input
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          merge-multiple: true
+          path: release-out
+      - name: Publish complete release and update channel
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          RELEASE_PLATFORM_SIGNING: ${{ vars.RELEASE_PLATFORM_SIGNING }}
+          SOURCE_GH_TOKEN: ${{ github.token }}
+        run: node desktop/scripts/release.mjs publish

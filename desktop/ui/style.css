@@ -139,3 +139,10 @@ summary::marker{color:var(--muted);font-size:10px}
   footer{align-items:flex-start}
   .diagnostics>summary span{display:none}
 }
+/* Release tools stay available from every experiment view. */
+.maintenance-panel { margin-top: 18px; }
+.maintenance-panel summary { cursor: pointer; }
+.maintenance-panel summary span { margin-left: 12px; font-size: 12px; font-weight: normal; }
+.maintenance-confirm { display: flex; align-items: flex-start; gap: 8px; margin: 14px 0; font-size: 13px; }
+.maintenance-confirm input { width: auto; flex: none; margin-top: 3px; }
+.maintenance-panel .tools { flex-wrap: wrap; }

@@ -140,6 +140,15 @@
   </section>
   <details class="panel diagnostics"><summary>Connection diagnostics <span>Telemetry &amp; activity log</span></summary><div class="tools diagnostic-actions"><button id="ping" disabled>Ping</button><button id="snapshot" disabled>Read snapshot</button><button id="stream" disabled>Pause stream</button></div><div class="counters"><span>Round trip <b id="rtt">—</b></span><span>Records <b id="records">0</b></span><span>Malformed <b id="malformed">0</b></span><span>Skipped snapshots <b id="skipped">0</b></span><span>Desktop coalesced <b id="coalesced">0</b></span></div><details><summary>Activity log <span>Last 100 events</span></summary><pre id="log">Waiting for connection.</pre></details></details>
   </div>
+  <details class="panel maintenance-panel">
+    <summary>App &amp; firmware <span id="app-version">Loading version…</span></summary>
+    <p id="bundled-firmware" class="pressure-detail"></p>
+    <p class="pressure-detail">To flash, connect only the Teensy 4.1 you want to update. Close other serial tools and Teensy loaders. Click Install firmware, then press its Program button. Keep USB connected until completion (up to three minutes).</p>
+    <label class="maintenance-confirm"><input id="maintenance-ready" type="checkbox"> I have stopped the rig and saved any experiment data. Firmware installation resets the Teensy and its temporary settings.</label>
+    <div class="tools diagnostic-actions"><button id="firmware-install" disabled>Install bundled firmware</button><button id="update-check" disabled>Check for app updates</button><button id="update-install" disabled>Install app update &amp; restart</button></div>
+    <p id="maintenance-status" class="notice" role="status" aria-live="polite"></p>
+    <p class="pressure-detail">Stable and nightly are separate apps. Only one can connect to the Teensy at a time. Downloads: <span id="release-downloads">github.com/venkatkidambi/teensy-panel-releases/releases</span></p>
+  </details>
   <footer><p>Xeryon actuator · separate wired plunger motor</p><span id="session-label">NO SESSION</span></footer>
 </main>
 </body></html>

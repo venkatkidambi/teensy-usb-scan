@@ -10,6 +10,9 @@ pub const SCRIPT: &str = r#"
   try {
     for (let i=0; i<100 && (!document.querySelector('#demo') || document.querySelector('#port').textContent.includes('Scanning')); i++) await new Promise(r=>setTimeout(r,50));
     const invoke=window.__TAURI__.core.invoke;
+    const release=await invoke('app_release_info');
+    if(!release.version||!release.channel||!release.commit)throw Error('Release metadata unavailable');
+    if(!document.getElementById('firmware-install')?.disabled)throw Error('Firmware installation enabled without acknowledgement');
     if(document.querySelector('.brand, .mark, .device-icon'))throw Error('Decorative branding remains');
     if(document.querySelector('h1')?.textContent!=='Teensy Panel')throw Error('Panel heading missing');
     const ports=await invoke('serial_ports');
@@ -45,7 +48,7 @@ pub const SCRIPT: &str = r#"
     document.querySelector('#connect').click();
     await new Promise(r=>setTimeout(r,100));
     if(document.querySelector('#epos').textContent!=='—'||document.querySelector('#pressure-raw').textContent!=='—')throw Error('Disconnect failed to clear data');
-    await invoke('smoke_report',{result:{ok:true,ports:ports.length,nativeIPC:true,demo:true,disconnect:true,hiddenDashboardIdle:true}});
+    await invoke('smoke_report',{result:{ok:true,ports:ports.length,nativeIPC:true,demo:true,disconnect:true,hiddenDashboardIdle:true,releaseControls:true}});
   }catch(e){await window.__TAURI__.core.invoke('smoke_report',{result:{ok:false,error:String(e)}});}
 })();
 "#;

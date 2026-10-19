@@ -1,6 +1,7 @@
 import {setupExperiments,experimentControls,experimentMessage} from './experiment.js';
 import {NativeSession,statusFlags,elapsed,pressureState,xeryonMoveCommand,xeryonMoving} from './protocol.mjs';
 import {forceMillinewtons,forceExtrapolated} from './force.js';
+import {setupMaintenance} from './maintenance.js';
 const $=id=>document.getElementById(id), text=(id,value)=>{const node=$(id),next=String(value);if(node.textContent!==next)node.textContent=next;};
 const invoke=window.__TAURI__?.core.invoke;
 const number=new Intl.NumberFormat(undefined,{maximumFractionDigits:0});
@@ -9,6 +10,7 @@ const micronsPerCount=0.078;
 const positionNumber=new Intl.NumberFormat(undefined,{minimumFractionDigits:3,maximumFractionDigits:3});
 const position=counts=>positionNumber.format(counts*micronsPerCount);
 let session=null,connected=false,busy=false,demo=false,streaming=true,snapshot=null,received=0,hello=null;
+let maintenance=null,maintenanceBusy=false;
 let limitsInitialized=false;
 let pressureHistory=[],lastPressure=null,experimentUnresolved=false;
 let history=[],logs=[],epoch=null,lastSample=null,lastPong=0,lastPing=0,demoTimer=null;
@@ -18,9 +20,9 @@ function controls(){
   $('xeryon-speed').disabled=!connected||!hello?.xeryon_speed||!!session?.experimentOwned;
   for(const id of ['xeryon-distance','plunger-distance','plunger-speed'])$(id).disabled=!!session?.experimentOwned;
   text('connect',busy?'Please wait…':connected||demo?'Disconnect':'Connect Teensy');
-  $('connect').disabled=busy||(!connected&&!demo&&!$('port').value);
-  $('port').disabled=$('refresh').disabled=busy||connected||!!session;
-  $('demo').disabled=busy||connected||demo||!!session;
+  $('connect').disabled=maintenanceBusy||busy||(!connected&&!demo&&!$('port').value);
+  $('port').disabled=$('refresh').disabled=maintenanceBusy||busy||connected||!!session;
+  $('demo').disabled=maintenanceBusy||busy||connected||demo||!!session;
   for(const id of ['ping','snapshot','stream'])$(id).disabled=!connected||!!session?.pending;
   for(const id of ['plunger-up','plunger-down','plunger-zero'])$(id).disabled=!connected||!hello?.motion||!!session?.pending||!snapshot?.plunger||snapshot.plunger.running||performance.now()-received>=3000;
   for(const id of ['plunger-min','plunger-max','plunger-apply-limits'])$(id).disabled=!connected||!hello?.plunger_limits||!!session?.pending||!!session?.experimentOwned||!snapshot?.plunger||snapshot.plunger.running||performance.now()-received>=3000;
@@ -35,6 +37,7 @@ function controls(){
   text('stream',streaming?'Pause stream':'Resume stream');
   if(session?.experimentOwned)for(const id of ['ping','snapshot','stream','plunger-up','plunger-down','plunger-zero','plunger-stop','xeryon-up','xeryon-down','xeryon-stop','xeryon-speed','xeryon-distance','plunger-speed','plunger-distance'])$(id).disabled=true;
   experimentControls();
+  maintenance?.render();
 }
 function xeryonBlocked(){
   if(!connected)return 'Connect Teensy to move the actuator.';
@@ -120,6 +123,7 @@ async function disconnect(reason='Disconnected'){
   try{await old?.close();}catch(e){activity(`Close: ${e}`);}finally{busy=false;controls();render();}
 }
 $('connect').addEventListener('click',async()=>{
+  if(maintenanceBusy)return;
   if(connected||demo||session){await disconnect();return;}
   busy=true;reset();controls();
   try{
@@ -167,11 +171,12 @@ function age(s){return snapshot&&s?elapsed(snapshot.ms,s.ms)+performance.now()-r
 function ageText(s){const ms=age(s);return Number.isFinite(ms)?`${ms>=3000?'Stale · ':'Updated '}${(ms/1000).toFixed(1)}s ago`:'Awaiting feedback';}
 function render(){
   const v=snapshot?.values??{},active=connected||demo,stalled=connected&&!session?.experimentOwned&&lastPong>0&&performance.now()-lastPong>6000;
+  const dashboardVisible=!$('dashboard-panel').hidden;
   text('connection',session?.experimentOwned?'Autonomous experiment':demo?'Demo · simulated':stalled?'Link unresponsive':connected?'Connected':'Disconnected');
   $('connection').className=`pill ${demo||stalled?'warn':connected?'live':''}`;
   controls();
   if(stalled)notice('The Teensy is not answering connection checks. Displayed values may be stale; reconnect to retry.',true);
-  for(const[id,tag]of[['epos','EPOS'],['dpos','DPOS']]){text(id,v[tag]?position(v[tag].value):'—');text(`${id}-age`,ageText(v[tag]));$(id).closest('.metric').classList.toggle('stale',!!v[tag]&&age(v[tag])>=3000);}
+  if(dashboardVisible)for(const[id,tag]of[['epos','EPOS'],['dpos','DPOS']]){text(id,v[tag]?position(v[tag].value):'—');text(`${id}-age`,ageText(v[tag]));$(id).closest('.metric').classList.toggle('stale',!!v[tag]&&age(v[tag])>=3000);}
   const stat=v.STAT,key=stat?String(stat.value):'none';
   text('stat-word',stat?`STAT ${stat.value} / 0x${stat.value.toString(16).padStart(6,'0')}`:'Waiting for STAT');
   text('stat-age',stat?`${ageText(stat)} · listed flags are active`:'No status received');$('flags').classList.toggle('stale-flags',!!stat&&age(stat)>=3000);
@@ -182,15 +187,18 @@ function render(){
   }
   const pressure=snapshot?.pressure,pressureAge=pressure?elapsed(snapshot.ms,pressure.ms)+performance.now()-received:Infinity;
   const pressureValid=pressure?.valid,pressureFresh=pressureValid&&pressureAge<1000;
+  if(dashboardVisible){
   text('pressure-raw',pressureValid?forceNumber.format(forceMillinewtons(pressure.raw)):'—');
   text('pressure-average',pressureValid?forceNumber.format(forceMillinewtons(pressure.average)):'—');
   text('pressure-counts',pressureValid?`LPS counts: ${number.format(pressure.raw)} · average ${number.format(pressure.average)}`:'LPS counts: —');
   const extrapolated=pressureValid&&(forceExtrapolated(pressure.raw)||forceExtrapolated(pressure.average));
   text('pressure-calibration',!pressureValid?'Probe-calibrated force':extrapolated?'Extrapolated force · outside calibration range':'Within calibration range');
   text('pressure-samples',number.format(pressure?.samples??0));
+  }
   text('pressure-state',demo?'Simulated':!connected?'Offline':!hello?.pressure?'Unavailable':!pressureValid?pressureState(pressure):!pressureFresh?'Stale':'Receiving');
-  text('pressure-age',pressureValid?`${pressureFresh?'Updated':'Stale'} · ${(pressureAge/1000).toFixed(1)}s ago`:'NO DATA');
   text('pressure-sensor','LPS22HHTR · I²C 0x5C · 200 Hz');
+  if(dashboardVisible){
+  text('pressure-age',pressureValid?`${pressureFresh?'Updated':'Stale'} · ${(pressureAge/1000).toFixed(1)}s ago`:'NO DATA');
   text('pressure-detail',!active?'LPS22HHTR readings appear when the sensor responds.':!pressure?'Waiting for pressure telemetry.':`${pressureState(pressure)} · errors ${pressure.errors} · WHO_AM_I ${pressure.who===null?'unavailable':`0x${pressure.who.toString(16).padStart(2,'0')}`} · temperature ${pressureValid?`${(pressure.temperature/100).toFixed(2)} °C`:'—'}`);
   const xm=snapshot?.xeryon_motion;
   text('xeryon-motion-state',demo?'Demo — motion controls are disabled.':xeryonBlocked()||(xm?.state===2?'Target reached.':xm?.state===3?'Stop requested.':xm?.state===4?'Move interrupted — check feedback and the activity log.':hello?.xeryon_speed?'Ready. Enter travel; leave speed blank to use the controller setting.':'Ready. Speed uses the controller setting with this firmware. Enter travel, then choose Up or Down.'));
@@ -220,6 +228,7 @@ function render(){
   text('plunger-gauge-status',gaugeStatus);
   gauge.setAttribute('aria-label',`Potentiometer ${potPercent==null?'unavailable':`${potPercent.toFixed(1)} percent`}. ${gaugeStatus}.${limits?` Active limits ${limits.min} to ${limits.max} percent.`:''}`);
   text('plunger-pot',plunger?.pot!=null?`Potentiometer ${plunger.pot} / 4095 (${(100*plunger.pot/4095).toFixed(1)}%)`:'Potentiometer —');
+  }
   text('board-state',demo?'Demo':connected?stalled?'Stalled':'Online':'Offline');
   text('firmware',hello?`Firmware ${hello.firmware} · protocol ${hello.protocol}`:'USB1 · waiting for connection');
   text('uptime',snapshot?`Uptime ${(snapshot.ms/1000).toFixed(1)}s · 10 Hz snapshots`:'Bare-metal firmware');
@@ -227,10 +236,12 @@ function render(){
   text('actuator-state',!active||!snapshot?'Unknown':!snapshot.vid?'Detached':!xd?'Other device':['Closed','Opening',fresh?'Receiving':'No feedback','Setup failed','Timed out'][snapshot.cdc]);
   text('actuator-detail',snapshot?.vid?`USB2 · ${snapshot.vid.toString(16).padStart(4,'0')}:${snapshot.pid.toString(16).padStart(4,'0')} · ${snapshot.mounted?'configured':'enumerating'}`:'USB2 host · 04d8:ef4a');
   text('serial',`Serial number ${v.SRNO?.value??'—'}`);
+  if(dashboardVisible){
   for(const id of ['records','malformed','skipped'])text(id,number.format(snapshot?.[id]??0));
   text('coalesced',session?.coalesced??0);text('samples',`${history.length} samples`);
   text('stream-state',demo?'SIMULATED':!active?'NO DATA':!streaming?'PAUSED':!snapshot||performance.now()-received>=3000?'WAITING':'LIVE / 10 HZ');
   $('empty').hidden=history.length>0;
+  }
 }
 function drawSeries(canvasId,points,series,format){
   const canvas=$(canvasId),ctx=canvas.getContext('2d'),r=canvas.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2);
@@ -273,4 +284,5 @@ setInterval(()=>{
 },500);
 $('xeryon-speed').value='';
 setupExperiments({state:()=>({session,connected,hello,snapshot,experimentUnresolved}),positionAge:()=>age(snapshot?.values.EPOS),invoke,controls,activity,viewChanged:()=>{render();draw();}});
+maintenance=setupMaintenance({invoke,makeChannel:()=>new window.__TAURI__.core.Channel(),state:()=>({session,connected,busy,demo,experimentUnresolved}),disconnect,refresh,setBusy:value=>{maintenanceBusy=value;controls();}});
 render();controls();void refresh();

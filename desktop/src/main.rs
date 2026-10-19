@@ -6,6 +6,7 @@ mod experiment;
 #[allow(dead_code)]
 #[path = "../../src/experiment_data.rs"]
 mod experiment_data;
+mod maintenance;
 #[path = "../../src/plunger_config.rs"]
 mod plunger_config;
 mod serial;
@@ -42,6 +43,7 @@ struct Backend {
     next: AtomicU32,
     archive: Arc<Mutex<experiment::Archive>>,
     experiment_owned: Arc<AtomicBool>,
+    maintenance: AtomicBool,
 }
 
 impl Backend {
@@ -160,6 +162,9 @@ async fn serial_connect(
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut connection = state.connection.lock().map_err(|e| e.to_string())?;
+        if state.maintenance.load(Ordering::Acquire) {
+            return Err("Wait for the update to finish before connecting".into());
+        }
         if connection.is_some() {
             return Err("Disconnect the current port first".into());
         }
@@ -331,14 +336,23 @@ async fn experiment_save_png(
 macro_rules! command_handler {
     ($($extra:path),* $(,)?) => {
         tauri::generate_handler![serial_ports, serial_connect, serial_send, serial_poll,
-            serial_disconnect, experiment_start, experiment_result, experiment_results, experiment_validate, experiment_save_csv, experiment_save_png, $($extra),*]
+            serial_disconnect, experiment_start, experiment_result, experiment_results, experiment_validate, experiment_save_csv, experiment_save_png,
+            maintenance::app_release_info, maintenance::firmware_install, maintenance::app_update_check, maintenance::app_update_install, $($extra),*]
     };
 }
 
 fn main() {
     let builder = tauri::Builder::default()
         .manage(Arc::new(Backend::default()))
+        .manage(maintenance::PendingUpdate::default())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            if maintenance::app_release_info().updater_enabled() {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
+            Ok(())
+        })
         .invoke_handler(command_handler![])
         .on_page_load(|window, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Started {
@@ -351,6 +365,15 @@ fn main() {
             }
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window
+                    .state::<Arc<Backend>>()
+                    .maintenance
+                    .load(Ordering::Acquire)
+                {
+                    api.prevent_close();
+                }
+            }
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 window.state::<Arc<Backend>>().disconnect();
             }

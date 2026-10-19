@@ -10,6 +10,12 @@ target/
 node_modules/
 /desktop/dist/
 /desktop/gen/
+/desktop/binaries/
+/desktop/resources/
+/desktop/tauri.release.json
+/release-out/
+/release-input/
+/loader-source/
 
 # Local environment settings
 .env
