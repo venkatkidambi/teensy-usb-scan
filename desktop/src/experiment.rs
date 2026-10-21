@@ -168,12 +168,90 @@ pub fn uint(value: &Value, key: &str) -> Result<u32, String> {
 pub struct Archive {
     pub datasets: Vec<Dataset>,
     replace_on_next: bool,
+    pending: Option<Pending>,
+}
+// Kept outside the serial worker so reconnect preserves every acknowledged batch.
+struct Pending {
+    metadata: Value,
+    samples: Vec<[i64; RECORD_FIELDS]>,
+    crc: u32,
+    previous_offset: usize,
+    previous_crc: u32,
+    published: bool,
+}
+fn offset(meta: &Value) -> Result<usize, String> {
+    if meta.get("offset").is_some() {
+        Ok(uint(meta, "offset")? as usize)
+    } else {
+        Ok(0)
+    }
+}
+fn final_batch(meta: &Value) -> bool {
+    meta.get("final").is_none_or(|v| v == true)
+}
+fn same_run(a: &Value, b: &Value) -> bool {
+    a["run"] == b["run"] && a["started_ms"] == b["started_ms"] && a["config"] == b["config"]
 }
 impl Archive {
+    pub fn started(&mut self) {
+        self.pending = None;
+    }
     pub fn begin(&mut self, append_results: bool) {
         // Keep the previous results if START fails. The first verified result
         // replaces them, including when a download is recovered after reconnect.
         self.replace_on_next = !append_results;
+    }
+
+    /// Store verified data before ACK. Retransmission after a lost ACK is idempotent.
+    pub fn receive(&mut self, batch: Dataset) -> Result<Option<Dataset>, String> {
+        let start = offset(&batch.metadata)?;
+        if start == 0
+            && self
+                .pending
+                .as_ref()
+                .is_none_or(|p| !same_run(&p.metadata, &batch.metadata))
+        {
+            self.pending = None;
+        }
+        if self.pending.is_none() {
+            if start != 0 {
+                return Err("Earlier experiment batches are missing from this app session".into());
+            }
+            self.pending = Some(Pending {
+                metadata: batch.metadata.clone(),
+                samples: Vec::new(),
+                crc: !0,
+                previous_offset: 0,
+                previous_crc: !0,
+                published: false,
+            });
+        }
+        let p = self.pending.as_mut().unwrap();
+        if !same_run(&p.metadata, &batch.metadata) {
+            return Err("Experiment identity mismatch".into());
+        }
+        if start == p.samples.len() {
+            p.previous_offset = start;
+            p.previous_crc = p.crc;
+            p.samples.extend(batch.samples);
+            p.crc = !uint(&batch.metadata, "crc")?;
+        } else if start != p.previous_offset || p.samples[start..] != batch.samples {
+            return Err("Experiment batch overlap mismatch".into());
+        }
+        p.metadata = batch.metadata;
+        if !final_batch(&p.metadata) || p.published {
+            return Ok(None);
+        }
+        let mut dataset = Dataset {
+            archive_index: None,
+            metadata: p.metadata.clone(),
+            samples: p.samples.clone(),
+        };
+        dataset.metadata["offset"] = 0.into();
+        dataset.metadata["bytes"] = (dataset.samples.len() * RECORD_BYTES).into();
+        p.published = true;
+        self.retain(&mut dataset);
+        Ok(Some(dataset))
     }
 
     pub fn retain(&mut self, dataset: &mut Dataset) {
@@ -250,6 +328,8 @@ pub struct Download {
     pub run: Option<u32>,
     metadata: Option<Value>,
     bytes: Vec<u8>,
+    prefix_crc: u32,
+    previous_time: Option<i64>,
 }
 impl Download {
     pub fn begin(&mut self, run: u32) -> String {
@@ -258,22 +338,54 @@ impl Download {
         self.bytes.clear();
         format!("GET_DATA {DOWNLOAD_ID} {run}")
     }
+    #[cfg(test)]
     pub fn metadata(&mut self, metadata: Value) -> Result<(), String> {
+        self.metadata_from_archive(metadata, &Archive::default())
+    }
+    pub fn metadata_from_archive(
+        &mut self,
+        metadata: Value,
+        archive: &Archive,
+    ) -> Result<(), String> {
+        let start = offset(&metadata)?;
+        let count = uint(&metadata, "count")? as usize;
+        let length = count
+            .checked_sub(start)
+            .filter(|n| *n <= data::CAPACITY)
+            .ok_or("Invalid dataset batch range")?;
+        self.prefix_crc = !0;
+        self.previous_time = None;
+        if start != 0 {
+            let p = archive.pending.as_ref().filter(|p| same_run(&p.metadata, &metadata))
+                .ok_or("Earlier experiment batches are missing from this app session; cannot acknowledge incomplete results")?;
+            self.prefix_crc = if start == p.samples.len() {
+                p.crc
+            } else if start == p.previous_offset {
+                p.previous_crc
+            } else {
+                return Err("Dataset batch gap or overlap".into());
+            };
+            self.previous_time = p.samples.get(start - 1).map(|s| s[0]);
+        }
         if uint(&metadata, "id")? != DOWNLOAD_ID
             || Some(uint(&metadata, "run")?) != self.run
             || uint(&metadata, "version")? != data::DATA_VERSION
             || uint(&metadata, "record_bytes")? as usize != RECORD_BYTES
-            || uint(&metadata, "count")? as usize > data::CAPACITY
-            || uint(&metadata, "bytes")? != uint(&metadata, "count")? * RECORD_BYTES as u32
+            || uint(&metadata, "bytes")? as usize != length * RECORD_BYTES
+            || metadata.get("final").is_some_and(|v| !v.is_boolean())
             || uint(&metadata, "sample_ms")? != data::SAMPLE_MS
         {
             return Err("Invalid dataset metadata".into());
         }
         uint(&metadata, "crc")?;
-        if !matches!(
-            metadata["outcome"].as_str(),
-            Some("completed" | "aborted" | "faulted")
-        ) || !metadata["reason"].is_string()
+        if !(if final_batch(&metadata) {
+            matches!(
+                metadata["outcome"].as_str(),
+                Some("completed" | "aborted" | "faulted")
+            )
+        } else {
+            metadata["outcome"] == "running"
+        }) || !metadata["reason"].is_string()
             || !metadata["config"].is_object()
         {
             return Err("Invalid completion metadata".into());
@@ -289,8 +401,7 @@ impl Download {
             .ok_or("Binary data before metadata")?;
         if uint(&header, "id")? != DOWNLOAD_ID
             || Some(uint(&header, "run")?) != self.run
-            || (uint(&header, "offset")? as usize).checked_mul(RECORD_BYTES)
-                != Some(self.bytes.len())
+            || uint(&header, "offset")? as usize != offset(meta)? + self.bytes.len() / RECORD_BYTES
             || uint(&header, "bytes")? as usize != bytes.len()
             || self.bytes.len() + bytes.len() > uint(meta, "bytes")? as usize
         {
@@ -308,19 +419,22 @@ impl Download {
             return Ok((
                 format!(
                     "GET_CHUNK {DOWNLOAD_ID} {run} {}",
-                    self.bytes.len() / RECORD_BYTES
+                    offset(meta)? + self.bytes.len() / RECORD_BYTES
                 ),
                 None,
             ));
         }
 
-        if !data::crc32(!0, &self.bytes) != uint(meta, "crc")? {
+        if !data::crc32(self.prefix_crc, &self.bytes) != uint(meta, "crc")? {
             return Err("Dataset CRC mismatch; data retained on Teensy, reconnect to retry".into());
         }
         let mut samples = Vec::with_capacity(self.bytes.len() / RECORD_BYTES);
         for bytes in self.bytes.chunks_exact(RECORD_BYTES) {
             let fields = data::decode_fields(bytes.try_into().unwrap());
             if fields[0] > i64::from(data::MAX_DURATION_MS)
+                || self
+                    .previous_time
+                    .is_some_and(|previous| fields[0] <= previous)
                 || samples
                     .last()
                     .is_some_and(|previous: &[i64; RECORD_FIELDS]| fields[0] <= previous[0])

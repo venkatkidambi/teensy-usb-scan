@@ -225,7 +225,7 @@ mod tests {
                 let mut io = Io::default();
                 let mut speed = u32::MAX;
                 let mut done = false;
-                for ms in 0..trajectory.duration_us.div_ceil(1000) + 20 {
+                for ms in 0..(trajectory.duration_us.div_ceil(1000) as u32) + 20 {
                     // Variable completion time forces coalescing instead of a
                     // backlog, and shifts dispatch away from 5 ms boundaries.
                     io.busy = ms % 17 >= 10 && ms % 17 <= 13;
@@ -669,7 +669,7 @@ mod tests {
                 center_nm: 0,
                 amplitude_nm: 10000,
                 frequency_mhz: 10000,
-                cycles: 1000,
+                cycles: u32::MAX,
                 control: crate::experiment_data::SineControl::Gpio,
             },
             ExperimentConfig::QuasiStatic {
@@ -711,13 +711,13 @@ mod tests {
                 center_nm: 0,
                 amplitude_nm: 78,
                 frequency_mhz: 100,
-                cycles: 21,
+                cycles: u32::MAX,
                 control: crate::experiment_data::SineControl::Gpio,
             },
         ] {
             assert!(config.validate().is_err(), "{config:?}");
         }
-        let mut records = [Record::EMPTY; 20];
+        let mut records = [Record::EMPTY; 1];
         let mut e = Engine::new(&mut records);
         let (t, p) = feedback(0, 0, true);
         assert!(e.accept(sinusoidal(), &t, p, false, 0).is_err());
@@ -911,7 +911,7 @@ mod tests {
         e.poll(deadline, &t, p, &mut io);
         assert_eq!(e.reason, "Step move deadline");
         assert_eq!(io.stops, 1);
-        assert!(config.move_timeout(200_000).is_err());
+        assert_eq!(config.move_timeout(200_000), Ok(401_000));
         assert!(
             ExperimentConfig::QuasiStatic {
                 start_nm: 19_000,
@@ -921,7 +921,7 @@ mod tests {
                 speed_um_s: 1,
             }
             .validate()
-            .is_err()
+            .is_ok()
         );
         for speed_um_s in [0, MAX_SPEED_UM_S + 1] {
             assert!(
@@ -1222,7 +1222,8 @@ mod tests {
         assert!(meta.contains("\"outcome\":\"aborted\""));
     }
     #[test]
-    fn acquisition_bound_is_enforced_and_late_samples_are_not_fabricated() {
+    fn late_samples_are_not_fabricated_and_duration_is_independent_of_storage() {
+        let buffer_duration_ms = (CAPACITY as u32 - 1) * SAMPLE_MS;
         let mut records = [Record::EMPTY; CAPACITY];
         let mut e = Engine::new(&mut records);
         let mut io = Io::default();
@@ -1230,7 +1231,7 @@ mod tests {
             speed_um_s: 10,
             start_nm: 0,
             step_nm: 78,
-            hold_ms: MAX_DURATION_MS - 1032,
+            hold_ms: buffer_duration_ms - 1032,
             steps: 1,
         };
         start(&mut e, config, 0, &mut io);
@@ -1241,17 +1242,17 @@ mod tests {
                 speed_um_s: 10,
                 start_nm: 0,
                 step_nm: 78,
-                hold_ms: MAX_DURATION_MS - 1032 + 1,
+                hold_ms: buffer_duration_ms - 1032 + 1,
                 steps: 1,
             }
             .validate()
-            .is_err()
+            .is_ok()
         );
         let (t, p) = feedback(202, 1, true);
         e.poll(202, &t, p, &mut io);
         assert_eq!(e.len, 2);
         assert_eq!(e.missed_samples, 19);
-        for elapsed in (210..=MAX_DURATION_MS).step_by(SAMPLE_MS as usize) {
+        for elapsed in (210..=buffer_duration_ms).step_by(SAMPLE_MS as usize) {
             let now = e.started_ms + elapsed;
             let (t, p) = feedback(now, e.target, true);
             e.poll(now, &t, p, &mut io);

@@ -116,7 +116,7 @@ pub struct Trajectory {
     center_nm: i64,
     amplitude_nm: u32,
     frequency_mhz: u32,
-    pub duration_us: u32,
+    pub duration_us: u64,
     pub start: i32,
     approach: Option<i32>,
 }
@@ -137,14 +137,14 @@ impl Trajectory {
             center_nm,
             amplitude_nm,
             frequency_mhz,
-            duration_us: (u64::from(cycles) * TURN).div_ceil(u64::from(frequency_mhz)) as u32,
+            duration_us: (u64::from(cycles) * TURN).div_ceil(u64::from(frequency_mhz)),
             start: config.start()?,
             approach: None,
         })
     }
     /// Half-cosine approach: zero endpoint velocity, peak <4 kHz.
     pub fn approach(from: i32, to: i32) -> Result<Self, &'static str> {
-        use crate::experiment_data::{MAX_DURATION_MS, MAX_POSITION, MIN_POSITION};
+        use crate::experiment_data::{MAX_GPIO_APPROACH_MS, MAX_POSITION, MIN_POSITION};
         if [from, to]
             .iter()
             .any(|p| !(MIN_POSITION..=MAX_POSITION).contains(p))
@@ -152,14 +152,14 @@ impl Trajectory {
             return Err("GPIO approach exceeds encoder range");
         }
         let duration = u64::from(from.abs_diff(to)) * 400;
-        if duration + 1_000_000 > u64::from(MAX_DURATION_MS) * 1000 {
+        if duration + 1_000_000 > u64::from(MAX_GPIO_APPROACH_MS) * 1000 {
             return Err("GPIO approach exceeds positioning time budget");
         }
         Ok(Self {
             center_nm: 0,
             amplitude_nm: 0,
             frequency_mhz: 0,
-            duration_us: duration.max(1000) as u32,
+            duration_us: duration.max(1000),
             start: from,
             approach: Some(to),
         })
@@ -168,26 +168,30 @@ impl Trajectory {
         self.approach.unwrap_or(self.start)
     }
     /// Derivative in um/s; integer phase avoids accumulated timing drift.
-    pub fn velocity(&self, elapsed_us: u32) -> f64 {
+    pub fn velocity_at(&self, elapsed_us: u64) -> f64 {
         if elapsed_us >= self.duration_us {
             return 0.0;
         }
-        let phase = u64::from(elapsed_us) * u64::from(self.frequency_mhz) % TURN;
+        let phase = elapsed_us * u64::from(self.frequency_mhz) % TURN;
         crate::experiment_data::sine_max_velocity(self.amplitude_nm, self.frequency_mhz)
             * cosine((phase + 3 * TURN / 4) % TURN) as f64
             / Q as f64
     }
+    #[cfg(test)]
     pub fn position(&self, elapsed_us: u32) -> i32 {
+        self.position_at(u64::from(elapsed_us))
+    }
+    pub fn position_at(&self, elapsed_us: u64) -> i32 {
         if elapsed_us >= self.duration_us {
             return self.end();
         }
         if let Some(to) = self.approach {
-            let phase = u64::from(elapsed_us) * TURN / (2 * u64::from(self.duration_us));
+            let phase = elapsed_us * TURN / (2 * self.duration_us);
             let delta = i64::from(to) - i64::from(self.start);
             let displacement = delta * (Q - cosine(phase));
             return self.start + ((displacement + if delta < 0 { -Q } else { Q }) / (2 * Q)) as i32;
         }
-        let phase = u64::from(elapsed_us) * u64::from(self.frequency_mhz) % TURN;
+        let phase = elapsed_us * u64::from(self.frequency_mhz) % TURN;
         let nm = self.center_nm * Q - i64::from(self.amplitude_nm) * cosine(phase);
         ((nm + if nm < 0 { -39 * Q } else { 39 * Q }) / (78 * Q)) as i32
     }
@@ -210,6 +214,7 @@ pub struct Pulses {
     pub status: Status,
     last_tick: u32,
     last_rise: u32,
+    elapsed_wide: u64,
 }
 impl Pulses {
     pub fn new(trajectory: Trajectory) -> Self {
@@ -221,6 +226,7 @@ impl Pulses {
             status: Status::Running,
             last_tick: 0,
             last_rise: 0,
+            elapsed_wide: 0,
         }
     }
     pub fn stop(&mut self) {
@@ -237,10 +243,11 @@ impl Pulses {
             self.status = Status::Fault;
             return;
         }
+        self.elapsed_wide += u64::from(elapsed.wrapping_sub(self.last_tick));
         self.last_tick = elapsed;
-        let terminal = elapsed >= self.trajectory.duration_us;
+        let terminal = self.elapsed_wide >= self.trajectory.duration_us;
         self.high = false;
-        let delta = self.trajectory.position(elapsed) - self.position;
+        let delta = self.trajectory.position_at(self.elapsed_wide) - self.position;
         if terminal && delta == 0 {
             self.status = Status::Complete;
             return;
@@ -272,6 +279,31 @@ impl Pulses {
 mod tests {
     use super::*;
     use crate::experiment_data::counts;
+    #[test]
+    fn long_waveforms_keep_phase_after_microsecond_wrap() {
+        let t = Trajectory::new(config(7800, 1000, 100_000)).unwrap();
+        assert!(t.duration_us > u64::from(u32::MAX));
+        for us in [
+            4_295_000_000u64,
+            4_295_250_000,
+            4_295_500_000,
+            80_000_750_000,
+        ] {
+            assert_eq!(t.position_at(us), t.position_at(us % 1_000_000));
+            assert_eq!(t.velocity_at(us), t.velocity_at(us % 1_000_000));
+        }
+        // GPIO uses a wrapping hardware clock, extended before phase evaluation.
+        let mut pulses = Pulses::new(t);
+        let before = u64::from(u32::MAX) - 24;
+        pulses.elapsed_wide = before;
+        pulses.last_tick = before as u32;
+        pulses.last_rise = (before as u32).wrapping_sub(TICK_US);
+        pulses.position = t.position_at(before);
+        pulses.tick((before + u64::from(TICK_US)) as u32);
+        assert_eq!(pulses.elapsed_wide, before + u64::from(TICK_US));
+        assert_eq!(pulses.status, Status::Running);
+        assert!((pulses.position - t.position_at(pulses.elapsed_wide)).abs() <= 1);
+    }
     fn config(a: u32, f: u32, n: u32) -> ExperimentConfig {
         ExperimentConfig::Sinusoidal {
             center_nm: 78000,
@@ -366,7 +398,7 @@ mod tests {
                     rises += 1;
                 }
                 assert!((from.min(to)..=from.max(to)).contains(&p.position));
-                assert!(elapsed < t.duration_us + 200);
+                assert!(elapsed < (t.duration_us as u32) + 200);
             }
             assert_eq!(p.status, Status::Complete);
             assert_eq!(p.position, to);
@@ -429,7 +461,7 @@ mod tests {
         })
         .unwrap();
         let mut p = Pulses::new(t);
-        for us in (TICK_US..=t.duration_us + 100).step_by(TICK_US as usize) {
+        for us in (TICK_US..=(t.duration_us as u32) + 100).step_by(TICK_US as usize) {
             p.tick(us);
         }
         assert_eq!(p.status, Status::Complete);
@@ -449,7 +481,7 @@ mod tests {
             let mut p = Pulses::new(t);
             let (mut rises, mut last, mut shortest) = (0, 0, u32::MAX);
             let (mut direction, mut changes) = (true, 0);
-            for us in (TICK_US..t.duration_us).step_by(TICK_US as usize) {
+            for us in (TICK_US..(t.duration_us as u32)).step_by(TICK_US as usize) {
                 p.tick(us);
                 assert_eq!(p.status, Status::Running, "{us}");
                 if p.positive != direction {
@@ -469,7 +501,7 @@ mod tests {
                     / 78.0;
                 assert!((f64::from(t.position(us)) - reference).abs() < 0.51);
             }
-            p.tick(t.duration_us);
+            p.tick(t.duration_us as u32);
             assert_eq!(p.status, Status::Complete);
             assert_eq!(p.position, t.start);
             assert_eq!(changes, 2 * n - 1);
@@ -478,7 +510,7 @@ mod tests {
             if a >= 24828 {
                 assert_eq!(shortest, 50); // actually exercises the 20 kHz ceiling
             }
-            assert!(rises < t.duration_us / TICK_US); // not a constant-rate train
+            assert!(rises < (t.duration_us as u32) / TICK_US); // not a constant-rate train
             let mut p = Pulses::new(t);
             let mut us = TICK_US;
             while !p.high {

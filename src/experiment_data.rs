@@ -3,11 +3,14 @@ pub const CAPACITY: usize = 4096;
 pub const RECORD_FIELDS: usize = 12;
 pub const DATA_VERSION: u32 = 2;
 pub const RECORD_BYTES: usize = RECORD_FIELDS * 4;
-pub const CHUNK_RECORDS: usize = 2;
+pub const CHUNK_RECORDS: usize = 16;
 pub const SAMPLE_MS: u32 = 10; // 100 Hz experiment recording and requested feedback
 pub const MOVE_TIMEOUT_MS: u32 = 10_000;
 pub const MAX_SPEED_UM_S: u32 = 0x00ff_ffff;
-pub const MAX_DURATION_MS: u32 = (CAPACITY as u32 - 1) * SAMPLE_MS;
+// Leave headroom for deadline/sample arithmetic in the wrapping millisecond clock.
+pub const MAX_DURATION_MS: u32 = u32::MAX - 60_000;
+// Preserve the existing GPIO initial-positioning deadline independently of logging.
+pub const MAX_GPIO_APPROACH_MS: u32 = 40_950;
 pub const MIN_POSITION: i32 = -(1 << 25);
 pub const MAX_POSITION: i32 = (1 << 25) - 1;
 pub const MAX_TRAVEL_NM: u32 = MAX_POSITION as u32 * 78;
@@ -149,7 +152,7 @@ impl ExperimentConfig {
     fn motion_timeout(self, distance_nm: u64, minimum_ms: u32) -> Result<u32, &'static str> {
         let Some(speed) = self.speed() else {
             let timeout = (distance_nm.div_ceil(78) * 400).div_ceil(1000) + 1000;
-            if timeout > u64::from(MAX_DURATION_MS) {
+            if timeout > u64::from(MAX_GPIO_APPROACH_MS) {
                 return Err("GPIO approach exceeds positioning time budget");
             }
             return Ok((timeout as u32).max(minimum_ms));
@@ -247,12 +250,7 @@ impl ExperimentConfig {
             }
         };
         if duration > u64::from(MAX_DURATION_MS) {
-            if matches!(self, Self::QuasiStatic { .. }) {
-                return Err(
-                    "Quasi-static steps, holds and movement reserve exceed 40.95 s at 100 Hz; reduce steps/hold/travel or increase speed",
-                );
-            }
-            return Err("Experiment exceeds fixed sample buffer (40.95 seconds at 100 Hz)");
+            return Err("Experiment exceeds timer range");
         }
         Ok(duration as u32)
     }

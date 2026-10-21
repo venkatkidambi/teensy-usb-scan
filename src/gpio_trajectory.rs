@@ -326,7 +326,7 @@ extern "C" fn DMA0_DMA16() {
             return;
         }
         // Time advances by hardware reloads, not by ISR completion time.
-        d.elapsed += TICK_US;
+        d.elapsed = d.elapsed.wrapping_add(TICK_US);
         let Some(p) = d.run.as_mut() else {
             d.low();
             return;

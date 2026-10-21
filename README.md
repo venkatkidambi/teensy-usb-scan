@@ -191,24 +191,35 @@ Experiments request controller feedback every 10 ms (`INFO=2`, `POLI=10`) and
 record at 100 Hz into 4,096 fixed 48-byte records (192 KiB). Actual EPOS arrival
 cadence is reported in the results and is not guaranteed by the requested interval.
 Update both firmware and desktop together: the desktop validates the logging interval.
-The total acquisition bound is 40.95 s. Quasi-static runs reserve each hold plus
-twice the step travel time at the selected speed and 1 s for settling (including
+The buffer is reused throughout acquisition: at half capacity (about 20 s), the
+native app downloads a frozen batch while the Teensy continues sampling in the
+remaining slots. A cumulative CRC and count must verify before those slots are
+reused. The app assembles one complete result from the first sample through the
+final batch, including aborted/faulted runs. Long runs require the same desktop
+app process to remain connected and enough computer memory for the full dataset.
+If transfers cannot keep up, firmware stops before overwriting unacknowledged data.
+The 41 s storage limit no longer applies; the wrapping millisecond protocol still
+bounds each configured run to about 49.7 days (including movement/STOP reserves).
+Quasi-static runs reserve each hold plus twice the step travel time at the selected speed and 1 s for settling (including
 encoder rounding). This is also the enforced step deadline; only initial
 positioning, outside recording, retains the 10 s minimum movement budget.
 For example, ten 1 µm steps at 10 µm/s with 1 s holds reserve 22.16 s.
 Sinusoidal runs reserve up to 10 s for the final STOP
 transfer to drain and accept 0.1–10 Hz within the peak-speed limit. USB1 PC disconnect
 stops sinusoidal runs and retains partial data; quasi-static runs retain their
-autonomous disconnect behavior. USB2 disconnect faults motion and retains data. Manual
+autonomous disconnect behavior until the remaining buffer fills. USB2 disconnect
+faults motion and retains data. Manual
 moves instead stop on disconnect, stale feedback, heartbeat loss, or deadline.
 ABORT/faults request STOP and retain partial results. USB STOP is best effort if
 the actuator link fails. Command acceptance is not physical motion confirmation.
 Controller travel limits and tuning remain the operator's responsibility.
 
-Results stay owned by firmware until count/CRC/ACK verification. Reconnect recovers
-an active run or retained dataset. Desktop results survive reconnect/reload in the
+Hardware stays owned by firmware until the final count/CRC/ACK verification.
+Reconnect recovers an active run or retained dataset. Desktop results survive reconnect/reload in the
 same process; the first verified result of a new experiment replaces the previous
-experiment. Save CSV before replacement, closing the app, or removing power.
+experiment. Already acknowledged batches live in desktop RAM; reconnect with
+the same app process.
+Save CSV before replacement, closing the app, or removing power.
 
 ## Hardware and diagnostics
 

@@ -91,7 +91,7 @@ function tab(next) {
     $('experiment-title').textContent=sine?'Sinusoidal experiment':'Quasi-static experiment';
     for(const [key,label] of Object.entries({start:sine?'Center position (µm)':'Start position (µm)',increment:sine?'Amplitude (µm)':'Signed step (µm)',timing:sine?'Frequency (Hz)':'Hold time (s)',repeats:sine?'Number of cycles':'Number of steps'}))$(`experiment-${key}-label`).textContent=label;
     fields.forEach((k,i)=>{$(`experiment-${k}`).value=configurations[mode][i];});
-    $('experiment-timing').min=sine?'0.1':'0.001';$('experiment-timing').max=sine?'10':'40.95';
+    $('experiment-timing').min=sine?'0.1':'0.001';$('experiment-timing').max=sine?'10':'4294907';
   }
   experimentControls();draw();
   context.viewChanged?.();
@@ -220,7 +220,7 @@ function drawPlot(id,field,scale) {
   let lo=Infinity,hi=-Infinity;for(const [,value] of [...points,...command]){lo=Math.min(lo,value);hi=Math.max(hi,value);}
   if(!samples.length){ctx.fillText('No samples acquired',l,40);return;}
   const pad=Math.max((hi-lo)*.1,scale);lo-=pad;hi+=pad;const end=Math.max(dataset.metadata.elapsed_ms,1);
-  const start=field===1?Math.min(0,...points.map(p=>p[0])):0;
+  const start=field===1?points.reduce((min,p)=>Math.min(min,p[0]),0):0;
   const x=ms=>l+(ms-start)/(end-start)*(r-l),y=value=>b-(value-lo)/(hi-lo)*(b-t);
   ctx.font='10px system-ui';ctx.fillStyle='#646b65';
   for(let i=0;i<=4;i++){

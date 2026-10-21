@@ -228,6 +228,21 @@ impl Connection {
                                             let value =
                                                 serde_json::from_str::<serde_json::Value>(&line)
                                                     .unwrap_or_default();
+                                            // Keep archive -> inbox lock order consistent with START.
+                                            if value["type"] == "experiment_ack"
+                                                && value["action"] == "start"
+                                            {
+                                                archive.lock().unwrap().started();
+                                            }
+                                            if value["type"] == "data_meta" {
+                                                download
+                                                    .metadata_from_archive(
+                                                        value.clone(),
+                                                        &archive.lock().unwrap(),
+                                                    )
+                                                    .map_err(io::Error::other)?;
+                                                advance_download = true;
+                                            }
                                             let mut q = queue.lock().unwrap();
                                             match value["type"].as_str() {
                                                 Some("experiment_state") => {
@@ -235,7 +250,9 @@ impl Connection {
                                                         value["state"] != "dashboard",
                                                         &worker_ownership,
                                                     );
-                                                    if value["state"] == "data_ready" {
+                                                    if value["state"] == "data_ready"
+                                                        || value["batch_ready"] == true
+                                                    {
                                                         let run =
                                                             crate::experiment::uint(&value, "run")
                                                                 .map_err(io::Error::other)?;
@@ -255,14 +272,13 @@ impl Connection {
                                                         q.set_owned(false, &worker_ownership);
                                                         deadline = None;
                                                     }
-                                                    q.push(line);
+                                                    if value["action"] == "batch_received" {
+                                                        deadline = None;
+                                                    } else {
+                                                        q.push(line);
+                                                    }
                                                 }
-                                                Some("data_meta") => {
-                                                    download
-                                                        .metadata(value)
-                                                        .map_err(io::Error::other)?;
-                                                    advance_download = true;
-                                                }
+                                                Some("data_meta") => {}
                                                 Some("error") => {
                                                     if value["id"] == crate::experiment::DOWNLOAD_ID
                                                     {
@@ -293,13 +309,16 @@ impl Connection {
                                     if advance_download {
                                         let (command, dataset) =
                                             download.next().map_err(io::Error::other)?;
-                                        if let Some(mut dataset) = dataset {
-                                            // Both empty and nonempty runs are retained before ACK.
-                                            {
-                                                let mut archive = archive.lock().unwrap();
-                                                archive.retain(&mut dataset);
+                                        if let Some(batch) = dataset {
+                                            // Retain each verified batch before freeing its Teensy slots.
+                                            let completed = archive
+                                                .lock()
+                                                .unwrap()
+                                                .receive(batch)
+                                                .map_err(io::Error::other)?;
+                                            if let Some(dataset) = completed {
+                                                queue.lock().unwrap().dataset = Some(dataset);
                                             }
-                                            queue.lock().unwrap().dataset = Some(dataset);
                                         }
                                         next = Some(command);
                                     }
@@ -492,7 +511,7 @@ mod tests {
             "START 1 Q 0 78 500 2",
             "START 1 Q 0 78 500 2 10 extra",
             // Syntactically valid configurations still need duration/range checks.
-            "START 1 Q 0 78 500 1000 10",
+            "START 1 Q 0 78 4294967295 1 10",
             "START 1 S 0 780 10001 1",
             "START 1 S 2617245618 780 1000 1",
         ] {

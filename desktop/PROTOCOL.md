@@ -20,10 +20,11 @@ settings remain after the run; no SAVE command writes controller nonvolatile mem
 Quasi-static SSPD/TOU2 readbacks have three-second deadlines. Firmware checks
 TOU2 against the reserved movement budget and does not change that timeout.
 Each quasi-static step reserves and enforces `2 * ceil((abs(step_nm) + 78) /
-speed_um_s) + 1000` ms for movement, plus its hold for acquisition storage.
+speed_um_s) + 1000` ms for movement, plus its hold for the acquisition deadline.
 The 78 nm allowance covers encoder rounding. Initial positioning retains a
 10 s minimum deadline and occurs outside acquisition; that minimum is not
-multiplied by the number of recorded steps. Total acquisition must fit 40.95 s.
+multiplied by the number of recorded steps. Periodic batch transfers decouple
+acquisition duration from the fixed Teensy storage capacity.
 
 USB1: CDC ACM `5824:27dd`, 115200 8-N-1, no flow control, DTR asserted.
 Baud rate is a CDC setting, not USB throughput. The desktop opens the port natively.
@@ -301,13 +302,25 @@ On USB1 open, `experiment_state` announces `dashboard`, `running` (including
 positioning/arming), or `data_ready`. The desktop waits passively before its
 handshake so reconnect cannot inject HELLO/PING into a running experiment.
 The native receiver downloads `data_ready` results using GET_DATA, then sequential
-GET_CHUNK requests. `data_meta` includes configuration, run, version, record size,
+GET_CHUNK requests. Firmware advertising `experiment_batches: true` also announces
+`batch_ready: true` on `experiment_state` while the state remains `running`.
+This starts a transfer at half buffer capacity, leaving the other half available
+for uninterrupted local acquisition. Only one request is outstanding at a time.
+GET_DATA freezes an immutable end offset and cumulative CRC; retries reuse that
+boundary even if the run ends during transfer. Metadata adds `offset` (absolute
+first record), `count` (absolute end, exclusive), `bytes = (count-offset)*48`, and
+`final`. Intermediate metadata has `outcome: "running"`, `final: false`.
+GET_CHUNK offsets and ACK counts are absolute from experiment start. ACK releases
+only that batch's slots and replies with action `batch_received`; hardware remains
+owned. A separate final batch (possibly empty) carries the terminal outcome and
+replies `data_received` after ACK. ABORT remains available during transfers.
+`data_meta` includes configuration, run, version, record size,
 count, bytes, CRC, outcome/reason, STOP queue result, timing, and retained diagnostics.
 
 A `data_chunk` JSON header with id/run/record-offset/byte-length ends in LF, followed immediately by the declared binary bytes. There
-is no delimiter after the payload. Current firmware sends at most two records
-(96 bytes) per chunk; native reception accepts up to sixteen dataset-v2 records
-for compatibility. Binary LF/NUL/non-UTF8 bytes are opaque to line framing.
+is no delimiter after the payload. Current firmware sends at most sixteen records
+(768 bytes) per chunk, bounded additionally by the ring wrap and frozen batch end.
+Binary LF/NUL/non-UTF8 bytes are opaque to line framing.
 
 Dataset v2 contains twelve explicit little-endian 32-bit words per 48-byte record:
 
@@ -326,7 +339,11 @@ Dataset v2 contains twelve explicit little-endian 32-bit words per 48-byte recor
 | 40 | epos_generation | u32, publication identity including unchanged values |
 | 44 | pressure_generation | u32, sensor publication identity |
 
-Capacity is 4,096 records at 10 ms sampling (40.95 s acquisition budget).
+Capacity is 4,096 reusable records at 10 ms sampling. Transfer starts at 2,048
+retained records (about 20 s); full unacknowledged storage faults with STOP before
+any record is overwritten. Configured duration is independent of storage, bounded
+by the u32 millisecond clock to 4,294,907,295 ms including reserves. Wide integer
+phase arithmetic avoids the previous microsecond overflow on long sine runs.
 Update firmware and desktop together; the desktop validates the sampling interval.
 Position receipt time is signed
 `elapsed_ms - epos_age_ms`; signals are asynchronous, not simultaneous measurements.
@@ -337,13 +354,18 @@ with the wrong layout. CSV preserves raw values, ages, identities, and diagnosti
 CRC-32/ISO-HDLC covers concatenated encoded records: initialize to 0xffffffff,
 use reflected polynomial 0xedb88320, and complement the final value. JSON metadata
 is validated separately and is not covered by this payload CRC. Native Rust
-checks count, bytes, offsets, run, timestamps and CRC before
-retaining the dataset and sending ACK_DATA_RECEIVED. Firmware also requires every
+checks count, bytes, offsets, run, timestamps and cumulative CRC before
+retaining each batch and sending ACK_DATA_RECEIVED. Firmware also requires every
 record to have transferred in sequence before accepting the matching count/CRC ACK.
 Empty fault datasets still require verification and ACK.
 
 Disconnect, CRC failure, or the five-second transfer-response timeout retains
-the Teensy copy. Reconnect and GET_DATA restart from zero, including diagnostics.
+the Teensy copy. Reconnect and GET_DATA restart the unacknowledged batch from its retained offset,
+including diagnostics. The native archive keeps verified prefixes across serial
+reconnects in the same process and handles retransmission after a lost ACK without
+duplicating records. It only publishes the combined dataset after the final batch.
+A new app process cannot recover batches already acknowledged and overwritten on
+the Teensy; it rejects missing prefixes instead of acknowledging incomplete data.
 START is never retried automatically. After ACK, bytes remain until a new START
 passes validation. Desktop CSV/PNG export opens a native Save As dialog, releases
 serial locks while it is open, and rechecks ownership before writing. Cancellation

@@ -76,6 +76,11 @@ pub struct Engine<'a> {
     target: i32,
     epoch: u32,
     transfer_next: usize,
+    // Absolute record indices; only acknowledged slots may be reused.
+    retained_from: usize,
+    transfer_end: Option<usize>,
+    transfer_crc: u32,
+    transfer_final: bool,
     stopping: bool,
     serial: serial_sine::Stream,
     ramp: Option<serial_sine::Ramp>,
@@ -132,6 +137,10 @@ impl<'a> Engine<'a> {
             target: 0,
             epoch: 0,
             transfer_next: 0,
+            retained_from: 0,
+            transfer_end: None,
+            transfer_crc: 0,
+            transfer_final: false,
             stopping: false,
             serial: Default::default(),
             ramp: None,
@@ -170,6 +179,11 @@ impl<'a> Engine<'a> {
     }
     pub fn data_ready(&self) -> bool {
         matches!(self.state, State::DataReady | State::Transferring)
+    }
+    pub fn batch_ready(&self) -> bool {
+        self.transfer_end.is_some()
+            || self.data_ready()
+            || (self.active() && self.len - self.retained_from >= self.samples.len() / 2)
     }
     pub fn checksum(&self) -> u32 {
         !self.crc
@@ -225,7 +239,7 @@ impl<'a> Engine<'a> {
         let validation = (|| {
             let duration = config.validate()?;
             let required = (duration / SAMPLE_MS + 1) as usize;
-            if required > self.samples.len() {
+            if self.samples.len() < 2 {
                 return Err("Experiment buffer too small");
             }
             // DPOS enters closed-loop positioning; a stopped controller need
@@ -253,6 +267,8 @@ impl<'a> Engine<'a> {
         self.duration_ms = duration;
         self.required_samples = required;
         self.len = 0;
+        self.retained_from = 0;
+        self.transfer_end = None;
         self.envelope.reset(t.epos_generation);
         self.crc = !0;
         self.elapsed_ms = 0;
@@ -635,7 +651,7 @@ impl<'a> Engine<'a> {
             self.finish(State::Fault, "Sinusoidal trajectory envelope exceeded", io);
             return;
         }
-        // A deadline is also a hard bound on storage. Never synthesize catch-up samples.
+        // Never synthesize catch-up samples; storage is independently bounded below.
         if elapsed > self.duration_ms {
             self.finish(State::Fault, "Acquisition deadline missed", io);
             return;
@@ -652,7 +668,7 @@ impl<'a> Engine<'a> {
             } else {
                 crate::trajectory::Trajectory::new(self.config.unwrap())
                     .unwrap()
-                    .position(elapsed * 1000)
+                    .position_at(u64::from(elapsed) * 1000)
             };
         }
         if elapsed >= self.next_sample {
@@ -690,11 +706,11 @@ impl<'a> Engine<'a> {
                     u32::MAX
                 },
             };
-            if self.len >= self.required_samples || self.len >= self.samples.len() {
-                self.finish(State::Fault, "Buffer invariant failed", io);
+            if self.len - self.retained_from >= self.samples.len() {
+                self.finish(State::Fault, "PC transfer stalled; sample buffer full", io);
                 return;
             }
-            self.samples[self.len] = record;
+            self.samples[self.len % self.samples.len()] = record;
             self.len += 1;
             self.crc = crc32(self.crc, &record.encode());
         }
@@ -934,11 +950,22 @@ impl<'a> Engine<'a> {
         write!(out, "]}}")?;
         writeln!(
             out,
-            ",\"count\":{},\"record_bytes\":{RECORD_BYTES},\"bytes\":{},\"crc\":{},\"outcome\":\"{}\",\"reason\":\"{}\",\"stop_queued\":{},\"sample_ms\":{SAMPLE_MS},\"move_timeout_ms\":{MOVE_TIMEOUT_MS},\"started_ms\":{},\"elapsed_ms\":{},\"duration_bound_ms\":{},\"required_samples\":{},\"missed_samples\":{},\"max_lateness_ms\":{}}}",
-            self.len,
-            self.len * RECORD_BYTES,
-            self.checksum(),
-            self.outcome,
+            ",\"offset\":{},\"final\":{},\"count\":{},\"record_bytes\":{RECORD_BYTES},\"bytes\":{},\"crc\":{},\"outcome\":\"{}\",\"reason\":\"{}\",\"stop_queued\":{},\"sample_ms\":{SAMPLE_MS},\"move_timeout_ms\":{MOVE_TIMEOUT_MS},\"started_ms\":{},\"elapsed_ms\":{},\"duration_bound_ms\":{},\"required_samples\":{},\"missed_samples\":{},\"max_lateness_ms\":{}}}",
+            self.retained_from,
+            self.transfer_end
+                .map_or(!self.active(), |_| self.transfer_final),
+            self.transfer_end.unwrap_or(self.len),
+            (self.transfer_end.unwrap_or(self.len) - self.retained_from) * RECORD_BYTES,
+            self.transfer_end
+                .map_or(self.checksum(), |_| self.transfer_crc),
+            if self
+                .transfer_end
+                .map_or(!self.active(), |_| self.transfer_final)
+            {
+                self.outcome
+            } else {
+                "running"
+            },
             self.reason,
             self.stop_queued,
             self.started_ms,
@@ -950,11 +977,19 @@ impl<'a> Engine<'a> {
         )
     }
     pub fn transfer(&mut self, run: u32) -> Result<(), &'static str> {
-        if !self.data_ready() || run != self.run {
+        if !self.batch_ready() || run != self.run {
             return Err("No matching retained dataset");
         }
-        self.state = State::Transferring;
-        self.transfer_next = 0;
+        // Repeated GET_DATA retries exactly the same immutable batch.
+        if self.transfer_end.is_none() {
+            self.transfer_end = Some(self.len);
+            self.transfer_crc = self.checksum();
+            self.transfer_final = !self.active();
+        }
+        if !self.active() {
+            self.state = State::Transferring;
+        }
+        self.transfer_next = self.retained_from;
         Ok(())
     }
     pub fn chunk_header(
@@ -971,28 +1006,36 @@ impl<'a> Engine<'a> {
         )
     }
     pub fn chunk(&mut self, run: u32, offset: usize) -> Result<&[Record], &'static str> {
-        if self.state != State::Transferring
+        if self.transfer_end.is_none()
             || run != self.run
             || offset != self.transfer_next
-            || offset >= self.len
+            || offset >= self.transfer_end.unwrap_or(0)
         {
             return Err("Invalid dataset offset; restart GET_DATA");
         }
-        let end = (offset + CHUNK_RECORDS).min(self.len);
-        self.transfer_next = end;
-        Ok(&self.samples[offset..end])
+        let start = offset % self.samples.len();
+        let count = CHUNK_RECORDS
+            .min(self.transfer_end.unwrap() - offset)
+            .min(self.samples.len() - start);
+        self.transfer_next = offset + count;
+        Ok(&self.samples[start..start + count])
     }
     pub fn acknowledge(&mut self, run: u32, count: usize, crc: u32) -> Result<(), &'static str> {
-        if self.state != State::Transferring
+        if self.transfer_end != Some(count)
             || run != self.run
-            || count != self.len
-            || self.transfer_next != self.len
-            || crc != self.checksum()
+            || self.transfer_next != count
+            || crc != self.transfer_crc
         {
             return Err("Dataset acknowledgement mismatch");
         }
-        self.state = State::Dashboard;
-        // Bytes remain intact until the next successfully validated START.
+        self.retained_from = count;
+        self.transfer_end = None;
+        if self.transfer_final {
+            self.state = State::Dashboard;
+        } else if !self.active() {
+            self.state = State::DataReady;
+        }
+        // Acquisition may now reuse only these acknowledged slots.
         Ok(())
     }
 }

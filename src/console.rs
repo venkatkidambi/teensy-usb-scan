@@ -51,6 +51,7 @@ pub struct Console {
     announce: bool,
     notified: bool,
     urgent: Option<(u32, bool)>,
+    transfer_command: Option<Command>,
 }
 
 impl Console {
@@ -100,6 +101,7 @@ impl Console {
             announce: true,
             notified: false,
             urgent: None,
+            transfer_command: None,
         }
     }
 
@@ -154,6 +156,7 @@ impl Console {
             self.announce = true;
             self.notified = false;
             self.urgent = None;
+            self.transfer_command = None;
             self.commands = Commands::new();
             self.rx_len = 0;
             self.rx_pos = 0;
@@ -183,6 +186,15 @@ impl Console {
                         crate::motor::stop();
                         experiment.abort(&mut crate::usb_host::ExperimentActuator);
                         self.urgent = Some((id, true));
+                    } else if let Ok(
+                        c @ (Command::GetData(..) | Command::GetChunk(..) | Command::AckData(..)),
+                    ) = command
+                    {
+                        // One native request is outstanding at a time. Retain it
+                        // while draining USB IN; ABORT still bypasses backpressure.
+                        if self.transfer_command.is_none() {
+                            self.transfer_command = Some(c);
+                        }
                     } else if !self.urgent.is_some_and(|(_, abort)| abort) {
                         self.urgent = Some((id, false));
                     }
@@ -227,9 +239,9 @@ impl Console {
             }
             return;
         }
-        if self.announce || (experiment.data_ready() && !self.notified) {
+        if self.announce || (experiment.batch_ready() && !self.notified) {
             self.announce = false;
-            self.notified = experiment.data_ready();
+            self.notified = experiment.batch_ready();
             let state = if experiment.active() {
                 "running"
             } else if experiment.data_ready() {
@@ -239,8 +251,9 @@ impl Console {
             };
             let _ = writeln!(
                 self.tx,
-                "{{\"type\":\"experiment_state\",\"id\":0,\"state\":\"{state}\",\"run\":{}}}",
-                experiment.run
+                "{{\"type\":\"experiment_state\",\"id\":0,\"state\":\"{state}\",\"run\":{},\"batch_ready\":{}}}",
+                experiment.run,
+                experiment.batch_ready()
             );
             return;
         }
@@ -250,10 +263,15 @@ impl Console {
             self.rx_pos = 0;
             self.rx_len = self.class.read_packet(&mut self.rx).unwrap_or(0);
         }
-        while self.rx_pos < self.rx_len {
-            let byte = self.rx[self.rx_pos];
-            self.rx_pos += 1;
-            if let Some(command) = self.commands.push(byte) {
+        while self.transfer_command.is_some() || self.rx_pos < self.rx_len {
+            let command = if let Some(command) = self.transfer_command.take() {
+                Some(Ok(command))
+            } else {
+                let byte = self.rx[self.rx_pos];
+                self.rx_pos += 1;
+                self.commands.push(byte)
+            };
+            if let Some(command) = command {
                 if experiment.owns_hardware()
                     && !matches!(
                         command,
@@ -348,12 +366,20 @@ impl Console {
                     Ok(Command::AckData(id, run, count, crc)) => {
                         match experiment.acknowledge(run, count as usize, crc) {
                             Ok(()) => {
-                                crate::usb_host::autonomous(false);
-                                log::set_max_level(log::LevelFilter::Info);
+                                let released = !experiment.owns_hardware();
+                                if released {
+                                    crate::usb_host::autonomous(false);
+                                    log::set_max_level(log::LevelFilter::Info);
+                                }
                                 self.notified = false;
                                 writeln!(
                                     self.tx,
-                                    "{{\"type\":\"experiment_ack\",\"id\":{id},\"run\":{run},\"action\":\"data_received\"}}"
+                                    "{{\"type\":\"experiment_ack\",\"id\":{id},\"run\":{run},\"action\":\"{}\"}}",
+                                    if released {
+                                        "data_received"
+                                    } else {
+                                        "batch_received"
+                                    }
                                 )
                             }
                             Err(message) => self.tx.error(id, message),
@@ -361,7 +387,7 @@ impl Console {
                     }
                     Ok(Command::Hello(id)) => writeln!(
                         self.tx,
-                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"commit\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"quasi_static_speed\":true,\"sine_position\":true,\"sine_gpio\":true,\"sine_serial_displacement\":true,\"sine_serial_velocity\":true,\"sine_serial_velocity_position\":true,\"max_pulse_hz\":{}}}",
+                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"commit\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"experiment_batches\":true,\"quasi_static_speed\":true,\"sine_position\":true,\"sine_gpio\":true,\"sine_serial_displacement\":true,\"sine_serial_velocity\":true,\"sine_serial_velocity_position\":true,\"max_pulse_hz\":{}}}",
                         option_env!("FIRMWARE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
                         option_env!("FIRMWARE_COMMIT").unwrap_or("local"),
                         crate::experiment_data::MAX_PULSE_HZ

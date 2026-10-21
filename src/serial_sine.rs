@@ -42,7 +42,7 @@ impl PositionCorrection {
         // another EPOS arrives. Comparing old EPOS with today's target would
         // turn telemetry cadence into a spurious position lag. Receipt time
         // cannot compensate for unknown controller/USB acquisition latency.
-        let target = trajectory.position(elapsed.saturating_sub(age) * 1000);
+        let target = trajectory.position_at(u64::from(elapsed.saturating_sub(age)) * 1000);
         let error = i64::from(target) - epos.value;
         // A continuous one-count deadband avoids chasing encoder rounding.
         let error_um =
@@ -153,7 +153,7 @@ impl Stream {
             return Err("Serial waveform update deadline missed");
         }
         let trajectory = Trajectory::new(config)?;
-        let us = elapsed * 1000;
+        let us = u64::from(elapsed) * 1000;
         if us >= trajectory.duration_us {
             if config.control().is_some_and(SineControl::velocity) {
                 return Ok(true);
@@ -178,16 +178,16 @@ impl Stream {
             // Follow local trajectory speed, rather than driving each tiny DPOS
             // step at a large fixed speed. Look one tick ahead to avoid a zero
             // speed dead zone; +1 covers integer um/s and encoder quantization.
-            let speed = trajectory
-                .velocity(us)
-                .abs()
-                .max(trajectory.velocity(us + UPDATE_MS * 1000).abs())
-                as u32
+            let speed = trajectory.velocity_at(us).abs().max(
+                trajectory
+                    .velocity_at(us + u64::from(UPDATE_MS) * 1000)
+                    .abs(),
+            ) as u32
                 + 1;
-            self.position(trajectory.position(us), speed, io)?;
+            self.position(trajectory.position_at(us), speed, io)?;
         } else {
             // Midpoint speed reduces zero-order-hold integration error.
-            let mut velocity = trajectory.velocity(us + UPDATE_MS * 500);
+            let mut velocity = trajectory.velocity_at(us + u64::from(UPDATE_MS) * 500);
             if let ExperimentConfig::Sinusoidal {
                 amplitude_nm,
                 frequency_mhz,

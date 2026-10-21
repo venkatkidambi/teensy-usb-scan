@@ -29,6 +29,368 @@ struct Io {
     complete: bool,
 }
 
+#[derive(Default)]
+struct TrackingIo {
+    target: i32,
+    stops: usize,
+}
+impl engine::Actuator for TrackingIo {
+    fn prepare_serial(&mut self, _: u32) -> Result<bool, &'static str> {
+        Ok(true)
+    }
+    fn serial_commands(
+        &mut self,
+        commands: &[engine::serial_sine::Command],
+    ) -> Result<(), &'static str> {
+        for command in commands {
+            if let engine::serial_sine::Command::Position(target) = command {
+                self.target = *target;
+            }
+        }
+        Ok(())
+    }
+    fn prepare_gpio(&mut self, _: u32) -> Result<bool, &'static str> {
+        unreachable!()
+    }
+    fn position_gpio(&mut self, _: ExperimentConfig, _: u32) -> Result<(), &'static str> {
+        unreachable!()
+    }
+    fn start_gpio(&mut self, _: ExperimentConfig) -> Result<(), &'static str> {
+        unreachable!()
+    }
+    fn gpio_status(&self) -> trajectory::Status {
+        trajectory::Status::Stopped
+    }
+    fn stop_gpio(&mut self) {}
+    fn speed(&mut self, _: u32) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn query_motor_timeout(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn tx_idle(&self) -> bool {
+        true
+    }
+    fn target(&mut self, target: i32, _: u32, _: bool) -> Result<(), &'static str> {
+        self.target = target;
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), &'static str> {
+        self.stops += 1;
+        Ok(())
+    }
+}
+fn tracking_poll(e: &mut engine::Engine<'_>, io: &mut TrackingIo, now: u32) {
+    let mut t = telemetry(now);
+    t.record(b"EPOS", i64::from(io.target), now);
+    t.record(b"DPOS", i64::from(io.target), now);
+    t.record(b"SSPD", i64::from(e.config.unwrap().speed().unwrap()), now);
+    t.record(b"TOU2", 60, now);
+    t.speed_updates = now.wrapping_add(1);
+    t.motor_timeout_updates = now.wrapping_add(1);
+    t.xeryon_motion.as_mut().unwrap().target = Some(io.target);
+    e.poll(now, &t, pressure(now), io);
+}
+fn begin_batch(e: &mut engine::Engine<'_>, archive: &receiver::Archive) -> receiver::Download {
+    let mut download = receiver::Download::default();
+    download.begin(e.run);
+    e.transfer(e.run).unwrap();
+    let mut metadata = String::new();
+    e.metadata(&mut metadata, receiver::DOWNLOAD_ID).unwrap();
+    download
+        .metadata_from_archive(serde_json::from_str(&metadata).unwrap(), archive)
+        .unwrap();
+    download
+}
+fn transfer_step(
+    e: &mut engine::Engine<'_>,
+    d: &mut receiver::Download,
+) -> Option<(String, receiver::Dataset)> {
+    let (command, dataset) = d.next().unwrap();
+    if let Some(dataset) = dataset {
+        return Some((command, dataset));
+    }
+    let command::Command::GetChunk(_, run, offset) =
+        command::Command::parse(command.as_bytes()).unwrap()
+    else {
+        panic!("Expected chunk request")
+    };
+    let bytes: Vec<_> = e
+        .chunk(run, offset as usize)
+        .unwrap()
+        .iter()
+        .flat_map(|r| r.encode())
+        .collect();
+    d.chunk(
+        json!({"id":receiver::DOWNLOAD_ID,"run":run,"offset":offset,"bytes":bytes.len()}),
+        &bytes,
+    )
+    .unwrap();
+    None
+}
+fn ack_batch(e: &mut engine::Engine<'_>, ack: &str) {
+    let command::Command::AckData(_, run, count, crc) =
+        command::Command::parse(ack.as_bytes()).unwrap()
+    else {
+        panic!("Expected ACK")
+    };
+    e.acknowledge(run, count as usize, crc).unwrap();
+}
+
+#[test]
+fn long_quasi_static_and_sine_runs_reuse_storage_and_publish_every_sample_once() {
+    for config in [
+        ExperimentConfig::QuasiStatic {
+            start_nm: 0,
+            step_nm: 78,
+            hold_ms: 130_000,
+            steps: 1,
+            speed_um_s: 10,
+        },
+        ExperimentConfig::Sinusoidal {
+            center_nm: 0,
+            amplitude_nm: 780,
+            frequency_mhz: 1000,
+            cycles: 130,
+            control: SineControl::Displacement,
+        },
+    ] {
+        let mut records = [Record::EMPTY; CAPACITY];
+        let mut e = engine::Engine::new(&mut records);
+        let mut io = TrackingIo::default();
+        e.accept(config, &telemetry(0), pressure(0), false, 0)
+            .unwrap();
+        e.begin(0, &mut io);
+        let mut archive = receiver::Archive::default();
+        archive.begin(false);
+        let mut download = None;
+        let mut batches = 0;
+        for now in (0..150_000).step_by(5) {
+            tracking_poll(&mut e, &mut io, now);
+            if e.batch_ready() && download.is_none() {
+                download = Some(begin_batch(&mut e, &archive));
+            }
+            if let Some(d) = &mut download {
+                // Acquisition advances between every chunk, including across ring wraps.
+                if let Some((ack, batch)) = transfer_step(&mut e, d) {
+                    let final_batch = batch.metadata["final"] == true;
+                    assert_eq!(archive.receive(batch).unwrap().is_some(), final_batch);
+                    ack_batch(&mut e, &ack);
+                    batches += 1;
+                    download = None;
+                    if final_batch {
+                        break;
+                    }
+                    assert!(e.owns_hardware());
+                    assert!(archive.datasets.is_empty());
+                }
+            }
+        }
+        assert_eq!(e.state, engine::State::Dashboard);
+        assert_eq!(e.outcome, "completed", "{}", e.reason);
+        assert!(batches >= 6);
+        assert_eq!(archive.datasets.len(), 1);
+        let dataset = &archive.datasets[0];
+        assert!(dataset.samples.len() > CAPACITY * 3);
+        assert_eq!(dataset.samples.len(), e.len);
+        assert_eq!(dataset.samples[0][0], 0);
+        assert!(
+            dataset
+                .samples
+                .windows(2)
+                .all(|pair| pair[1][0] - pair[0][0] == i64::from(SAMPLE_MS))
+        );
+        assert_eq!(dataset.metadata["count"], e.len);
+        assert_eq!(dataset.metadata["bytes"], e.len * RECORD_BYTES);
+        assert_eq!(dataset.metadata["crc"], e.checksum());
+        assert_eq!(dataset.csv().lines().count(), e.len + 2);
+    }
+}
+
+#[test]
+fn abort_during_batch_and_lost_ack_reconnect_preserve_prefix_and_terminal_tail() {
+    let mut records = [Record::EMPTY; 32];
+    let mut e = engine::Engine::new(&mut records);
+    let mut io = TrackingIo::default();
+    let config = ExperimentConfig::QuasiStatic {
+        start_nm: 0,
+        step_nm: 78,
+        hold_ms: 10_000,
+        steps: 1,
+        speed_um_s: 10,
+    };
+    e.accept(config, &telemetry(0), pressure(0), false, 0)
+        .unwrap();
+    e.begin(0, &mut io);
+    let mut archive = receiver::Archive::default();
+    let mut now = 0;
+    while !e.batch_ready() {
+        tracking_poll(&mut e, &mut io, now);
+        now += 5;
+    }
+    let mut d = begin_batch(&mut e, &archive);
+    // Freeze the batch, then acquire more data and abort while it is downloading.
+    for _ in 0..8 {
+        tracking_poll(&mut e, &mut io, now);
+        now += 5;
+    }
+    e.abort(&mut io);
+    let (lost_ack, batch) = loop {
+        if let Some(result) = transfer_step(&mut e, &mut d) {
+            break result;
+        }
+    };
+    assert_eq!(batch.metadata["outcome"], "running");
+    assert!(archive.receive(batch).unwrap().is_none());
+    assert!(e.owns_hardware());
+    // New serial worker, same archive: retry a verified batch whose ACK was lost.
+    let mut retry = begin_batch(&mut e, &archive);
+    let (ack, batch) = loop {
+        if let Some(result) = transfer_step(&mut e, &mut retry) {
+            break result;
+        }
+    };
+    assert_eq!(ack, lost_ack);
+    assert!(archive.receive(batch).unwrap().is_none());
+    ack_batch(&mut e, &ack);
+    assert!(e.owns_hardware());
+    let mut d = begin_batch(&mut e, &archive);
+    let (ack, batch) = loop {
+        if let Some(result) = transfer_step(&mut e, &mut d) {
+            break result;
+        }
+    };
+    assert_eq!(batch.metadata["outcome"], "aborted");
+    let completed = archive.receive(batch).unwrap().unwrap();
+    assert_eq!(completed.samples.len(), e.len);
+    assert_eq!(completed.samples[0][0], 0);
+    ack_batch(&mut e, &ack);
+    assert!(!e.owns_hardware());
+}
+
+#[test]
+fn stalled_receiver_faults_without_overwriting_samples() {
+    let mut records = [Record::EMPTY; 32];
+    let mut e = engine::Engine::new(&mut records);
+    let mut io = TrackingIo::default();
+    let config = ExperimentConfig::QuasiStatic {
+        start_nm: 0,
+        step_nm: 78,
+        hold_ms: 10_000,
+        steps: 1,
+        speed_um_s: 10,
+    };
+    e.accept(config, &telemetry(0), pressure(0), false, 0)
+        .unwrap();
+    e.begin(0, &mut io);
+    for now in (0..1000).step_by(5) {
+        tracking_poll(&mut e, &mut io, now);
+    }
+    assert_eq!(e.outcome, "faulted");
+    assert_eq!(e.reason, "PC transfer stalled; sample buffer full");
+    assert_eq!(e.len, 32);
+    assert!(io.stops > 0);
+    let mut archive = receiver::Archive::default();
+    let mut d = begin_batch(&mut e, &archive);
+    let (ack, batch) = loop {
+        if let Some(result) = transfer_step(&mut e, &mut d) {
+            break result;
+        }
+    };
+    let dataset = archive.receive(batch).unwrap().unwrap();
+    assert_eq!(dataset.samples[0][0], 0);
+    assert_eq!(dataset.samples.last().unwrap()[0], 310);
+    ack_batch(&mut e, &ack);
+}
+
+#[test]
+fn batch_prefix_integrity_retries_and_empty_final_batch() {
+    let bytes: Vec<_> = (0..4)
+        .flat_map(|i| {
+            Record {
+                elapsed_ms: i * SAMPLE_MS,
+                ..Record::EMPTY
+            }
+            .encode()
+        })
+        .collect();
+    let metadata = |start: usize, end: usize, final_batch: bool| {
+        let mut m = meta(7, &bytes[..end * RECORD_BYTES]);
+        m["offset"] = start.into();
+        m["bytes"] = ((end - start) * RECORD_BYTES).into();
+        m["final"] = final_batch.into();
+        m["outcome"] = if final_batch { "completed" } else { "running" }.into();
+        m
+    };
+    let mut archive = receiver::Archive::default();
+    // A second batch can be retried with a fresh worker after losing its ACK.
+    for (start, end) in [(0, 2), (2, 4), (2, 4)] {
+        let mut d = receiver::Download::default();
+        d.begin(7);
+        d.metadata_from_archive(metadata(start, end, false), &archive)
+            .unwrap();
+        let chunk = &bytes[start * RECORD_BYTES..end * RECORD_BYTES];
+        d.chunk(
+            json!({"id":receiver::DOWNLOAD_ID,"run":7,"offset":start,"bytes":chunk.len()}),
+            chunk,
+        )
+        .unwrap();
+        let (_, batch) = d.next().unwrap();
+        assert!(archive.receive(batch.unwrap()).unwrap().is_none());
+    }
+    for bad in 0..5 {
+        let mut d = receiver::Download::default();
+        d.begin(7);
+        let mut m = metadata(2, 4, false);
+        match bad {
+            0 => {
+                // Correct suffix is insufficient without its acknowledged prefix.
+                assert!(d.metadata(m).is_err());
+                continue;
+            }
+            1 => {
+                m["offset"] = 3.into();
+                m["bytes"] = RECORD_BYTES.into();
+            }
+            2 => m["config"] = json!({"kind":"quasi_static"}),
+            _ => {}
+        }
+        if bad < 3 {
+            assert!(d.metadata_from_archive(m, &archive).is_err());
+            continue;
+        }
+        let mut chunk = bytes[2 * RECORD_BYTES..].to_vec();
+        chunk[0] = 0; // Timestamp crosses backwards over the batch boundary.
+        if bad == 4 {
+            // Even a valid cumulative CRC cannot excuse a backwards timestamp.
+            m["crc"] = (!crc32(crc32(!0, &bytes[..2 * RECORD_BYTES]), &chunk)).into();
+        }
+        d.metadata_from_archive(m, &archive).unwrap();
+        d.chunk(
+            json!({"id":receiver::DOWNLOAD_ID,"run":7,"offset":2,"bytes":chunk.len()}),
+            &chunk,
+        )
+        .unwrap();
+        let error = d.next().err().unwrap();
+        assert!(error.contains(if bad == 3 { "CRC" } else { "timestamps" }));
+    }
+    // Completion exactly after an ACK still needs a final outcome and hardware release.
+    for attempt in 0..2 {
+        let mut d = receiver::Download::default();
+        d.begin(7);
+        d.metadata_from_archive(metadata(4, 4, true), &archive)
+            .unwrap();
+        let (ack, batch) = d.next().unwrap();
+        assert!(ack.starts_with("ACK_DATA_RECEIVED"));
+        assert_eq!(
+            archive.receive(batch.unwrap()).unwrap().is_some(),
+            attempt == 0
+        );
+    }
+    assert_eq!(archive.datasets.len(), 1);
+    assert_eq!(archive.datasets[0].samples.len(), 4);
+}
+
 #[test]
 fn csv_exports_direct_force_with_raw_counts_ranges_and_calibration_provenance() {
     let counts = [
@@ -549,22 +911,13 @@ fn native_quasi_static_start_uses_step_travel_budget() {
         }))
         .unwrap();
         let result = input.command(1);
-        if repeats == 19 {
-            assert!(
-                result
-                    .unwrap_err()
-                    .contains("reduce steps/hold/travel or increase speed")
-            );
-        } else {
-            let wire = result.unwrap();
-            assert_eq!(wire, format!("START 1 Q 0 1000 1000 {repeats} 10"));
-            let command::Command::Start(_, config) =
-                command::Command::parse(wire.as_bytes()).unwrap()
-            else {
-                panic!("Expected START");
-            };
-            assert_eq!(config.validate(), Ok(repeats * 2216));
-        }
+        let wire = result.unwrap();
+        assert_eq!(wire, format!("START 1 Q 0 1000 1000 {repeats} 10"));
+        let command::Command::Start(_, config) = command::Command::parse(wire.as_bytes()).unwrap()
+        else {
+            panic!("Expected START");
+        };
+        assert_eq!(config.validate(), Ok(repeats * 2216));
     }
 }
 #[test]
