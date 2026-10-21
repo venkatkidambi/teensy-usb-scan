@@ -12,6 +12,7 @@ mod plunger_config;
 mod serial;
 #[cfg(feature = "smoke-test")]
 mod smoke;
+mod zeiss;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU32, Ordering},
@@ -337,6 +338,7 @@ macro_rules! command_handler {
     ($($extra:path),* $(,)?) => {
         tauri::generate_handler![serial_ports, serial_connect, serial_send, serial_poll,
             serial_disconnect, experiment_start, experiment_result, experiment_results, experiment_validate, experiment_save_csv, experiment_save_png,
+            zeiss::zeiss_czi_files, zeiss::zeiss_choose_folder,
             maintenance::app_release_info, maintenance::firmware_install, maintenance::app_update_check, maintenance::app_update_install, $($extra),*]
     };
 }

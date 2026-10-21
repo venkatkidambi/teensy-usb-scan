@@ -221,6 +221,25 @@ experiment. Already acknowledged batches live in desktop RAM; reconnect with
 the same app process.
 Save CSV before replacement, closing the app, or removing power.
 
+### Optional Zeiss ZEN start trigger
+
+In either Quasi-static or Sinusoidal mode, check **Link to Zeiss ZEN**, enter
+or browse to the folder where ZEN saves images, then click **Wait for ZEN image**.
+Once the panel reports that it is waiting, the next new `.czi` file starts the
+configured experiment automatically. With Frequency sweep enabled, that one image
+starts the whole sweep; subsequent frequencies retain their normal progression.
+The option is unchecked by default, so normal **Start experiment** behavior is unchanged.
+
+The desktop app checks the selected folder every 100 ms, ignoring existing files,
+changes to existing images, and subfolders. The `.czi` extension is case-insensitive;
+a file renamed into the folder with a new `.czi` name also triggers the run.
+Motion starts on file appearance, without waiting for the image to finish saving.
+This is a folder trigger, not a hardware-synchronized acquisition signal: filesystem
+access, desktop scheduling, and any in-flight serial request add latency.
+Each arm starts at most one experiment (or sweep). Use a new filename for each
+image and arm again for the next experiment. **ABORT**, disconnecting, or a folder
+read error cancels the wait. Keep the app open and connected while waiting.
+
 ## Hardware and diagnostics
 
 USB1 is a Rust CDC device; USB2 uses TinyUSB `OPT_OS_NONE`, one directly attached

@@ -7,12 +7,14 @@ const text=(id,value)=>{const node=$(id);if(node.textContent!==value)node.textCo
 let mode='dashboard',view='dashboard',showResults=false,dataset=null,context=null,saving=false,starting=false;
 let sweep=null,history=[],selectedIndex=null,sweepTimer=null,historyLoading=false,validationCancelled=false;
 let phaseCache=new WeakMap(),sweepPhases=[];
+let zenWait=null,zenTimer=null,zenChoosing=false;
 const plotNames=['position','pressure','sweep-phase'];
 const modes=['dashboard','quasi_static','sinusoidal','data'];
 const fields=['start','increment','timing','repeats','speed'];
 const configurations={quasi_static:['0','1','1','3','10'],sinusoidal:['0','1','1','3','10']};
-function startBlocked({session,connected,hello,experimentUnresolved}) {
+function startBlocked({session,connected,hello,experimentUnresolved},ignoreZen=false) {
   if(historyLoading)return 'Loading recorded experiments…';
+  if(zenWait&&!ignoreZen)return 'Waiting for a new ZEN .czi image. Press ABORT to cancel.';
   if(starting)return 'Sending START to the Teensy…';
   if(sweep)return 'Frequency sweep in progress. Press ABORT to stop it.';
   if(saving)return 'Wait for export to finish.';
@@ -29,6 +31,62 @@ function startStatus(message) {
   $('experiment-state').textContent=message;
   context.activity?.(message);
 }
+function cancelZen(message) {
+  zenWait=null;clearTimeout(zenTimer);zenTimer=null;
+  if(message)startStatus(message);
+}
+function scheduleZen(current) {
+  if(zenWait===current)zenTimer=setTimeout(()=>{zenTimer=null;void pollZen(current);},100);
+}
+async function pollZen(current) {
+  try {
+    if(zenWait!==current)return;
+    if(!current.file){
+      const files=await context.invoke('zeiss_czi_files',{folder:current.folder});
+      if(zenWait!==current)return;
+      current.file=files.find(file=>!current.files.has(file));
+      current.files=new Set(files);
+    }
+    const state=context.state();
+    if(!state.connected||state.session!==current.session)throw Error('Connection changed. Arm again after reconnecting.');
+    // Telemetry may have a request in flight. Retain the trigger until it finishes.
+    const blocked=startBlocked(state,true);
+    if(blocked&&!state.session.pending)throw Error(blocked);
+    if(!current.file||blocked){scheduleZen(current);return;}
+    cancelZen();
+    startStatus(`ZEN image detected: ${current.file}. Sending START to the Teensy…`);
+    if(current.sweeping){
+      sweep={configs:current.configs,index:0,completed:0,session:current.session,received:false,run:null};
+      sweepProgress('ZEN image detected. Starting sweep…');
+      await nextSweepRun();
+    }else{
+      starting=true;experimentControls();
+      try{await current.session.startExperiment(current.configs[0]);}
+      catch(e){startStatus(`START failed: ${e.message??e}`);}
+      finally{starting=false;}
+    }
+  }catch(e){
+    if(zenWait===current)cancelZen(`ZEN wait stopped: ${e.message??e}`);
+  }finally{context.controls();}
+}
+async function armZen(config,state) {
+  const folder=$('experiment-zen-folder').value.trim();
+  if(!folder){startStatus('Choose the folder where ZEN saves .czi images.');return;}
+  const current={folder,session:state.session,sweeping:mode==='sinusoidal'&&$('experiment-sweep-enabled').checked};
+  zenWait=current;startStatus('Checking ZEN folder and experiment settings…');experimentControls();
+  try {
+    current.configs=current.sweeping?parseFrequencies($('experiment-frequencies').value).map(timing=>({...config,timing})):[config];
+    await context.invoke('experiment_validate',{configs:current.configs});
+    if(zenWait!==current)return;
+    const files=await context.invoke('zeiss_czi_files',{folder});
+    if(zenWait!==current)return;
+    if(!context.state().connected||context.state().session!==current.session)throw Error('Connection changed. Arm again after reconnecting.');
+    current.files=new Set(files);
+    startStatus(`Waiting for a new ZEN .czi image in ${folder}. Press ABORT to cancel.`);
+    scheduleZen(current);
+  }catch(e){if(zenWait===current)cancelZen(`Could not arm ZEN link: ${e.message??e}`);}
+  finally{context.controls();}
+}
 function sweepProgress(message,state='active') {
   const {completed,configs}=sweep;
   $('experiment-sweep-progress').setAttribute('data-state',state);
@@ -40,10 +98,13 @@ function sweepProgress(message,state='active') {
 export function experimentControls() {
   if(!context)return;
   const {session,connected,hello,snapshot,experimentUnresolved}=context.state();
+  if(zenWait&&(!connected||session!==zenWait.session||session?.experimentOwned||experimentUnresolved)){
+    cancelZen('ZEN wait cancelled: connection or experiment ownership changed. Arm again when ready.');
+  }
   if(sweep&&(!connected||session!==sweep.session)){
     sweepProgress('Sweep stopped after disconnect. Recover the current run before starting another sweep.','stopped');sweep=null;
   }
-  const owned=!!sweep||starting||!!session?.experimentOwned||experimentUnresolved;
+  const owned=!!zenWait||!!sweep||starting||!!session?.experimentOwned||experimentUnresolved;
   for(const name of modes) $(`tab-${name}`).disabled=owned;
   $('dashboard-panel').inert=owned;
   for(const control of $('experiment-form').elements)control.disabled=owned;
@@ -55,6 +116,11 @@ export function experimentControls() {
   $('experiment-frequencies').disabled=owned||!sweeping;
   $('experiment-timing').disabled=owned||sweeping;
   $('experiment-sweep-fields').hidden=mode!=='sinusoidal';
+  const zenEnabled=$('experiment-zen-enabled').checked;
+  $('experiment-zen-options').hidden=!zenEnabled;
+  $('experiment-zen-folder').disabled=owned||!zenEnabled;
+  $('experiment-zen-browse').disabled=owned||!zenEnabled||zenChoosing;
+  text('experiment-start-button',zenEnabled?'Wait for ZEN image':'Start experiment');
   $('experiment-run').disabled=!!saving||owned||!history.length;
   $('experiment-phase-unit').disabled=!!saving;
   const blocked=startBlocked(context.state());
@@ -64,7 +130,7 @@ export function experimentControls() {
   $('experiment-start-reason').hidden=!blocked;
   text('experiment-motion-detail',mode==='sinusoidal'?($('experiment-control').value==='gpio'?`GPIO Pulse/Direction controls the approach and x = center − A·cos(2πft) on the Teensy. Starts and finishes at center − amplitude; waits for encoder confirmation. Peak pulse limit: ${hello?.max_pulse_hz??10000} Hz.`:`${$('experiment-control').value==='velocity_position'?'Serial velocity control adds a bounded, gradual encoder position correction to reduce drift.':$('experiment-control').value==='velocity'?'Serial velocity control varies scan speed in 1 µm/s steps; position can drift.':'Serial displacement control uses small position targets and a varying speed limit to reduce jerking.'} All modes use a smooth approach ramp and start the sine at center − amplitude. They finish at the last cycle endpoint without returning to center. No GPIO wiring required. Lower frequencies allow more serial updates per cycle.`):'Speed applies to start positioning and every step. The controller confirms the speed before motion; each hold begins after confirmed arrival.');
   $('experiment-current').disabled=owned||!connected||!snapshot?.values.EPOS||context.positionAge()>=3000;
-  $('experiment-abort').disabled=!connected||!owned;
+  $('experiment-abort').disabled=zenWait?false:!connected||!owned;
   $('experiment-save').disabled=!!saving||owned||!dataset;
   text('experiment-save',saving==='csv'?'Saving…':'Save CSV');
   for(const name of plotNames){
@@ -305,6 +371,7 @@ async function nextSweepRun() {
   finally {starting=false;context.controls();}
 }
 export function setupExperiments(api) {
+  cancelZen();zenChoosing=false;
   context=api;historyLoading=!!api.invoke;validationCancelled=false;clearTimeout(sweepTimer);sweepTimer=null;sweep=null;history=[];selectedIndex=null;dataset=null;starting=false;saving=false;mode='dashboard';view='dashboard';showResults=false;
   text('experiment-sweep-status','');
   $('experiment-results').hidden=true;
@@ -313,7 +380,7 @@ export function setupExperiments(api) {
   $('experiment-sweep-results').hidden=true;
   $('experiment-phase-unit').onchange=drawSweepPhase;
   for(const name of plotNames)$(`experiment-${name}-png`).onclick=async()=>{
-    if(saving||sweep||starting||api.state().session?.experimentOwned||api.state().experimentUnresolved||!dataset||view!=='data')return;
+    if(saving||zenWait||sweep||starting||api.state().session?.experimentOwned||api.state().experimentUnresolved||!dataset||view!=='data')return;
     if(name==='sweep-phase'&&!sweepPhases.length)return;
     const index=dataset.archive_index??selectedIndex;
     saving=name;experimentControls();
@@ -328,6 +395,20 @@ export function setupExperiments(api) {
   $('experiment-control').value='displacement';
   $('experiment-control').onchange=experimentControls;
   $('experiment-sweep-enabled').onchange=experimentControls;
+  $('experiment-zen-enabled').checked=false;
+  $('experiment-zen-enabled').onchange=()=>{
+    if(!$('experiment-zen-enabled').checked&&zenWait)cancelZen('ZEN wait cancelled.');
+    experimentControls();
+  };
+  $('experiment-zen-browse').onclick=async()=>{
+    if(zenChoosing||zenWait||starting||sweep)return;
+    zenChoosing=true;experimentControls();
+    try{
+      const folder=await api.invoke('zeiss_choose_folder');
+      if(folder&&!zenWait&&!starting&&!sweep)$('experiment-zen-folder').value=folder;
+    }catch(e){startStatus(`Could not choose ZEN folder: ${e.message??e}`);}
+    finally{zenChoosing=false;experimentControls();}
+  };
   $('experiment-run').onchange=()=>{
     selectedIndex=Number($('experiment-run').value);
     if(history[selectedIndex])experimentMessage({type:'experiment_dataset',dataset:history[selectedIndex],restored:true});
@@ -351,6 +432,7 @@ export function setupExperiments(api) {
     const config={kind:mode,start_um:Number($('experiment-start').value),increment_um:Number($('experiment-increment').value),timing:Number($('experiment-timing').value),repeats:Number($('experiment-repeats').value)};
     if(mode==='sinusoidal')config.sine_control=$('experiment-control').value;
     if(mode==='quasi_static')config.speed_um_s=Number($('experiment-speed').value);
+    if($('experiment-zen-enabled').checked){await armZen(config,state);return;}
     if(mode==='sinusoidal'&&$('experiment-sweep-enabled').checked){
       validationCancelled=false;starting=true;experimentControls();
       try {
@@ -373,6 +455,7 @@ export function setupExperiments(api) {
     finally{starting=false;api.controls();}
   };
   $('experiment-abort').onclick=async()=>{
+    if(zenWait)cancelZen('ZEN wait cancelled. No experiment was started.');
     validationCancelled=true;
     if(sweep){sweepProgress('Sweep cancelled. No further frequencies will start.','stopped');sweep=null;}
     if(!api.state().session?.experimentOwned&&!api.state().experimentUnresolved){api.controls();return;}
@@ -381,7 +464,7 @@ export function setupExperiments(api) {
     finally{api.controls();}
   };
   $('experiment-save').onclick=async()=>{
-    if(saving||sweep||starting||api.state().session?.experimentOwned||api.state().experimentUnresolved||!dataset)return;
+    if(saving||zenWait||sweep||starting||api.state().session?.experimentOwned||api.state().experimentUnresolved||!dataset)return;
     saving='csv';experimentControls();
     try{
       const path=await api.invoke('experiment_save_csv',{index:dataset.archive_index??selectedIndex});

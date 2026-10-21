@@ -100,6 +100,14 @@ summary::marker{color:var(--muted);font-size:10px}
 .input-action button{flex-shrink:0;font-size:12px;padding-inline:10px}
 .experiment-actions{grid-column:1/-1;display:flex;align-items:center;gap:12px}
 .experiment-actions button{flex-shrink:0}
+#experiment-zen-fields{grid-column:1/-1;padding:14px 16px;border:1px solid var(--line);border-radius:6px;background:#fafafa}
+.experiment-form .zen-toggle{flex-direction:row;align-items:center;font-size:13px;font-weight:500;cursor:pointer}
+#experiment-zen-enabled{width:16px;height:16px;min-height:0;margin:0;padding:0;accent-color:var(--green);cursor:inherit}
+#experiment-zen-enabled:focus-visible{outline:2px solid var(--green);outline-offset:3px}
+#experiment-zen-enabled:checked+span{color:var(--green)}
+#experiment-zen-options{margin-top:14px}
+#experiment-zen-options>.input-action{margin-top:6px}
+#experiment-zen-help{margin:10px 0 0;line-height:1.6}
 #experiment-start-reason{min-height:1.6em}
 #experiment-sweep-fields{grid-column:1/-1;padding:14px 16px;background:var(--surface)}
 #experiment-sweep-fields .sweep-heading{margin:0}

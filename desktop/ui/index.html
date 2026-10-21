@@ -37,6 +37,14 @@
           <p class="empty-copy">Same center, amplitude and cycles at each frequency (up to 100 runs). Each run finishes at center − amplitude and downloads before the next starts. Keep the app connected; ABORT cancels the remaining sweep.</p>
         </div>
       </div>
+      <div id="experiment-zen-fields">
+        <label class="zen-toggle"><input id="experiment-zen-enabled" type="checkbox"><span>Link to Zeiss ZEN</span></label>
+        <div id="experiment-zen-options" hidden>
+          <label for="experiment-zen-folder">ZEN image save folder</label>
+          <div class="input-action"><input id="experiment-zen-folder" type="text" placeholder="Enter the folder where ZEN saves .czi images" aria-describedby="experiment-zen-help" disabled><button id="experiment-zen-browse" type="button" disabled>Browse…</button></div>
+          <p id="experiment-zen-help" class="empty-copy">Press “Wait for ZEN image” to arm. The next new .czi file in this folder starts the experiment (or the full frequency sweep) once. Existing files and subfolders are ignored. Checks every 100 ms; starts on file appearance, without waiting for saving to finish. Keep the app connected. ABORT cancels the wait.</p>
+        </div>
+      </div>
       <div class="experiment-actions"><button id="experiment-start-button" type="submit" class="primary" aria-describedby="experiment-start-reason" disabled>Start experiment</button><p id="experiment-start-reason" class="empty-copy" role="status" hidden></p></div>
     </form>
     <div id="experiment-sweep-progress" class="sweep-progress" hidden>
