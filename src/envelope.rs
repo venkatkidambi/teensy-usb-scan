@@ -33,6 +33,10 @@ mod tests {
             hold_ms: 10,
             steps: 1,
             speed_um_s: 10,
+            cycle_wait_ms: 0,
+            predelay_ms: 0,
+            cycles: 1,
+            return_to_start: false,
         };
         assert!(!guard.exceeded(quasi, &t, 1));
         t.samples[0].valid = false;

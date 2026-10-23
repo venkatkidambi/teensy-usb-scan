@@ -19,6 +19,10 @@ pub struct Input {
     pub repeats: u32,
     pub speed_um_s: Option<u32>,
     pub sine_control: Option<String>,
+    pub predelay_s: Option<f64>,
+    pub cycle_wait_s: Option<f64>,
+    pub cycles: Option<u32>,
+    pub return_to_start: Option<bool>,
 }
 fn scaled(value: f64, scale: f64) -> Result<i64, String> {
     let n = value * scale;
@@ -63,16 +67,57 @@ impl Input {
         } else if self.sine_control.is_some() {
             return Err("Sine control requires sinusoidal mode".into());
         }
+        if let ExperimentConfig::QuasiStatic {
+            ref mut predelay_ms,
+            ref mut cycle_wait_ms,
+            ref mut cycles,
+            ref mut return_to_start,
+            ..
+        } = config
+        {
+            *predelay_ms = u32::try_from(scaled(self.predelay_s.unwrap_or(0.0), 1000.0)?)
+                .map_err(|_| "Predelay out of range")?;
+            *cycle_wait_ms = u32::try_from(scaled(self.cycle_wait_s.unwrap_or(0.0), 1000.0)?)
+                .map_err(|_| "Cycle wait out of range")?;
+            *cycles = self.cycles.unwrap_or(1);
+            *return_to_start = self.return_to_start.unwrap_or(false);
+        } else if self.cycle_wait_s.is_some()
+            || self.predelay_s.is_some()
+            || self.cycles.is_some()
+            || self.return_to_start.is_some()
+        {
+            return Err("Quasi-static options require quasi-static mode".into());
+        }
         config.validate()?;
         let mut command = format!(
             "START {id} {kind} {start} {increment} {timing} {}",
             self.repeats
         );
         if let ExperimentConfig::QuasiStatic {
-            speed_um_s: speed, ..
+            speed_um_s: speed,
+            predelay_ms,
+            cycle_wait_ms,
+            cycles,
+            return_to_start,
+            ..
         } = config
         {
             write!(command, " {speed}").unwrap();
+            if self.cycle_wait_s.is_some()
+                || self.predelay_s.is_some()
+                || self.cycles.is_some()
+                || self.return_to_start.is_some()
+            {
+                write!(
+                    command,
+                    " {predelay_ms} {cycles} {}",
+                    u8::from(return_to_start)
+                )
+                .unwrap();
+                if self.cycle_wait_s.is_some() {
+                    write!(command, " {cycle_wait_ms}").unwrap();
+                }
+            }
         }
         if let Some(control) = config.control() {
             command.push_str(match control {
@@ -287,6 +332,10 @@ impl Dataset {
             metadata.to_string().replace('"', "\"\"")
         );
         csv.push_str("time_s,position_um,pressure_raw,stat,epos_age_ms,pressure_age_ms,stat_age_ms,target_um,controller_ticks,controller_age_ms,epos_counts,target_counts,epos_host_receipt_s,epos_generation,pressure_generation,epos_new,pressure_new,force_n,force_mn,force_extrapolated,controller_host_receipt_s,epos_timestamp_source,epos_controller_time_s\n");
+        let tare = self.metadata["force_tare_raw"]
+            .as_i64()
+            .map(|raw| calibration.newtons(raw))
+            .unwrap_or(0.0);
         let mut previous: Option<&[i64; RECORD_FIELDS]> = None;
         for s in &self.samples {
             let _ = writeln!(
@@ -309,8 +358,8 @@ impl Dataset {
                 s[11],
                 u8::from(previous.is_none_or(|p| p[10] != s[10])),
                 u8::from(previous.is_none_or(|p| p[11] != s[11])),
-                calibration.newtons(s[2]),
-                calibration.newtons(s[2]) * 1000.0,
+                calibration.newtons(s[2]) - tare,
+                (calibration.newtons(s[2]) - tare) * 1000.0,
                 calibration.extrapolated(s[2]),
                 if s[9] == i64::from(u32::MAX) {
                     String::new()

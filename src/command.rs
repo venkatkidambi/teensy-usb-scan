@@ -11,6 +11,7 @@ pub enum Command {
     Hello(u32),
     Ping(u32),
     Snapshot(u32),
+    Tare(u32),
     Stream(u32, bool),
     Move(u32, bool, u8, u32),
     Limits(u32, u8, u8),
@@ -31,6 +32,7 @@ impl Command {
             | Self::Hello(id)
             | Self::Ping(id)
             | Self::Snapshot(id)
+            | Self::Tare(id)
             | Self::Stream(id, _)
             | Self::Move(id, _, _, _)
             | Self::Limits(id, _, _)
@@ -79,6 +81,27 @@ impl Command {
                         Some("VP") => crate::experiment_data::SineControl::VelocityPosition,
                         _ => return Err(()),
                     };
+                }
+                if let ExperimentConfig::QuasiStatic {
+                    ref mut predelay_ms,
+                    ref mut cycle_wait_ms,
+                    ref mut cycles,
+                    ref mut return_to_start,
+                    ..
+                } = config
+                {
+                    if let Some(delay) = words.next() {
+                        *predelay_ms = delay.parse().map_err(|_| ())?;
+                        *cycles = words.next().ok_or(())?.parse().map_err(|_| ())?;
+                        *return_to_start = match words.next() {
+                            Some("0") => false,
+                            Some("1") => true,
+                            _ => return Err(()),
+                        };
+                        if let Some(wait) = words.next() {
+                            *cycle_wait_ms = wait.parse().map_err(|_| ())?;
+                        }
+                    }
                 }
                 Self::Start(id, config)
             }
@@ -142,6 +165,7 @@ impl Command {
             "HELLO" => Self::Hello(id),
             "PING" => Self::Ping(id),
             "SNAPSHOT" => Self::Snapshot(id),
+            "TARE" => Self::Tare(id),
             "STREAM" => Self::Stream(
                 id,
                 match words.next() {

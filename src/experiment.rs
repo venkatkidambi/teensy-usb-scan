@@ -72,6 +72,11 @@ pub struct Engine<'a> {
     timeout_updates: u32,
     next_sample: u32,
     step: u32,
+    cycle: u32,
+    returning: bool,
+    cycle_wait_started: Option<u32>,
+    accepted_ms: u32,
+    pub force_tare_raw: i32,
     hold_started: Option<u32>,
     target: i32,
     epoch: u32,
@@ -133,6 +138,11 @@ impl<'a> Engine<'a> {
             timeout_updates: 0,
             next_sample: 0,
             step: 0,
+            cycle: 0,
+            returning: false,
+            cycle_wait_started: None,
+            accepted_ms: 0,
+            force_tare_raw: 0,
             hold_started: None,
             target: 0,
             epoch: 0,
@@ -286,6 +296,11 @@ impl<'a> Engine<'a> {
         self.target = target;
         self.epoch = t.epoch;
         self.step = 0;
+        self.cycle = 0;
+        self.returning = false;
+        self.cycle_wait_started = None;
+        self.accepted_ms = now;
+        self.force_tare_raw = p.average;
         self.stopping = false;
         self.serial = Default::default();
         self.serial_prepared = false;
@@ -315,6 +330,9 @@ impl<'a> Engine<'a> {
         Ok(())
     }
     pub fn begin(&mut self, now: u32, io: &mut impl Actuator) {
+        if now.wrapping_sub(self.accepted_ms) < self.config.unwrap().predelay_ms() {
+            return;
+        }
         match io.prepare_feedback(now) {
             Ok(false) => return,
             Err(e) => {
@@ -558,7 +576,17 @@ impl<'a> Engine<'a> {
                     let seconds = t.motor_timeout.value;
                     let longest = self
                         .move_timeout
-                        .max(self.config.unwrap().step_timeout().unwrap());
+                        .max(self.config.unwrap().step_timeout().unwrap())
+                        .max(match self.config.unwrap() {
+                            ExperimentConfig::QuasiStatic {
+                                cycles,
+                                return_to_start,
+                                ..
+                            } if cycles > 1 || return_to_start => {
+                                self.config.unwrap().return_timeout().unwrap()
+                            }
+                            _ => 0,
+                        });
                     // TOU2 is queried after SSPD, so its reply also lets any
                     // trailing SSPD readback arrive before the first target.
                     if Some(t.speed.value) != self.config.unwrap().speed().map(i64::from) {
@@ -720,9 +748,34 @@ impl<'a> Engine<'a> {
                 step_nm,
                 hold_ms,
                 steps,
+                cycles,
+                cycle_wait_ms,
+                return_to_start,
                 ..
             } => {
-                if self.step != 0 && self.hold_started.is_none() {
+                if self
+                    .cycle_wait_started
+                    .is_some_and(|ms| now.wrapping_sub(ms) < cycle_wait_ms)
+                {
+                    Ok(false)
+                } else if self.returning {
+                    if now.wrapping_sub(self.move_started) >= self.move_timeout {
+                        Err("Return move deadline")
+                    } else if t
+                        .xeryon_motion
+                        .is_some_and(|m| m.state == 2 && m.target == Some(self.target))
+                    {
+                        self.returning = false;
+                        self.cycle += 1;
+                        self.cycle_wait_started =
+                            (self.cycle < cycles && cycle_wait_ms > 0).then_some(now);
+                        self.step = 0;
+                        self.hold_started = None;
+                        Ok(self.cycle == cycles)
+                    } else {
+                        Ok(false)
+                    }
+                } else if self.step != 0 && self.hold_started.is_none() {
                     if now.wrapping_sub(self.move_started) >= self.move_timeout {
                         Err("Step move deadline")
                     } else if t
@@ -740,8 +793,18 @@ impl<'a> Engine<'a> {
                         .is_some_and(|ms| now.wrapping_sub(ms) >= hold_ms)
                 {
                     if self.step == steps {
-                        Ok(true)
+                        if self.cycle + 1 < cycles || return_to_start {
+                            self.target = counts(start_nm).unwrap();
+                            self.returning = true;
+                            self.hold_started = None;
+                            self.move_started = now;
+                            self.move_timeout = self.config.unwrap().return_timeout().unwrap();
+                            io.target(self.target, now, true).map(|_| false)
+                        } else {
+                            Ok(true)
+                        }
                     } else {
+                        self.cycle_wait_started = None;
                         self.step += 1;
                         self.target = counts(start_nm + step_nm * i64::from(self.step)).unwrap();
                         self.hold_started = None;
@@ -862,6 +925,7 @@ impl<'a> Engine<'a> {
             self.run
         )?;
         self.config.unwrap().write_json(out)?;
+        write!(out, ",\"force_tare_raw\":{}", self.force_tare_raw)?;
         self.envelope.write(out)?;
         if let Some(ExperimentConfig::Sinusoidal {
             amplitude_nm,

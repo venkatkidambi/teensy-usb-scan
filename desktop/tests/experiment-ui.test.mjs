@@ -62,7 +62,7 @@ test('START explains blockers, validates fields, submits once, and reports failu
   globalThis.ResizeObserver=class {observe(){}};
   try {
     const calls=[],logs=[];let reject;
-    const state={connected:true,hello:{experiments:true,sine_serial_displacement:true,sine_serial_velocity:true},session:{
+    const state={connected:true,hello:{experiments:true,force_tare:true,quasi_static_cycles:true,quasi_static_cycle_wait:true,sine_serial_displacement:true,sine_serial_velocity:true},session:{
       startExperiment(config){calls.push(config);return new Promise((_,fail)=>{reject=fail;});},
     }};
     setupExperiments({state:()=>state,positionAge:()=>0,controls:experimentControls,activity:message=>logs.push(message)});
@@ -73,6 +73,7 @@ test('START explains blockers, validates fields, submits once, and reports failu
       [state,'connected',false,/Connect the Teensy/],
       [state,'experimentUnresolved',true,/Reconnect/],
       [state.hello,'experiments',false,/enable experiments/],
+      [state.hello,'force_tare',false,/automatic force zeroing/],
       [state.hello,'sine_serial_displacement',false,/sine control/],
       [state.session,'pending',true,/current Teensy request/],
       [state.session,'experimentOwned',true,/owns the hardware/],
@@ -159,9 +160,31 @@ test('START explains blockers, validates fields, submits once, and reports failu
     node('tab-quasi_static').onclick();
     assert.equal(node('experiment-speed').value,'25');
     state.session.startExperiment=async config=>calls.push(config);
+    node('experiment-cycle-wait').value='12.5';
+    node('experiment-predelay').value='2.5';node('experiment-cycles').value='5';node('experiment-return').checked=true;
+    node('experiment-form').oninput();
+    assert.match(node('experiment-planner-summary').textContent,/5 cycles/);
+    state.hello.quasi_static_cycles=false;experimentControls();
+    assert.match(node('experiment-start-reason').textContent,/predelay, cycles and return/);
+    state.hello.quasi_static_cycles=true;experimentControls();
+    node('tab-sinusoidal').onclick();assert.equal(node('experiment-quasi-fields').hidden,true);
+    node('tab-quasi_static').onclick();
     await submit();
+    assert.equal(calls.at(-1).cycle_wait_s,12.5);
+    assert.equal(calls.at(-1).predelay_s,2.5);
+    assert.equal(calls.at(-1).cycles,5);
+    assert.equal(calls.at(-1).return_to_start,true);
     assert.equal(calls.at(-1).speed_um_s,25);
     assert.equal(calls.at(-1).kind,'quasi_static');
+    const motion=structuredClone(calls.at(-1));
+    node('planner-zen-enabled').checked=true;node('planner-zen-enabled').oninput();
+    assert.match(node('planner-zen-summary').textContent,/40 s acquiring \+ 20 s waiting = 60 s/);
+    node('planner-zen-interval').value='20';node('planner-zen-interval').oninput();
+    assert.match(node('planner-zen-summary').textContent,/must be at least/);
+    await submit();assert.deepEqual(calls.at(-1),motion); // Invalid visualization cannot change or block START.
+    assert.equal(node('experiment-zen-enabled').checked,false);
+    state.hello.quasi_static_cycle_wait=false;experimentControls();
+    assert.match(node('experiment-start-reason').textContent,/waiting between cycles/);
   } finally {globalThis.document=previousDocument;globalThis.ResizeObserver=previousObserver;}
 });
 
@@ -179,7 +202,7 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
   globalThis.document = { getElementById: node };
   globalThis.ResizeObserver = class { observe() {} };
   try {
-    const state = { connected: true, hello: { experiments: true }, session: {} };
+    const state = { connected: true, hello: { experiments: true, force_tare: true, quasi_static_cycles: true, quasi_static_cycle_wait: true }, session: {} };
     const calls = [];
     let resolve, reject;
     setupExperiments({
@@ -261,4 +284,70 @@ test('Save CSV opens native Save As, prevents duplicate requests, and retains re
     globalThis.document = previousDocument;
     globalThis.ResizeObserver = previousObserver;
   }
+});
+
+test('calculator previews without changing a run, applies on request and locks while hardware is owned',async()=>{
+  const nodes=new Map();
+  const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'1',elements:[],setAttribute(){},reportValidity:()=>true,getBoundingClientRect:()=>({width:0})});return nodes.get(id);};
+  const previousDocument=globalThis.document,previousObserver=globalThis.ResizeObserver;
+  globalThis.document={getElementById:node};globalThis.ResizeObserver=class {observe(){}};
+  try{
+    const sent=[];
+    const state={connected:true,hello:{experiments:true,force_tare:true,quasi_static_speed:true,quasi_static_cycles:true,quasi_static_cycle_wait:true},session:{startExperiment:async config=>sent.push(config)}};
+    setupExperiments({state:()=>state,positionAge:()=>Infinity,controls:experimentControls});
+    node('tab-quasi_static').onclick();
+    for(const [key,value] of Object.entries({start:'0',increment:'1',timing:'1',repeats:'5',speed:'10',cycles:'3',predelay:'0','cycle-wait':'0'}))node(`experiment-${key}`).value=value;
+    node('calculator-stack').value='10';node('calculator-buffer').value='0.5';
+    const suggestion=node('calculator-calculate').onclick();
+    assert.ok(suggestion);assert.equal(node('calculator-results').hidden,false);
+    for(const key of ['interval','predelay','hold','wait','offset'])assert.match(node(`calculator-${key}-result`).textContent,/^\d+ s$/);
+    assert.match(node('calculator-status').textContent,/18 planned acquisitions/);
+    assert.equal(node('calculator-zen-interval').textContent,`${suggestion.interval_s} s`);
+    assert.equal(node('calculator-zen-count').textContent,'18');
+    assert.match(node('calculator-status').textContent,/assumes actuator already/);
+    assert.equal(node('experiment-timing').value,'1');assert.equal(node('planner-zen-enabled').checked,false);
+    assert.equal(sent.length,0);
+    state.session.experimentOwned=true;experimentControls();
+    assert.equal(node('calculator-apply').disabled,true);assert.equal(node('calculator-calculate').disabled,true);
+    node('calculator-apply').onclick();assert.equal(node('experiment-timing').value,'1');
+    state.session.experimentOwned=false;experimentControls();
+    node('calculator-buffer').value='0';node('calculator-buffer').oninput();
+    assert.equal(node('calculator-results').hidden,true);assert.equal(node('calculator-apply').disabled,true);
+    node('calculator-calculate').onclick();assert.match(node('calculator-status').textContent,/Could not calculate/);
+    node('calculator-buffer').value='0.5';node('calculator-calculate').onclick();
+    node('calculator-apply').onclick();
+    assert.equal(node('experiment-timing').value,String(suggestion.config.timing));
+    assert.equal(node('experiment-predelay').value,String(suggestion.config.predelay_s));
+    assert.equal(node('experiment-cycle-wait').value,String(suggestion.config.cycle_wait_s));
+    assert.equal(node('planner-zen-interval').value,String(suggestion.interval_s));
+    assert.equal(node('planner-zen-offset').value,String(suggestion.start_s));
+    assert.equal(node('planner-zen-enabled').checked,true);
+    assert.equal(node('experiment-zen-enabled').checked,false);
+    assert.equal(sent.length,0);
+    assert.match(node('calculator-status').textContent,/Suggested timings applied/);
+    assert.equal(node('planner-zen-interval-setting').textContent,`${suggestion.interval_s} s`);
+    assert.equal(node('planner-zen-count-setting').textContent,'18');
+    await node('experiment-form').onsubmit({preventDefault(){}});
+    assert.equal(sent.length,1);
+    assert.deepEqual(sent[0],{kind:'quasi_static',start_um:0,increment_um:1,timing:suggestion.config.timing,repeats:5,speed_um_s:10,cycles:3,predelay_s:suggestion.config.predelay_s,cycle_wait_s:suggestion.config.cycle_wait_s,return_to_start:false});
+    node('calculator-calculate').onclick();node('experiment-increment').value='2';node('experiment-form').oninput();
+    assert.equal(node('calculator-apply').disabled,true);assert.match(node('calculator-status').textContent,/settings changed/);
+    // Full run: 2 s predelay + 5,000 × 2 s steps/holds + 4,999 × 3 s returns/waits.
+    for(const [key,value] of Object.entries({start:'0',increment:'39',timing:'1',repeats:'1',speed:'39',cycles:'5000',predelay:'2','cycle-wait':'2'}))node(`experiment-${key}`).value=value;
+    node('planner-zen-enabled').checked=false;
+    node('planner-zen-stack').value='40';node('planner-zen-interval').value='60';node('planner-zen-offset').value='5';
+    node('experiment-form').oninput();
+    assert.match(node('experiment-planner-summary').textContent,/preview shows only the beginning/);
+    assert.equal(node('planner-zen-interval-setting').textContent,'60 s');
+    assert.equal(node('planner-zen-count-setting').textContent,'417');
+    node('planner-zen-stack').value='20';node('planner-zen-interval').value='30';node('planner-zen-interval').oninput();
+    assert.equal(node('planner-zen-count-setting').textContent,'834');
+    node('planner-zen-offset').value='24999';node('planner-zen-offset').oninput();
+    assert.equal(node('planner-zen-count-setting').textContent,'0');
+    node('planner-zen-stack').value='40';node('planner-zen-stack').oninput();
+    assert.equal(node('planner-zen-count-setting').textContent,'—');
+    assert.equal(node('planner-zen-interval-setting').textContent,'—');
+    assert.equal(sent.length,1); // Displaying settings never sends commands.
+
+  }finally{globalThis.document=previousDocument;globalThis.ResizeObserver=previousObserver;}
 });

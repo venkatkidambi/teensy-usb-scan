@@ -43,6 +43,7 @@ pub struct Console {
     streaming: bool,
     last_snapshot: u32,
     skipped: u32,
+    force_tare_raw: Option<i32>,
     commands: Commands,
     rx: [u8; 512],
     rx_len: usize,
@@ -93,6 +94,7 @@ impl Console {
             streaming: true,
             last_snapshot: 0,
             skipped: 0,
+            force_tare_raw: None,
             commands: Commands::new(),
             rx: [0; 512],
             rx_len: 0,
@@ -114,6 +116,7 @@ impl Console {
     ) -> core::fmt::Result {
         let mut telemetry = crate::usb_host::telemetry();
         telemetry.pressure = Some(pressure);
+        telemetry.force_tare_raw = self.force_tare_raw;
         telemetry.plunger_io = Some(crate::motor::io_snapshot());
         telemetry.plunger = Some((crate::motor::snapshot(), pot));
         telemetry.snapshot(&mut self.tx, id, now, self.skipped)
@@ -303,6 +306,7 @@ impl Console {
                         );
                         match result {
                             Ok(()) => {
+                                self.force_tare_raw = Some(experiment.force_tare_raw);
                                 self.notified = false;
                                 crate::usb_host::autonomous(true);
                                 log::set_max_level(log::LevelFilter::Off);
@@ -387,7 +391,7 @@ impl Console {
                     }
                     Ok(Command::Hello(id)) => writeln!(
                         self.tx,
-                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"commit\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"experiment_batches\":true,\"quasi_static_speed\":true,\"sine_position\":true,\"sine_gpio\":true,\"sine_serial_displacement\":true,\"sine_serial_velocity\":true,\"sine_serial_velocity_position\":true,\"max_pulse_hz\":{}}}",
+                        "{{\"type\":\"hello\",\"id\":{id},\"protocol\":1,\"firmware\":\"{}\",\"commit\":\"{}\",\"board\":\"Teensy 4.1\",\"motion\":true,\"plunger_limits\":true,\"xeryon\":true,\"xeryon_speed\":true,\"xeryon_optional_speed\":true,\"pressure\":true,\"experiments\":true,\"experiment_batches\":true,\"quasi_static_speed\":true,\"quasi_static_cycles\":true,\"quasi_static_cycle_wait\":true,\"force_tare\":true,\"sine_position\":true,\"sine_gpio\":true,\"sine_serial_displacement\":true,\"sine_serial_velocity\":true,\"sine_serial_velocity_position\":true,\"max_pulse_hz\":{}}}",
                         option_env!("FIRMWARE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
                         option_env!("FIRMWARE_COMMIT").unwrap_or("local"),
                         crate::experiment_data::MAX_PULSE_HZ
@@ -411,6 +415,17 @@ impl Console {
                         ),
                         Err(message) => self.tx.error(id, message),
                     },
+                    Ok(Command::Tare(id)) => {
+                        if !pressure.valid
+                            || pressure.state != 2
+                            || now.wrapping_sub(pressure.ms) >= 250
+                        {
+                            self.tx.error(id, "Force sensor unavailable or stale")
+                        } else {
+                            self.force_tare_raw = Some(pressure.average);
+                            self.snapshot(id, now, pot, pressure)
+                        }
+                    }
                     Ok(Command::Snapshot(id)) => self.snapshot(id, now, pot, pressure),
                     Ok(Command::Move(id, up, speed, um)) => {
                         let result = crate::motor::command(up, speed, um, now);

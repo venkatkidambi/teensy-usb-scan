@@ -5,13 +5,43 @@ extension. See [Dataset transfer](#dataset-transfer) for framing, raw record lay
 CRC, ownership, passive reconnect and ACK lifecycle.
 All Dashboard commands below remain available when no experiment owns hardware.
 
-Current firmware also advertises `quasi_static_speed: true`. Quasi-static START
+Current firmware also advertises `quasi_static_speed: true`,
+`quasi_static_cycles: true`, `quasi_static_cycle_wait: true`, and `force_tare: true`. Quasi-static START
 requires `START <id> Q <start_nm> <step_nm> <hold_ms> <steps> <speed_um_s>` with
 integer speed 1–16777215 µm/s; missing, fractional, zero or out-of-range speeds
 are rejected. The desktop requires this capability before offering START Q.
 Sinusoidal START accepts an optional final `D` (displacement, default), `V` (velocity), or `VP` (velocity + position correction). Quasi-static metadata includes
 `speed_um_s`. START acknowledges acceptance; controller speed/TOU2 readback
 checks happen before motion and report any failure in the retained dataset.
+
+With `quasi_static_cycles`, Q accepts three additional arguments together:
+`<predelay_ms:u32> <cycles:u32> <return_to_start:0|1>`. Omission preserves the
+legacy defaults (0 ms, 1 cycle, no final return). Cycles must be positive.
+Predelay runs once after acceptance, before preparation and initial positioning,
+outside acquisition. The whole sequence remains one run/dataset. Each cycle
+executes all steps/holds; returns to `start_nm` between cycles are mandatory,
+while `return_to_start` controls only the final return. Every return uses the
+selected speed, waits for confirmed arrival, and reserves/enforces
+`2 * ceil((abs(step_nm) * steps + 78) / speed_um_s) + 1000` ms. TOU2 is checked
+against return travel too. Acquisition includes intermediate and final returns.
+Predelay plus worst-case acquisition must fit the timer range. Metadata adds
+`predelay_ms`, `cycles` and `return_to_start` to the quasi-static configuration.
+ABORT and faults stop in place without starting a return.
+
+With `quasi_static_cycle_wait`, append optional `<cycle_wait_ms:u32>` after the
+three Q options. Omission defaults to zero. Wait starts at confirmed arrival at
+`start_nm` between cycles, never before the first or after the final cycle.
+Recording and sensor/fault checks continue during the wait. The acquisition budget
+adds `(cycles - 1) * cycle_wait_ms`, and configuration metadata includes
+`cycle_wait_ms`. Native input uses `cycle_wait_s` in seconds with millisecond
+precision. The desktop requires this capability for its updated quasi-static
+controls. Planner ZEN stack time/interval settings are UI-only: no serial/START
+fields are added for them, and they do not alter ZEN trigger behavior.
+The calculator and overlay first-stack delay are also desktop-only. Applying a
+calculator suggestion writes existing `timing`, `predelay_s` and `cycle_wait_s`
+fields; the interval and first-stack delay are only used by the preview and must
+be configured in ZEN separately. No new firmware commands or trigger behavior
+are introduced by the calculator.
 
 Experiment preparation queries inherited INFO/POLI, sets INFO=2 and POLI=10 ms,
 and requires fresh matching readbacks before motion. Each setup step has a
@@ -184,6 +214,18 @@ raw LPS counts. The dashboard and experiment plots display mN using the
 `pressure_raw`. The CSV metadata adds `force_calibration` with the coefficients,
 supported range, source hashes and source observations used for the export.
 
+`TARE <id>` is available only in Dashboard ownership and replies with a snapshot.
+It captures the current averaged LPS counts only if the sensor is valid, receiving,
+and less than 250 ms old; otherwise it replies with an error. Snapshots include
+optional top-level `force_tare_raw` after a successful tare. This baseline survives
+serial reconnects but resets on firmware restart. Every accepted START captures
+an automatic baseline before predelay/positioning, and retains it as top-level
+`force_tare_raw` in all dataset batches, including aborted runs. It does not
+re-tare between quasi-static cycles. Force plots and CSV subtract that baseline's
+calibrated force; raw counts and extrapolation checks remain unchanged. Legacy
+datasets without the field use absolute calibrated force. The desktop requires
+`force_tare` for START and `quasi_static_cycles` for the new quasi-static controls.
+
 `plunger_io` remains unchanged: physical pad readbacks `standby`, `ain1`, `ain2`,
 2-bit `encoder`, signed 16-bit `pwm_count`/`pwm_compare`, and boolean
 `pwm_running`/`pwm_enabled`. Read snapshot records hardware diagnostics in the UI log.
@@ -283,7 +325,7 @@ null means unobserved. USB completion alone is not physical arrival.
 ## Dataset transfer
 
 ```text
-START <id> Q <start_nm:i64> <step_nm:i64> <hold_ms:u32> <steps:u32> <speed_um_s:u32>
+START <id> Q <start_nm:i64> <step_nm:i64> <hold_ms:u32> <steps:u32> <speed_um_s:u32> [<predelay_ms:u32> <cycles:u32> <return_to_start:0|1> [<cycle_wait_ms:u32>]]
 START <id> S <center_nm:i64> <amplitude_nm:u32> <frequency_millihz:u32> <cycles:u32> [D|V]
 ABORT <id>
 GET_DATA <id> <run>

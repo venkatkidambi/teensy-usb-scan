@@ -113,11 +113,39 @@ the separate USB2 host header. Only one app/terminal can own the serial port.
 **Preview demo** supplies simulated readings without opening hardware.
 
 - **Dashboard:** feedback/status, pressure/force plots, manual Xeryon and plunger
-  movement, Stop, and potentiometer limits. Xeryon travel is relative to fresh
+  movement, Stop, potentiometer limits, and **Zero force (tare)**. Xeryon travel is relative to fresh
   EPOS at 0.078 µm/count; optional integer speed is sent before DPOS.
 - **Quasi-static:** validated start, increment, hold, step count, and required
-  speed. Firmware verifies SSPD and the controller TOU2 budget before motion;
-  holds begin after confirmed arrival.
+  speed, plus a one-time **Initial predelay**, **Experiment cycles**, and optional
+  **Return to start after final cycle**, and **Wait between cycles**. Each cycle repeats all steps and returns
+  to the configured start between cycles (five cycles × five steps gives 25 steps).
+  The cycle wait begins after confirmed return and is skipped after the last cycle;
+  recording continues throughout the wait.
+  Predelay begins at START acceptance, before initial positioning; recording starts
+  after positioning. Firmware verifies SSPD and TOU2 before motion; holds and the
+  next cycle wait for confirmed arrival. ABORT/fault stops immediately without a return.
+  The **Motion planner** previews nominal position versus time, including travel,
+  holds, delay, returns and cycle waits; setup, acceleration and settling add time.
+  Enable **Show ZEN z-stack timing** in the planner to overlay acquisition bands.
+  The interval is start-to-start, including acquisition (40 s stacks at a 60 s
+  interval show 20 s waiting). **First-stack delay from START** shifts the
+  whole acquisition schedule; it defaults to zero. This is an estimate only: it neither triggers
+  ZEN nor changes motion, recording, or the separate ZEN file-link setting.
+  Open **Experiment calculator**, enter z-stack time and the minimum buffer before
+  and after each stack, then **Calculate timings**. It uses the current motion
+  geometry and fresh position (or explicitly assumes the actuator is already at
+  start if unavailable) to suggest interval, first-stack delay, predelay, hold,
+  and cycle wait. A separate preview shows one acquisition in every initial
+  predelay, compression hold and intermediate return wait. A final return has no
+  additional acquisition. **Apply suggested timings** updates the motion form and
+  ZEN overlay without starting a run; enter the suggested interval and first-stack
+  delay in ZEN separately. One fixed interval accommodates return travel, so some
+  stationary sections have more than the requested minimum buffer. Suggestions
+  use whole seconds, account for encoder rounding and timing drift across cycles,
+  and minimize extra stationary time while preserving the requested minimum buffer.
+  Measured z-stack duration and the buffer input keep their precision. Timer limits apply,
+  but initial controller setup and variable settling remain estimates, not hardware
+  synchronization. Recalculate after changing geometry or the starting position.
 - **Sinusoidal:** choose **Displacement** (default), **Velocity**, or
   **Velocity + position correction** serial control
   for `x = center − A cos(2πft)`. No Teensy-to-Xeryon GPIO wiring is needed.
@@ -281,7 +309,14 @@ zero-initialized 16-sample average. Errors invalidate readings and retry setup.
 The UI and CSV use `desktop/calibration/lps-force.json`:
 `force_N = 8.648993703536255e-8 × raw − 0.35085250017057007`.
 The supported range is 4,163,833–4,281,744.298 raw counts; extrapolation is labelled,
-without tare or clamping. Wire data stays raw. To regenerate from the original
+without clamping. **Zero force (tare)** captures the current fresh 16-sample
+average as the baseline. Every accepted experiment START automatically captures
+its own baseline before any delay or motion, once for all quasi-static cycles.
+Tared force is `slope × (raw − baseline)`; negative values remain visible.
+The baseline survives serial reconnects and resets on Teensy reboot. Dataset
+metadata retains `force_tare_raw`, so experiment plots and CSV use that run's zero
+independently of later dashboard taring. Older datasets without a baseline retain
+absolute calibrated force. Wire data and CSV `pressure_raw` stay raw. To regenerate from the original
 workbooks using Python's standard library:
 
 ```sh

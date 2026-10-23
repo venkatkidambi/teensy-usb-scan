@@ -236,3 +236,21 @@ test('plunger limit configuration validates and frames requests',async()=>{
 });
 
 
+
+test('TARE uses a snapshot acknowledgement, validates the baseline and respects experiment ownership',async()=>{
+  const snapshot={type:'snapshot',id:1,ms:100,epoch:1,vid:0,pid:0,mounted:false,cdc:0,records:0,malformed:0,skipped:0,values:{},force_tare_raw:4200000};
+  assert.equal(parseMessage(JSON.stringify(snapshot)).force_tare_raw,4200000);
+  for(const value of [null,1.5,8388608,-8388609])assert.throws(()=>parseMessage(JSON.stringify({...snapshot,force_tare_raw:value})));
+  let queued=false;const sent=[];
+  const s=new NativeSession(async(name,args)=>{
+    if(name==='serial_send'){sent.push(args.command);queued=true;}
+    if(name==='serial_poll'){const messages=queued?[JSON.stringify(snapshot)]:[];queued=false;return {session:7,messages};}
+  },()=>{},assert.fail,assert.fail,500);
+  s.session=7;
+  try{
+    const tare=s.request('TARE');await s.poll();
+    assert.equal((await tare).force_tare_raw,4200000);
+    assert.deepEqual(sent,['TARE 1']);
+    s.experimentOwned=true;await assert.rejects(s.request('TARE'),/owns hardware/);
+  }finally{await s.close();}
+});

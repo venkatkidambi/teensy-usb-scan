@@ -28,6 +28,7 @@ export function parseMessage(line) {
   if(line.startsWith('#')) return {type:'log',message:line.slice(1).trim()};
   const m=JSON.parse(line);
   if(!object(m)||!u32(m.id)) throw Error('Invalid message envelope');
+  if(m.force_tare_raw!==undefined&&(!Number.isInteger(m.force_tare_raw)||m.force_tare_raw< -8388608||m.force_tare_raw>8388607))throw Error('Invalid force tare');
   if(m.type==='snapshot') {
     for(const key of ['ms','epoch','vid','pid','cdc','records','malformed','skipped']) if(!u32(m[key])) throw Error(`Invalid ${key}`);
     if(m.vid>65535||m.pid>65535||m.cdc>4||typeof m.mounted!=='boolean'||!object(m.values)) throw Error('Invalid device state');
@@ -59,7 +60,7 @@ export function parseMessage(line) {
   } else if(m.type==='hello') {
     if(m.protocol!==1||m.board!=='Teensy 4.1'||typeof m.firmware!=='string'||typeof m.motion!=='boolean'||typeof m.pressure!=='boolean') throw Error('Incompatible firmware; upload this project’s telemetry build');
     if(m.max_pulse_hz!==undefined&&(!u32(m.max_pulse_hz)||m.max_pulse_hz===0))throw Error('Invalid GPIO pulse limit');
-    for(const key of ['sine_serial_displacement','sine_serial_velocity','sine_serial_velocity_position'])if(m[key]!==undefined&&typeof m[key]!=='boolean')throw Error(`Invalid ${key} capability`);
+    for(const key of ['force_tare','quasi_static_cycles','quasi_static_cycle_wait','sine_serial_displacement','sine_serial_velocity','sine_serial_velocity_position'])if(m[key]!==undefined&&typeof m[key]!=='boolean')throw Error(`Invalid ${key} capability`);
     if(m.sine_gpio!==undefined&&typeof m.sine_gpio!=='boolean')throw Error('Invalid sine_gpio capability');
     if(m.sine_position!==undefined&&typeof m.sine_position!=='boolean')throw Error('Invalid sine_position capability');
     if(m.quasi_static_speed!==undefined&&typeof m.quasi_static_speed!=='boolean')throw Error('Invalid quasi_static_speed capability');
@@ -134,10 +135,10 @@ export class NativeSession {
     const validXeryon=xeryonMove&&Number.isSafeInteger(+xeryonMove[1])&&+xeryonMove[1]>=78&&+xeryonMove[1]<=2617245618&&(xeryonMove[2]===undefined||Number.isInteger(+xeryonMove[2])&&+xeryonMove[2]>=1&&+xeryonMove[2]<=16777215);
     const limits=/^PLUNGER_LIMITS ([0-9]+) ([0-9]+)$/.exec(command);
     const validLimits=limits&&+limits[1]<+limits[2]&&+limits[2]<=100;
-    if(!validLimits&&!validMove&&!validXeryon&&!['HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP','ABORT'].includes(command)) return Promise.reject(Error('Unsupported command'));
+    if(!validLimits&&!validMove&&!validXeryon&&!['TARE','HELLO','PING','SNAPSHOT','STREAM 0','STREAM 1','PLUNGER_STOP','PLUNGER_ZERO','XERYON_STOP','ABORT'].includes(command)) return Promise.reject(Error('Unsupported command'));
     const [name,...args]=command.split(' ');const arg=args.length?args.join(' '):undefined;const id=this.id=this.id===0xefffffff?1:this.id+1;
     return new Promise((resolve,reject)=>{
-      this.pending={id,resolve,reject,expected:{ABORT:'experiment_ack',XERYON_MOVE:'xeryon_ack',XERYON_STOP:'xeryon_ack',HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack',PLUNGER_LIMITS:'plunger_ack',PLUNGER_MOVE:'plunger_ack',PLUNGER_STOP:'plunger_ack',PLUNGER_ZERO:'plunger_ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),(command==='ABORT'||command==='PLUNGER_STOP'||command==='XERYON_STOP')?500:this.timeout)};
+      this.pending={id,resolve,reject,expected:{TARE:'snapshot',ABORT:'experiment_ack',XERYON_MOVE:'xeryon_ack',XERYON_STOP:'xeryon_ack',HELLO:'hello',PING:'pong',SNAPSHOT:'snapshot',STREAM:'ack',PLUNGER_LIMITS:'plunger_ack',PLUNGER_MOVE:'plunger_ack',PLUNGER_STOP:'plunger_ack',PLUNGER_ZERO:'plunger_ack'}[name],timer:setTimeout(()=>this.rejectPending(Error(`${name} timed out`)),(command==='ABORT'||command==='PLUNGER_STOP'||command==='XERYON_STOP')?500:this.timeout)};
       const send=()=>this.invoke('serial_send',{session:this.session,command:`${name} ${id}${arg===undefined?'':` ${arg}`}`});
       // Preserve native queue order if ABORT preempts an in-flight START IPC.
       const sending=command==='ABORT'&&this.startSubmission?this.startSubmission.then(send,send):send();

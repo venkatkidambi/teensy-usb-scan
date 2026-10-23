@@ -39,3 +39,12 @@ test('calibration flags extrapolation through either stage without clamping or t
     assert.equal(forceMillinewtons(value),null);
   }
 });
+
+test('tare subtracts the calibrated baseline, preserves sign and leaves raw counts untouched',()=>{
+  const baseline=4200000;
+  assert.equal(forceNewtons(baseline,baseline),0);
+  near(forceMillinewtons(4300000,baseline),8.6489937035362);
+  near(forceMillinewtons(4100000,baseline),-8.6489937035362);
+  assert.equal(forceNewtons(0,0),0);
+  assert.equal(forceExtrapolated(4300000),true);
+});

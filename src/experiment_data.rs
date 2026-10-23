@@ -55,6 +55,10 @@ pub enum ExperimentConfig {
         hold_ms: u32,
         steps: u32,
         speed_um_s: u32,
+        predelay_ms: u32,
+        cycle_wait_ms: u32,
+        cycles: u32,
+        return_to_start: bool,
     },
     Sinusoidal {
         center_nm: i64,
@@ -92,6 +96,10 @@ impl ExperimentConfig {
                 step_nm: increment,
                 hold_ms: timing,
                 steps: repeats,
+                predelay_ms: 0,
+                cycle_wait_ms: 0,
+                cycles: 1,
+                return_to_start: false,
                 speed_um_s: speed_um_s
                     .filter(|v| (1..=MAX_SPEED_UM_S).contains(v))
                     .ok_or("Quasi-static speed must be 1..16777215 um/s")?,
@@ -187,6 +195,25 @@ impl ExperimentConfig {
             Self::Sinusoidal { .. } => Ok(MOVE_TIMEOUT_MS),
         }
     }
+    pub fn predelay_ms(self) -> u32 {
+        match self {
+            Self::QuasiStatic { predelay_ms, .. } => predelay_ms,
+            _ => 0,
+        }
+    }
+    pub fn return_timeout(self) -> Result<u32, &'static str> {
+        match self {
+            Self::QuasiStatic { step_nm, steps, .. } => self.motion_timeout(
+                step_nm
+                    .unsigned_abs()
+                    .checked_mul(u64::from(steps))
+                    .and_then(|n| n.checked_add(78))
+                    .ok_or("Trajectory overflow")?,
+                0,
+            ),
+            _ => Ok(0),
+        }
+    }
     /// Worst-case acquisition duration. Initial positioning is outside acquisition.
     pub fn validate(self) -> Result<u32, &'static str> {
         self.start()?;
@@ -196,17 +223,34 @@ impl ExperimentConfig {
                 step_nm,
                 hold_ms,
                 steps,
+                cycles,
+                cycle_wait_ms,
+                return_to_start,
                 ..
             } => {
-                if step_nm.unsigned_abs() < 78 || hold_ms == 0 || steps == 0 {
-                    return Err("Step must be at least one count; hold and steps must be positive");
+                if step_nm.unsigned_abs() < 78 || hold_ms == 0 || steps == 0 || cycles == 0 {
+                    return Err(
+                        "Step must be at least one count; hold, steps and cycles must be positive",
+                    );
                 }
                 let end = step_nm
                     .checked_mul(i64::from(steps))
                     .and_then(|d| start_nm.checked_add(d))
                     .ok_or("Trajectory overflow")?;
                 counts(end)?;
-                u64::from(steps) * (u64::from(hold_ms) + u64::from(self.step_timeout()?))
+                let cycle =
+                    u64::from(steps) * (u64::from(hold_ms) + u64::from(self.step_timeout()?));
+                let returns = u64::from(cycles - 1) + u64::from(return_to_start);
+                let return_budget = if returns == 0 {
+                    0
+                } else {
+                    returns * u64::from(self.return_timeout()?)
+                };
+                cycle
+                    .checked_mul(u64::from(cycles))
+                    .and_then(|n| n.checked_add(return_budget))
+                    .and_then(|n| n.checked_add(u64::from(cycles - 1) * u64::from(cycle_wait_ms)))
+                    .ok_or("Experiment duration overflow")?
             }
             Self::Sinusoidal {
                 center_nm,
@@ -249,7 +293,7 @@ impl ExperimentConfig {
                     + u64::from(MOVE_TIMEOUT_MS)
             }
         };
-        if duration > u64::from(MAX_DURATION_MS) {
+        if duration + u64::from(self.predelay_ms()) > u64::from(MAX_DURATION_MS) {
             return Err("Experiment exceeds timer range");
         }
         Ok(duration as u32)
@@ -262,9 +306,13 @@ impl ExperimentConfig {
                 hold_ms,
                 steps,
                 speed_um_s,
+                predelay_ms,
+                cycle_wait_ms,
+                cycles,
+                return_to_start,
             } => write!(
                 out,
-                "{{\"kind\":\"quasi_static\",\"start_nm\":{start_nm},\"step_nm\":{step_nm},\"hold_ms\":{hold_ms},\"steps\":{steps},\"speed_um_s\":{speed_um_s}}}"
+                "{{\"kind\":\"quasi_static\",\"start_nm\":{start_nm},\"step_nm\":{step_nm},\"hold_ms\":{hold_ms},\"steps\":{steps},\"speed_um_s\":{speed_um_s},\"predelay_ms\":{predelay_ms},\"cycle_wait_ms\":{cycle_wait_ms},\"cycles\":{cycles},\"return_to_start\":{return_to_start}}}"
             ),
             Self::Sinusoidal {
                 center_nm,

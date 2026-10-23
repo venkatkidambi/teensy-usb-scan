@@ -184,6 +184,10 @@ mod tests {
             hold_ms: 100,
             steps: 1,
             speed_um_s: 10,
+            cycle_wait_ms: 0,
+            predelay_ms: 0,
+            cycles: 1,
+            return_to_start: false,
         };
         e.accept(config, &t, p, false, 0).unwrap();
         e.begin(0, &mut io);
@@ -651,6 +655,254 @@ mod tests {
         e.poll(now.wrapping_add(2), &t, p, io);
     }
     #[test]
+    fn quasi_cycles_delay_once_tare_once_and_confirm_every_return_across_wrap() {
+        for step_nm in [-780, 780] {
+            for return_to_start in [false, true] {
+                let config = ExperimentConfig::QuasiStatic {
+                    start_nm: 7800,
+                    step_nm,
+                    hold_ms: 10,
+                    steps: 5,
+                    speed_um_s: 10,
+                    cycle_wait_ms: 0,
+                    predelay_ms: 2000,
+                    cycles: 5,
+                    return_to_start,
+                };
+                let mut records = [Record::EMPTY; CAPACITY];
+                let mut e = Engine::new(&mut records);
+                let mut io = Io::default();
+                let accepted = u32::MAX - 1000;
+                let (t, mut p) = feedback(accepted, 0, true);
+                p.average = 4200000;
+                e.accept(config, &t, p, false, accepted).unwrap();
+                e.begin(accepted, &mut io);
+                for delta in [0, 1000, 1999] {
+                    let now = accepted.wrapping_add(delta);
+                    let (t, p) = feedback(now, 0, true);
+                    e.poll(now, &t, p, &mut io);
+                    assert!(io.speeds.is_empty());
+                    assert!(io.targets.is_empty());
+                    assert_eq!(e.len, 0);
+                }
+                let now = accepted.wrapping_add(2000);
+                let (mut t, p) = feedback(now, 0, true);
+                e.poll(now, &t, p, &mut io);
+                assert_eq!(io.speeds, [10]);
+                t.record(b"SSPD", 10, now);
+                e.poll(now, &t, p, &mut io);
+                t.record(b"TOU2", 60, now);
+                e.poll(now, &t, p, &mut io);
+                let (t, p) = feedback(now, e.target, true);
+                e.poll(now, &t, p, &mut io);
+                e.poll(now, &t, p, &mut io);
+                assert_eq!(e.started_ms, now);
+                for delta in 1..=1000 {
+                    let tick = now.wrapping_add(delta);
+                    let reached = tick.wrapping_sub(e.move_started) >= 10;
+                    let (t, mut p) = feedback(tick, e.target, reached);
+                    p.raw = 4300000;
+                    p.average = 4300000;
+                    let before = io.targets.len();
+                    e.poll(tick, &t, p, &mut io);
+                    if !reached {
+                        assert_eq!(io.targets.len(), before);
+                    }
+                    if e.data_ready() {
+                        break;
+                    }
+                }
+                assert_eq!(e.outcome, "completed", "{}", e.reason);
+                assert!(e.elapsed_ms < 1000); // The 2 s predelay is never repeated.
+                assert_eq!(e.force_tare_raw, 4200000); // Neither steps nor returns re-tare.
+                let mut expected = vec![100];
+                for cycle in 0..5 {
+                    expected.extend((1..=5).map(|step| counts(7800 + step_nm * step).unwrap()));
+                    if cycle < 4 || return_to_start {
+                        expected.push(100);
+                    }
+                }
+                assert_eq!(io.targets.iter().map(|t| t.0).collect::<Vec<_>>(), expected);
+                assert_eq!(io.stops, 1);
+                assert_eq!(e.samples[1].pressure_raw, 4300000);
+                let mut metadata = String::new();
+                e.metadata(&mut metadata, 1).unwrap();
+                assert!(metadata.contains("\"force_tare_raw\":4200000"));
+                assert!(metadata.contains("\"predelay_ms\":2000"));
+                assert!(metadata.contains("\"cycles\":5"));
+            }
+        }
+    }
+    #[test]
+    fn quasi_abort_during_predelay_or_return_and_return_timeout_stop_without_more_motion() {
+        for failure in [
+            "predelay_abort",
+            "return_abort",
+            "return_timeout",
+            "return_fault",
+        ] {
+            let config = ExperimentConfig::QuasiStatic {
+                start_nm: 0,
+                step_nm: 780,
+                hold_ms: 1,
+                steps: 1,
+                speed_um_s: 10,
+                cycle_wait_ms: 0,
+                predelay_ms: if failure == "predelay_abort" { 1000 } else { 0 },
+                cycles: 2,
+                return_to_start: true,
+            };
+            let mut records = [Record::EMPTY; CAPACITY];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            if failure == "predelay_abort" {
+                let (t, p) = feedback(0, 0, true);
+                e.accept(config, &t, p, false, 0).unwrap();
+                e.begin(0, &mut io);
+                e.abort(&mut io);
+                e.poll(1000, &t, p, &mut io);
+                assert!(io.targets.is_empty());
+                assert_eq!(e.len, 0);
+            } else {
+                start(&mut e, config, 0, &mut io);
+                for now in 3..=4 {
+                    let (t, p) = feedback(now, e.target, true);
+                    e.poll(now, &t, p, &mut io);
+                }
+                assert!(e.returning);
+                let before = io.targets.len();
+                if failure == "return_abort" {
+                    e.abort(&mut io);
+                } else {
+                    let now = if failure == "return_timeout" {
+                        4 + config.return_timeout().unwrap()
+                    } else {
+                        5
+                    };
+                    let (mut t, p) = feedback(now, e.target, false);
+                    if failure == "return_fault" {
+                        t.record(b"STAT", 1 << 12, now);
+                    }
+                    e.poll(now, &t, p, &mut io);
+                }
+                assert_eq!(io.targets.len(), before);
+                assert!(e.len > 0);
+            }
+            assert!(e.data_ready());
+            assert_eq!(
+                e.outcome,
+                if failure.ends_with("abort") {
+                    "aborted"
+                } else {
+                    "faulted"
+                }
+            );
+            if failure == "return_timeout" {
+                assert_eq!(e.reason, "Return move deadline");
+            }
+            assert_eq!(io.stops, 1);
+        }
+    }
+    #[test]
+    fn cycle_wait_starts_at_confirmed_return_records_samples_and_skips_final_wait() {
+        for cycles in [1, 3] {
+            for return_to_start in [false, true] {
+                let config = ExperimentConfig::QuasiStatic {
+                    start_nm: 0,
+                    step_nm: 780,
+                    hold_ms: 10,
+                    steps: 2,
+                    speed_um_s: 10,
+                    predelay_ms: 0,
+                    cycle_wait_ms: 100,
+                    cycles,
+                    return_to_start,
+                };
+                let mut records = [Record::EMPTY; CAPACITY];
+                let mut e = Engine::new(&mut records);
+                let mut io = Io::default();
+                let begin = u32::MAX - 50;
+                start(&mut e, config, begin, &mut io);
+                let mut waits = 0;
+                for delta in 3..1000 {
+                    let now = begin.wrapping_add(delta);
+                    let (t, p) = feedback(now, e.target, now.wrapping_sub(e.move_started) >= 10);
+                    let wait = e.cycle_wait_started;
+                    let targets = io.targets.len();
+                    e.poll(now, &t, p, &mut io);
+                    if wait.is_none() && e.cycle_wait_started.is_some() {
+                        waits += 1;
+                        assert_eq!(e.cycle_wait_started, Some(now));
+                        assert_eq!(e.target, 0);
+                    }
+                    if let Some(after) = wait {
+                        if now.wrapping_sub(after) < 100 {
+                            assert_eq!(targets, io.targets.len());
+                        } else {
+                            assert_eq!(now.wrapping_sub(after), 100);
+                            assert_eq!(io.targets.len(), targets + 1);
+                        }
+                    }
+                    if e.data_ready() {
+                        // Completion is immediate at final arrival/hold, with no trailing wait.
+                        assert!(e.cycle_wait_started.is_none());
+                        assert!(now.wrapping_sub(e.move_started) <= 20);
+                        break;
+                    }
+                }
+                assert_eq!(e.outcome, "completed", "{}", e.reason);
+                assert_eq!(waits, cycles - 1);
+                assert_eq!(
+                    io.targets.len(),
+                    1 + (cycles * 2 + cycles - 1 + u32::from(return_to_start)) as usize
+                );
+                assert_eq!(e.len, (e.elapsed_ms / SAMPLE_MS + 1) as usize);
+                let mut meta = String::new();
+                e.metadata(&mut meta, 1).unwrap();
+                assert!(meta.contains("\"cycle_wait_ms\":100"));
+            }
+        }
+    }
+    #[test]
+    fn abort_or_sensor_fault_during_cycle_wait_never_starts_another_cycle() {
+        for abort in [true, false] {
+            let config = ExperimentConfig::QuasiStatic {
+                start_nm: 0,
+                step_nm: 780,
+                hold_ms: 1,
+                steps: 1,
+                speed_um_s: 10,
+                predelay_ms: 0,
+                cycle_wait_ms: 1000,
+                cycles: 2,
+                return_to_start: false,
+            };
+            let mut records = [Record::EMPTY; CAPACITY];
+            let mut e = Engine::new(&mut records);
+            let mut io = Io::default();
+            start(&mut e, config, 0, &mut io);
+            for now in 3..=5 {
+                let (t, p) = feedback(now, e.target, true);
+                e.poll(now, &t, p, &mut io);
+            }
+            assert_eq!(e.cycle_wait_started, Some(5));
+            let before = io.targets.len();
+            if abort {
+                e.abort(&mut io);
+            } else {
+                let (t, mut p) = feedback(6, 0, true);
+                p.valid = false;
+                e.poll(6, &t, p, &mut io);
+            }
+            let (t, p) = feedback(1005, 0, true);
+            e.poll(1005, &t, p, &mut io);
+            assert_eq!(io.targets.len(), before);
+            assert!(e.data_ready());
+            assert_eq!(io.stops, 1);
+            assert_eq!(e.outcome, if abort { "aborted" } else { "faulted" });
+        }
+    }
+    #[test]
     fn validation_rejects_before_motion_and_reserves_worst_case() {
         assert_eq!(sinusoidal().validate(), Ok(11000));
         assert_eq!(
@@ -659,7 +911,11 @@ mod tests {
                 start_nm: 0,
                 step_nm: -78,
                 hold_ms: 100,
-                steps: 2
+                steps: 2,
+                cycle_wait_ms: 0,
+                predelay_ms: 0,
+                cycles: 1,
+                return_to_start: false,
             }
             .validate(),
             Ok(2264)
@@ -678,6 +934,10 @@ mod tests {
                 step_nm: 0,
                 hold_ms: 1,
                 steps: 1,
+                cycle_wait_ms: 0,
+                predelay_ms: 0,
+                cycles: 1,
+                return_to_start: false,
             },
             ExperimentConfig::QuasiStatic {
                 speed_um_s: 10,
@@ -685,6 +945,10 @@ mod tests {
                 step_nm: -78,
                 hold_ms: u32::MAX,
                 steps: u32::MAX,
+                cycle_wait_ms: 0,
+                predelay_ms: 0,
+                cycles: 1,
+                return_to_start: false,
             },
             ExperimentConfig::QuasiStatic {
                 speed_um_s: 10,
@@ -692,6 +956,10 @@ mod tests {
                 step_nm: i64::MAX,
                 hold_ms: 1,
                 steps: 2,
+                cycle_wait_ms: 0,
+                predelay_ms: 0,
+                cycles: 1,
+                return_to_start: false,
             },
             ExperimentConfig::Sinusoidal {
                 center_nm: i64::MAX,
@@ -780,6 +1048,10 @@ mod tests {
             hold_ms: 100,
             steps: 1,
             speed_um_s: 10,
+            cycle_wait_ms: 0,
+            predelay_ms: 0,
+            cycles: 1,
+            return_to_start: false,
         };
         for failure in [
             "none",
@@ -874,6 +1146,10 @@ mod tests {
             hold_ms: 50,
             steps: 1,
             speed_um_s: 1,
+            cycle_wait_ms: 0,
+            predelay_ms: 0,
+            cycles: 1,
+            return_to_start: false,
         };
         assert_eq!(config.step_timeout(), Ok(39_156));
         assert_eq!(config.validate(), Ok(39_206));
@@ -919,6 +1195,10 @@ mod tests {
                 hold_ms: 50,
                 steps: 3,
                 speed_um_s: 1,
+                cycle_wait_ms: 0,
+                predelay_ms: 0,
+                cycles: 1,
+                return_to_start: false,
             }
             .validate()
             .is_ok()
@@ -931,6 +1211,10 @@ mod tests {
                     hold_ms: 50,
                     steps: 1,
                     speed_um_s,
+                    cycle_wait_ms: 0,
+                    predelay_ms: 0,
+                    cycles: 1,
+                    return_to_start: false,
                 }
                 .validate()
                 .is_err()
@@ -946,6 +1230,10 @@ mod tests {
                 hold_ms: 1000,
                 steps: 10,
                 speed_um_s: 10,
+                cycle_wait_ms: 0,
+                predelay_ms: 0,
+                cycles: 1,
+                return_to_start: false,
             };
             assert_eq!(config.move_timeout(1000), Ok(10_000));
             assert_eq!(config.step_timeout(), Ok(1216));
@@ -983,6 +1271,10 @@ mod tests {
             hold_ms: 1000,
             steps: 10,
             speed_um_s: 10,
+            cycle_wait_ms: 0,
+            predelay_ms: 0,
+            cycles: 1,
+            return_to_start: false,
         };
         let mut records = [Record::EMPTY; CAPACITY];
         let mut e = Engine::new(&mut records);
@@ -1014,6 +1306,10 @@ mod tests {
                 step_nm: -780,
                 hold_ms: 100,
                 steps: 2,
+                cycle_wait_ms: 0,
+                predelay_ms: 0,
+                cycles: 1,
+                return_to_start: false,
             },
             0,
             &mut io,
@@ -1076,6 +1372,10 @@ mod tests {
                 hold_ms: 100,
                 steps: 1,
                 speed_um_s: 1000,
+                cycle_wait_ms: 0,
+                predelay_ms: 0,
+                cycles: 1,
+                return_to_start: false,
             },
         ] {
             let mut records = [Record::EMPTY; CAPACITY];
@@ -1233,6 +1533,10 @@ mod tests {
             step_nm: 78,
             hold_ms: buffer_duration_ms - 1032,
             steps: 1,
+            cycle_wait_ms: 0,
+            predelay_ms: 0,
+            cycles: 1,
+            return_to_start: false,
         };
         start(&mut e, config, 0, &mut io);
         assert_eq!(e.required_samples, CAPACITY);
@@ -1244,6 +1548,10 @@ mod tests {
                 step_nm: 78,
                 hold_ms: buffer_duration_ms - 1032 + 1,
                 steps: 1,
+                cycle_wait_ms: 0,
+                predelay_ms: 0,
+                cycles: 1,
+                return_to_start: false,
             }
             .validate()
             .is_ok()

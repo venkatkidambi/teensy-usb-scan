@@ -30,6 +30,13 @@
       <label><span id="experiment-repeats-label">Number of steps</span><input id="experiment-repeats" type="number" min="1" step="1" value="3" required></label>
       <label id="experiment-control-field" hidden><span>Control method</span><select id="experiment-control"><option value="gpio">GPIO Pulse/Direction</option><option value="displacement">Displacement</option><option value="velocity">Velocity</option><option value="velocity_position">Velocity + position correction</option></select></label>
       <label id="experiment-speed-field"><span id="experiment-speed-label">Actuator speed (µm/s)</span><input id="experiment-speed" type="number" min="1" max="16777215" step="1" value="10" required></label>
+      <div id="experiment-quasi-fields" class="quasi-options">
+        <label><span id="experiment-predelay-label">Initial predelay (s)</span><input id="experiment-predelay" type="number" min="0" max="4294907" step="0.001" value="0" required></label>
+        <label><span id="experiment-cycle-wait-label">Wait between cycles (s)</span><input id="experiment-cycle-wait" type="number" min="0" max="4294907" step="0.001" value="0" required></label>
+        <label><span id="experiment-cycles-label">Experiment cycles</span><input id="experiment-cycles" type="number" min="1" max="4294967295" step="1" value="1" required></label>
+        <label class="zen-toggle"><input id="experiment-return" type="checkbox">Return to start after final cycle</label>
+        <p class="empty-copy">Predelay runs once before positioning. Every cycle repeats all steps and returns to the start between cycles, then waits before the next cycle. No cycle wait follows the final cycle. Force is zeroed once when START is accepted.</p>
+      </div>
       <div id="experiment-sweep-fields" hidden>
         <h3 class="sweep-heading"><label for="experiment-sweep-enabled"><input id="experiment-sweep-enabled" type="checkbox"><span>Frequency sweep</span></label></h3>
         <div class="sweep-options">
@@ -52,6 +59,61 @@
       <progress id="experiment-sweep-bar" max="1" value="0" aria-label="Frequency sweep completed runs" aria-describedby="experiment-sweep-status"></progress>
       <p id="experiment-sweep-status" role="status"></p>
     </div>
+    <section id="experiment-planner" aria-label="Quasi-static motion planner">
+      <h3>Motion planner</h3>
+      <details id="experiment-calculator" class="experiment-calculator">
+        <summary>Experiment calculator · align acquisitions with stationary periods</summary>
+        <div class="calculator-inputs">
+          <label>Z-stack acquisition time (s)<input id="calculator-stack" type="number" min="0.001" step="0.001" value="40"></label>
+          <label>Buffer before and after each stack (s)<input id="calculator-buffer" type="number" min="0.001" step="0.001" value="1"></label>
+          <button id="calculator-calculate" type="button">Calculate timings</button>
+        </div>
+        <p class="empty-copy">Uses the start position, step size, speed, step count and cycle count above. Suggests one acquisition during the initial predelay, every step hold and each wait at the start between cycles. Suggestions use whole seconds and minimize extra stationary time while preserving the requested buffer before and after every stack. Return travel and timing drift can require additional buffer.</p>
+        <p id="calculator-status" class="empty-copy" role="status"></p>
+        <div id="calculator-results" hidden>
+          <section class="zen-settings" aria-label="Suggested settings to enter in ZEN">
+            <h4>Enter in ZEN · calculator suggestion</h4>
+            <div class="zen-settings-boxes" aria-live="polite">
+              <div class="zen-setting"><span>Acquisition interval (start to start)</span><strong id="calculator-zen-interval">—</strong></div>
+              <div class="zen-setting"><span>Number of acquisitions · entire run</span><strong id="calculator-zen-count">—</strong></div>
+            </div>
+          </section>
+          <dl class="calculator-values">
+            <dt>Acquisition interval (start to start)</dt><dd id="calculator-interval-result"></dd>
+            <dt>First-stack delay from START</dt><dd id="calculator-offset-result"></dd>
+            <dt>Initial predelay</dt><dd id="calculator-predelay-result"></dd>
+            <dt>Hold time per step</dt><dd id="calculator-hold-result"></dd>
+            <dt>Wait between cycles</dt><dd id="calculator-wait-result"></dd>
+          </dl>
+          <h4>Suggested motion and acquisition preview</h4>
+          <div class="plot-wrap"><canvas id="calculator-plot" role="img" aria-label="Suggested motion with z-stack acquisitions inside stationary periods"></canvas></div>
+          <button id="calculator-apply" type="button" disabled>Apply suggested timings</button>
+        </div>
+        <p class="empty-copy">Estimates only: initial controller setup and variable settling are not synchronized with ZEN. Buffers allow margin, but cannot guarantee alignment on hardware. Applying updates the experiment timing and preview; configure ZEN separately. A final return ends the run without another stationary acquisition.</p>
+      </details>
+      <div class="planner-zen-controls">
+        <label class="planner-zen-toggle"><input id="planner-zen-enabled" type="checkbox">Show ZEN z-stack timing</label>
+        <div id="planner-zen-options" hidden>
+          <label>Z-stack acquisition time (s)<input id="planner-zen-stack" type="number" min="0.001" step="0.001" value="40"></label>
+          <label>Acquisition interval (s, start to start)<input id="planner-zen-interval" type="number" min="0.001" step="0.001" value="60"></label>
+          <label>First-stack delay from START (s)<input id="planner-zen-offset" type="number" min="0" step="0.001" value="0"></label>
+        </div>
+        <section class="zen-settings" aria-label="Current settings to enter in ZEN">
+          <h4>Enter in ZEN · current plan</h4>
+          <div class="zen-settings-boxes" aria-live="polite">
+            <div class="zen-setting"><span>Acquisition interval (start to start)</span><strong id="planner-zen-interval-setting">—</strong></div>
+            <div class="zen-setting"><span>Number of acquisitions · entire run</span><strong id="planner-zen-count-setting">—</strong></div>
+          </div>
+          <p id="planner-zen-settings-note" class="empty-copy"></p>
+        </section>
+        <p id="planner-zen-summary" class="empty-copy" role="status"></p>
+        <p class="empty-copy">Preview only. Purple bands show estimated acquisition, starting after the specified first-stack delay from START acceptance; gaps show waiting. This does not trigger ZEN or change the experiment.</p>
+      </div>
+      <p id="experiment-planner-summary" class="pressure-detail" role="status"></p>
+      <div class="plot-wrap"><canvas id="experiment-planner-plot" role="img" aria-label="Planned actuator position in micrometers versus time in seconds"></canvas></div>
+      <p class="planner-legend"><span>━ Steps / holds</span> · <span>━ Return to start</span> · <span>━ Predelay</span> · <span>━ Approach</span> · <span>━ Cycle wait</span> · <span>▰ Z-stack acquisition</span></p>
+      <p class="empty-copy">Estimated motion from START acceptance: predelay → approach → steps and holds → returns and cycle waits. Setup, acceleration and settling add time; holds begin after confirmed arrival. Recording starts after the initial approach.</p>
+    </section>
     <p id="experiment-motion-detail" class="pressure-detail"></p>
     <details class="help-details"><summary>Recording and motion limits</summary><p class="pressure-detail">100 Hz recording on the Teensy, with periodic verified transfers to this computer. Keep the app connected for long runs; all samples appear together when the run ends. Quasi-static reserves travel time with settling margin, plus each hold; sinusoidal reserves up to 10 s for endpoint settling or the serial STOP transfer and finishes at the last cycle endpoint. Start positions use the current encoder reference. Sinusoidal frequency: 0.1–10 Hz within the configured speed limit; tracking depends on the controller and load. Position resolution: 0.078 µm.</p></details>
   </section>
@@ -106,6 +168,7 @@
     <section class="panel pressure-panel" aria-label="Calibrated LPS force readings">
       <div class="panel-heading"><div><h2>LPS force</h2><p>Force (mN) · last 60 seconds</p></div><span id="pressure-age" class="tag">NO DATA</span></div>
       <p id="pressure-detail" class="pressure-detail">LPS22HHTR readings appear when the sensor responds.</p>
+      <div class="force-tare-controls"><button id="force-tare" disabled>Zero force (tare)</button><span id="force-tare-status" role="status">Not zeroed · automatically zeroed when an experiment starts</span></div>
       <div class="pressure-readings"><span>Force <strong id="pressure-raw">—</strong> mN</span><span>Average <strong id="pressure-average">—</strong> mN</span><span>Samples <strong id="pressure-samples">0</strong></span></div>
       <div class="plot-wrap"><canvas id="pressure-plot" role="img" aria-label="Instantaneous and averaged calibrated force in millinewtons over time"></canvas></div>
       <div class="panel-foot"><span class="legend">━ 16-sample average &nbsp; <span>┄ Instantaneous</span></span><span id="pressure-calibration">Probe-calibrated force</span></div>

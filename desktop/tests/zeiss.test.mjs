@@ -15,7 +15,7 @@ function harness(mode='quasi_static') {
   const previousDocument=globalThis.document,previousObserver=globalThis.ResizeObserver;
   globalThis.document={getElementById:node};globalThis.ResizeObserver=class{observe(){}};
   let files=['existing.czi'],scan=async()=>[...files],validate=async()=>{},choose=async()=>'/ZEN images';
-  const state={connected:true,hello:{experiments:true,quasi_static_speed:true,sine_serial_displacement:true},session:{
+  const state={connected:true,hello:{experiments:true,force_tare:true,quasi_static_cycles:true,quasi_static_cycle_wait:true,quasi_static_speed:true,sine_serial_displacement:true},session:{
     async startExperiment(config,append=false){calls.push({config,append});this.experimentOwned=true;return {run:calls.length};},
     async request(command){calls.push(command);},
   }};

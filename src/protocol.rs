@@ -94,6 +94,7 @@ pub struct Telemetry {
     pub motor_timeout_updates: u32,
     pub plunger_io: Option<crate::plunger::Io>,
     pub pressure: Option<crate::pressure::Reading>,
+    pub force_tare_raw: Option<i32>,
     pub plunger: Option<(crate::plunger::Motion, Option<u16>)>,
     pub xeryon_motion: Option<crate::xeryon_motion::Motion>,
 }
@@ -151,6 +152,7 @@ impl Telemetry {
             xeryon_motion: None,
             plunger_io: None,
             pressure: None,
+            force_tare_raw: None,
             plunger: None,
             epoch: 0,
             vid: 0,
@@ -301,6 +303,9 @@ impl Telemetry {
                 io.pwm_running,
                 io.pwm_enabled
             )?;
+        }
+        if let Some(raw) = self.force_tare_raw {
+            write!(out, ",\"force_tare_raw\":{raw}")?;
         }
         if let Some(p) = self.pressure {
             write!(

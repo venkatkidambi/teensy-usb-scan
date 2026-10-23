@@ -146,6 +146,10 @@ fn long_quasi_static_and_sine_runs_reuse_storage_and_publish_every_sample_once()
             hold_ms: 130_000,
             steps: 1,
             speed_um_s: 10,
+            cycle_wait_ms: 0,
+            predelay_ms: 0,
+            cycles: 1,
+            return_to_start: false,
         },
         ExperimentConfig::Sinusoidal {
             center_nm: 0,
@@ -218,6 +222,10 @@ fn abort_during_batch_and_lost_ack_reconnect_preserve_prefix_and_terminal_tail()
         hold_ms: 10_000,
         steps: 1,
         speed_um_s: 10,
+        cycle_wait_ms: 0,
+        predelay_ms: 0,
+        cycles: 1,
+        return_to_start: false,
     };
     e.accept(config, &telemetry(0), pressure(0), false, 0)
         .unwrap();
@@ -279,6 +287,10 @@ fn stalled_receiver_faults_without_overwriting_samples() {
         hold_ms: 10_000,
         steps: 1,
         speed_um_s: 10,
+        cycle_wait_ms: 0,
+        predelay_ms: 0,
+        cycles: 1,
+        return_to_start: false,
     };
     e.accept(config, &telemetry(0), pressure(0), false, 0)
         .unwrap();
@@ -938,6 +950,10 @@ fn native_configuration_is_validated_in_rust() {
         increment_um: 0.078,
         timing: 0.5,
         repeats: 2,
+        cycle_wait_s: None,
+        predelay_s: None,
+        cycles: None,
+        return_to_start: None,
     }
     .command(5)
     .unwrap();
@@ -995,7 +1011,11 @@ fn native_configuration_is_validated_in_rust() {
                 start_um: 0.0,
                 increment_um: 1.0,
                 timing,
-                repeats: 1
+                repeats: 1,
+                cycle_wait_s: None,
+                predelay_s: None,
+                cycles: None,
+                return_to_start: None,
             }
             .command(1)
             .is_err()
@@ -1046,3 +1066,145 @@ fn serial_selection_round_trips_from_ui_to_firmware() {
 }
 #[path = "../../src/xeryon.rs"]
 mod xeryon;
+
+#[test]
+fn quasi_options_round_trip_and_reject_unbounded_plans() {
+    let input = json!({"kind":"quasi_static", "start_um":0, "increment_um":1,
+        "timing":0.5, "repeats":5, "speed_um_s":10,
+        "predelay_s":2.5, "cycles":5, "return_to_start":true});
+    let line = serde_json::from_value::<receiver::Input>(input.clone())
+        .unwrap()
+        .command(7)
+        .unwrap();
+    assert_eq!(line, "START 7 Q 0 1000 500 5 10 2500 5 1");
+    let command::Command::Start(_, config) = command::Command::parse(line.as_bytes()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(config.predelay_ms(), 2500);
+    assert_eq!(config.validate().unwrap(), 5 * 5 * (500 + 1216) + 5 * 2016);
+    let mut text = String::new();
+    config.write_json(&mut text).unwrap();
+    let meta: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(meta["cycles"], 5);
+    assert_eq!(meta["return_to_start"], true);
+    for (key, value) in [
+        ("cycles", json!(0)),
+        ("cycles", json!(1.5)),
+        ("cycles", json!(4294967295u32)),
+        ("predelay_s", json!(-1)),
+        ("predelay_s", json!(0.0001)),
+        ("predelay_s", json!(4294907)),
+    ] {
+        let mut invalid = input.clone();
+        invalid[key] = value;
+        assert!(
+            serde_json::from_value::<receiver::Input>(invalid)
+                .map(|i| i.command(7).is_err())
+                .unwrap_or(true),
+            "{key}"
+        );
+    }
+    for invalid in [
+        "START 7 Q 0 1000 500 5 10 2500",
+        "START 7 Q 0 1000 500 5 10 2500 5",
+        "START 7 Q 0 1000 500 5 10 2500 5 2",
+    ] {
+        assert!(command::Command::parse(invalid.as_bytes()).is_err());
+    }
+    assert_eq!(
+        command::Command::parse(b"TARE 9"),
+        Ok(command::Command::Tare(9))
+    );
+    assert!(command::Command::parse(b"TARE 9 extra").is_err());
+}
+#[test]
+fn csv_tare_preserves_raw_counts_and_baseline_across_archive_recovery() {
+    let mut archive = receiver::Archive::default();
+    let mut result = receiver::Dataset {
+        archive_index: None,
+        metadata: json!({"run":1, "force_tare_raw":4200000}),
+        samples: [4200000, 4300000, 4100000]
+            .into_iter()
+            .enumerate()
+            .map(|(i, raw)| {
+                let mut row = [0; RECORD_FIELDS];
+                row[0] = i as i64 * 10;
+                row[2] = raw;
+                row
+            })
+            .collect(),
+    };
+    archive.retain(&mut result);
+    let csv = archive.datasets[0].csv();
+    assert!(csv.lines().next().unwrap().contains("force_tare_raw"));
+    for (row, expected) in csv
+        .lines()
+        .skip(2)
+        .zip([0.0, 8.6489937035362, -8.6489937035362])
+    {
+        let fields: Vec<_> = row.split(',').collect();
+        assert!((fields[18].parse::<f64>().unwrap() - expected).abs() < 0.000001);
+    }
+    assert_eq!(archive.datasets[0].samples[0][2], 4200000);
+    result.metadata["force_tare_raw"] = json!(4300000);
+    assert_eq!(archive.datasets[0].metadata["force_tare_raw"], 4200000);
+}
+
+#[test]
+fn cycle_wait_wire_units_metadata_duration_and_legacy_default() {
+    let input = json!({"kind":"quasi_static","start_um":0,"increment_um":1,
+        "timing":0.5,"repeats":5,"speed_um_s":10,"predelay_s":2.5,
+        "cycles":5,"return_to_start":true,"cycle_wait_s":12.345});
+    let line = serde_json::from_value::<receiver::Input>(input.clone())
+        .unwrap()
+        .command(7)
+        .unwrap();
+    assert_eq!(line, "START 7 Q 0 1000 500 5 10 2500 5 1 12345");
+    let command::Command::Start(_, config) = command::Command::parse(line.as_bytes()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        config.validate().unwrap(),
+        5 * 5 * (500 + 1216) + 5 * 2016 + 4 * 12345
+    );
+    let mut text = String::new();
+    config.write_json(&mut text).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap()["cycle_wait_ms"],
+        12345
+    );
+    for wire in [
+        "START 7 Q 0 1000 500 5 10",
+        "START 7 Q 0 1000 500 5 10 2500 5 1",
+    ] {
+        let command::Command::Start(_, config) = command::Command::parse(wire.as_bytes()).unwrap()
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            config,
+            ExperimentConfig::QuasiStatic {
+                cycle_wait_ms: 0,
+                ..
+            }
+        ));
+    }
+    for value in [json!(-1), json!(0.0001), json!(4294907)] {
+        let mut invalid = input.clone();
+        invalid["cycle_wait_s"] = value;
+        assert!(
+            serde_json::from_value::<receiver::Input>(invalid)
+                .unwrap()
+                .command(7)
+                .is_err()
+        );
+    }
+    for wire in [
+        "START 7 Q 0 1000 500 5 10 2500 5 1 -1",
+        "START 7 Q 0 1000 500 5 10 2500 5 1 1 extra",
+    ] {
+        assert!(command::Command::parse(wire.as_bytes()).is_err());
+    }
+}

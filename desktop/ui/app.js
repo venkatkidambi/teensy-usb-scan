@@ -17,6 +17,7 @@ let history=[],logs=[],epoch=null,lastSample=null,lastPong=0,lastPing=0,demoTime
 function activity(message){logs.push(`${new Date().toLocaleTimeString()}  ${message}`);if(logs.length>100)logs.shift();text('log',logs.join('\n'));}
 function notice(message,warn=false){text('notice',message);$('notice').classList.toggle('warn',warn);}
 function controls(){
+  $('force-tare').disabled=!connected||!hello?.force_tare||!!session?.pending||!!session?.experimentOwned||experimentUnresolved||!snapshot?.pressure?.valid||elapsed(snapshot.ms,snapshot.pressure.ms)+performance.now()-received>=250;
   $('xeryon-speed').disabled=!connected||!hello?.xeryon_speed||!!session?.experimentOwned;
   for(const id of ['xeryon-distance','plunger-distance','plunger-speed'])$(id).disabled=!!session?.experimentOwned;
   text('connect',busy?'Please wait…':connected||demo?'Disconnect':'Connect Teensy');
@@ -95,7 +96,7 @@ function accept(m){
     }
     const p=m.pressure;
     if(p?.valid&&elapsed(m.ms,p.ms)<1000&&p.ms!==lastPressure){
-      pressureHistory.push({time:now,raw:forceMillinewtons(p.raw),average:forceMillinewtons(p.average)});lastPressure=p.ms;
+      pressureHistory.push({time:now,raw:p.raw,average:p.average});lastPressure=p.ms;
       if(pressureHistory.length>1200)pressureHistory.shift();
     }
     pressureHistory=pressureHistory.filter(p=>now-p.time<=60000);
@@ -188,11 +189,12 @@ function render(){
   const pressure=snapshot?.pressure,pressureAge=pressure?elapsed(snapshot.ms,pressure.ms)+performance.now()-received:Infinity;
   const pressureValid=pressure?.valid,pressureFresh=pressureValid&&pressureAge<1000;
   if(dashboardVisible){
-  text('pressure-raw',pressureValid?forceNumber.format(forceMillinewtons(pressure.raw)):'—');
-  text('pressure-average',pressureValid?forceNumber.format(forceMillinewtons(pressure.average)):'—');
+  text('pressure-raw',pressureValid?forceNumber.format(forceMillinewtons(pressure.raw,snapshot?.force_tare_raw)):'—');
+  text('pressure-average',pressureValid?forceNumber.format(forceMillinewtons(pressure.average,snapshot?.force_tare_raw)):'—');
   text('pressure-counts',pressureValid?`LPS counts: ${number.format(pressure.raw)} · average ${number.format(pressure.average)}`:'LPS counts: —');
   const extrapolated=pressureValid&&(forceExtrapolated(pressure.raw)||forceExtrapolated(pressure.average));
   text('pressure-calibration',!pressureValid?'Probe-calibrated force':extrapolated?'Extrapolated force · outside calibration range':'Within calibration range');
+  text('force-tare-status',Number.isFinite(snapshot?.force_tare_raw)?`Zeroed · baseline ${number.format(snapshot.force_tare_raw)} counts`:'Not zeroed · automatically zeroed when an experiment starts');
   text('pressure-samples',number.format(pressure?.samples??0));
   }
   text('pressure-state',demo?'Simulated':!connected?'Offline':!hello?.pressure?'Unavailable':!pressureValid?pressureState(pressure):!pressureFresh?'Stale':'Receiving');
@@ -264,7 +266,7 @@ function draw(){
   if($('dashboard-panel').hidden)return;
   const now=performance.now();
   drawSeries('plot',history.filter(p=>now-p.time<=60000),[['d','#b3bda5',[5,4]],['e','#4a8962',[]]],position);
-  drawSeries('pressure-plot',pressureHistory.filter(p=>now-p.time<=60000),[['raw','#b3bda5',[5,4]],['average','#4a8962',[]]],forceNumber.format);
+  drawSeries('pressure-plot',pressureHistory.filter(p=>now-p.time<=60000).map(p=>({...p,raw:forceMillinewtons(p.raw,snapshot?.force_tare_raw),average:forceMillinewtons(p.average,snapshot?.force_tare_raw)})),[['raw','#b3bda5',[5,4]],['average','#4a8962',[]]],forceNumber.format);
 }
 const plotResize=new ResizeObserver(draw);
 for(const id of ['plot','pressure-plot'])plotResize.observe($(id).parentElement);
@@ -283,6 +285,7 @@ setInterval(()=>{
   render();if(history.length||pressureHistory.length)draw();
 },500);
 $('xeryon-speed').value='';
+$('force-tare').onclick=()=>{if(!$('force-tare').disabled)void request('TARE').catch(e=>notice(`Could not zero force: ${e.message??e}`,true));};
 setupExperiments({state:()=>({session,connected,hello,snapshot,experimentUnresolved}),positionAge:()=>age(snapshot?.values.EPOS),invoke,controls,activity,viewChanged:()=>{render();draw();}});
 maintenance=setupMaintenance({invoke,makeChannel:()=>new window.__TAURI__.core.Channel(),state:()=>({session,connected,busy,demo,experimentUnresolved}),disconnect,refresh,setBusy:value=>{maintenanceBusy=value;controls();}});
 render();controls();void refresh();

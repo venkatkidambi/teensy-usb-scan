@@ -1,3 +1,4 @@
+import {quasiStaticPlan,zenAcquisitions,calculateExperiment,drawPlan} from './planner.js';
 import {phaseDelays,parseFrequencies} from './phase.js';
 import {plotPng} from './plot-export.js';
 import {forceMillinewtons,forceRangeLabel} from './force.js';
@@ -8,6 +9,7 @@ let mode='dashboard',view='dashboard',showResults=false,dataset=null,context=nul
 let sweep=null,history=[],selectedIndex=null,sweepTimer=null,historyLoading=false,validationCancelled=false;
 let phaseCache=new WeakMap(),sweepPhases=[];
 let zenWait=null,zenTimer=null,zenChoosing=false;
+let calculator=null;
 const plotNames=['position','pressure','sweep-phase'];
 const modes=['dashboard','quasi_static','sinusoidal','data'];
 const fields=['start','increment','timing','repeats','speed'];
@@ -22,7 +24,10 @@ function startBlocked({session,connected,hello,experimentUnresolved},ignoreZen=f
   if(session.experimentOwned)return 'An experiment owns the hardware. Wait for its results or press ABORT.';
   if(experimentUnresolved)return 'Reconnect to recover the previous experiment before starting another.';
   if(!hello?.experiments)return 'Update the Teensy firmware to enable experiments.';
+  if(!hello?.force_tare)return 'Update the Teensy firmware to enable automatic force zeroing.';
   if(mode==='quasi_static'&&!hello?.quasi_static_speed)return 'Update the Teensy firmware to enable quasi-static speed control.';
+  if(mode==='quasi_static'&&!hello?.quasi_static_cycles)return 'Update the Teensy firmware to enable quasi-static predelay, cycles and return.';
+  if(mode==='quasi_static'&&!hello?.quasi_static_cycle_wait)return 'Update the Teensy firmware to enable waiting between cycles.';
   if(mode==='sinusoidal'&&!hello?.[$('experiment-control').value==='gpio'?'sine_gpio':`sine_serial_${$('experiment-control').value||'displacement'}`])return 'Update the Teensy firmware to enable the selected sine control mode.';
   if(session.pending)return 'Waiting for the current Teensy request to finish…';
   return '';
@@ -108,7 +113,13 @@ export function experimentControls() {
   for(const name of modes) $(`tab-${name}`).disabled=owned;
   $('dashboard-panel').inert=owned;
   for(const control of $('experiment-form').elements)control.disabled=owned;
+  $('calculator-calculate').disabled=owned;
+  $('calculator-apply').disabled=owned||!calculator;
+  for(const key of ['stack','buffer'])$(`calculator-${key}`).disabled=owned;
   $('experiment-speed').disabled=owned||mode!=='quasi_static';
+  $('experiment-quasi-fields').hidden=mode!=='quasi_static';
+  $('experiment-planner').hidden=mode!=='quasi_static';
+  for(const key of ['predelay','cycle-wait','cycles','return'])$(`experiment-${key}`).disabled=owned||mode!=='quasi_static';
   $('experiment-control-field').hidden=mode!=='sinusoidal';
   $('experiment-control').disabled=owned||mode!=='sinusoidal';
   const sweeping=mode==='sinusoidal'&&$('experiment-sweep-enabled').checked;
@@ -142,6 +153,7 @@ export function experimentControls() {
   }
   // Keep the running experiment and ABORT visible until hardware is released.
   if(showResults&&!owned){showResults=false;tab('data');}
+  drawPlanner();
 }
 function tab(next) {
   if(configurations[mode])configurations[mode]=fields.map(k=>$(`experiment-${k}`).value);
@@ -204,6 +216,7 @@ export function experimentMessage(message) {
     if(m.timing){const t=m.timing;
       $('experiment-result-summary').textContent+=` · EPOS ${(t.epos.rate_millihz/1000).toFixed(1)} Hz (${t.epos.updates} updates), max gap ${t.epos.max_ms} ms, max receipt age ${t.max_epos_age_ms} ms, ${t.epos_repeated_records} repeated records · pressure ${(t.pressure.rate_millihz/1000).toFixed(1)} Hz · USB max service gap ${t.max_usb_service_gap_ms} ms, RX peak ${t.rx_peak_bytes} B · feedback settings ${t.feedback_verified?'verified':'unverified'}`;
     }
+    if(Number.isFinite(m.force_tare_raw))$('experiment-result-summary').textContent+=` · force zero baseline ${m.force_tare_raw} LPS counts`;
     $('experiment-result-summary').textContent+=' · EPOS timing: host receipt; controller TIME is unassociated, acquisition/USB latency unknown';
     const excursion=waveformExcursion(dataset);
     if(excursion){
@@ -256,8 +269,8 @@ export function waveformExcursion(result) {
   }
   return worst.observations?worst:null;
 }
-export function forcePoints(samples) {
-  return samples.map(s=>[s[0],forceMillinewtons(s[2])]);
+export function forcePoints(samples,tareRaw=null) {
+  return samples.map(s=>[s[0],forceMillinewtons(s[2],tareRaw)]);
 }
 function datasetPhases(result) {
   // Positive affine calibration preserves phase. Fit raw counts to keep the
@@ -281,7 +294,7 @@ function drawPlot(id,field,scale) {
   if(canvas.height!==height)canvas.height=height;
   ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,rect.width,rect.height);
   const samples=dataset.samples,l=65,r=rect.width-16,t=15,b=rect.height-30;
-  const points=field===2?forcePoints(samples):signalPoints(samples,field,scale);
+  const points=field===2?forcePoints(samples,dataset.metadata.force_tare_raw):signalPoints(samples,field,scale);
   const command=field===1?samples.map(s=>[s[0],s[7]*scale]):[];
   let lo=Infinity,hi=-Infinity;for(const [,value] of [...points,...command]){lo=Math.min(lo,value);hi=Math.max(hi,value);}
   if(!samples.length){ctx.fillText('No samples acquired',l,40);return;}
@@ -343,6 +356,65 @@ function drawSweepPhase() {
     if(point.index===selectedIndex){ctx.beginPath();ctx.arc(x(point.frequency),y(point[unit]),6,0,Math.PI*2);ctx.stroke();}
   }
   if(!points.length){ctx.fillStyle='#646b65';ctx.fillText('No reliable phase fits available',(l+r)/2,(t+b)/2-12);}
+}
+function quasiOptions() {
+  return {cycle_wait_s:Number($('experiment-cycle-wait').value),predelay_s:Number($('experiment-predelay').value),cycles:Number($('experiment-cycles').value),return_to_start:$('experiment-return').checked};
+}
+function quasiConfig() {
+  return {kind:'quasi_static',start_um:Number($('experiment-start').value),increment_um:Number($('experiment-increment').value),timing:Number($('experiment-timing').value),repeats:Number($('experiment-repeats').value),speed_um_s:Number($('experiment-speed').value),...quasiOptions()};
+}
+function plannerPosition() {
+  const state=context.state(),position=state.snapshot?.values.EPOS?.value;
+  return state.connected&&context.positionAge()<3000&&Number.isFinite(position)?position*.078:null;
+}
+function calculatorLocked() {
+  const state=context.state();
+  return mode!=='quasi_static'||starting||!!zenWait||!!sweep||!!state.session?.experimentOwned||state.experimentUnresolved;
+}
+function clearCalculator(message='Enter the z-stack time and buffer, then calculate a suggested plan.') {
+  calculator=null;$('calculator-results').hidden=true;$('calculator-apply').disabled=true;
+  text('calculator-status',message);
+}
+function calculateTiming() {
+  if(calculatorLocked())return null;
+  clearCalculator();
+  try {
+    calculator=calculateExperiment(quasiConfig(),{stack_s:Number($('calculator-stack').value),buffer_s:Number($('calculator-buffer').value)},plannerPosition());
+    const r=calculator,fmt=value=>`${value} s`;
+    for(const [key,value] of Object.entries({interval:r.interval_s,predelay:r.config.predelay_s,hold:r.config.timing,wait:r.config.cycle_wait_s,offset:r.start_s}))text(`calculator-${key}-result`,fmt(value));
+    text('calculator-status',`${r.acquisitions} planned acquisitions: one in the initial predelay, each step hold and each wait between cycles. At least ${r.buffer_s} s buffer before and after each stack in the nominal plan. ${r.assumed_start?'Position unavailable: assumes actuator already at the configured start.':`Initial position used: ${r.initial_um.toFixed(3)} µm.`}${r.plan.truncated?' Preview shows only the beginning of the plan.':''}`);
+    text('calculator-zen-interval',`${r.interval_s} s`);
+    text('calculator-zen-count',String(r.acquisitions));
+    $('calculator-results').hidden=false;$('calculator-apply').disabled=false;
+    drawPlan($('calculator-plot'),r.plan,r.overlay);
+    return r;
+  }catch(e){clearCalculator(`Could not calculate: ${e.message??e}`);return null;}
+}
+function drawPlanner() {
+  if(mode!=='quasi_static'||view!=='quasi_static')return;
+  let plan=null;
+  try {
+    plan=quasiStaticPlan(quasiConfig(),plannerPosition());
+    text('experiment-planner-summary',`${plan.cycles} cycle${plan.cycles===1?'':'s'} × ${plan.steps} steps · estimated ${plan.duration.toFixed(3)} s · finish at ${plan.endpoint.toFixed(3)} µm${plan.known?'':' · initial approach omitted until fresh position is available'}${plan.truncated?' · preview shows only the beginning of this long plan':''}`);
+  }catch(e){text('experiment-planner-summary',e.message);}
+  // Report the entire run, even when the motion preview is truncated or hidden.
+  text('planner-zen-interval-setting','—');text('planner-zen-count-setting','—');
+  text('planner-zen-settings-note','Enter valid motion and ZEN timing to see the settings for the entire run.');
+  if(plan)try {
+    const schedule=zenAcquisitions(plan.duration,{stack_s:Number($('planner-zen-stack').value),interval_s:Number($('planner-zen-interval').value),start_s:Number($('planner-zen-offset').value)});
+    text('planner-zen-interval-setting',`${schedule.interval_s} s`);
+    text('planner-zen-count-setting',String(schedule.count));
+    text('planner-zen-settings-note','Current inputs · counts acquisitions starting before the entire planned run ends, using the first-stack delay above.');
+  }catch{}
+  const enabled=$('planner-zen-enabled').checked;
+  $('planner-zen-options').hidden=!enabled;
+  let overlay=null;
+  text('planner-zen-summary','');
+  if(enabled)try {
+    overlay=zenAcquisitions(plan?.segments.at(-1)?.end??0,{stack_s:Number($('planner-zen-stack').value),interval_s:Number($('planner-zen-interval').value),start_s:Number($('planner-zen-offset').value)});
+    text('planner-zen-summary',`${overlay.stack_s} s acquiring + ${overlay.wait_s} s waiting = ${overlay.interval_s} s start-to-start · first stack at ${overlay.start_s} s${overlay.dense?' · stacks too dense to distinguish; shading shows average acquisition coverage':''}`);
+  }catch(e){text('planner-zen-summary',e.message);}
+  drawPlan($('experiment-planner-plot'),plan,overlay);
 }
 function draw(){drawPlot('experiment-position-plot',1,.078);drawPlot('experiment-pressure-plot',2,1);drawSweepPhase();}
 function updateRunPicker() {
@@ -414,14 +486,39 @@ export function setupExperiments(api) {
     if(history[selectedIndex])experimentMessage({type:'experiment_dataset',dataset:history[selectedIndex],restored:true});
   };
   for(const name of modes)$(`tab-${name}`).onclick=()=>tab(name);
-  $('experiment-current').onclick=()=>{$('experiment-start').value=(api.state().snapshot.values.EPOS.value*.078).toFixed(3);};
+  $('experiment-current').onclick=()=>{$('experiment-start').value=(api.state().snapshot.values.EPOS.value*.078).toFixed(3);clearCalculator('Start position changed. Calculate again to update the suggestion.');drawPlanner();};
+  $('experiment-form').oninput=()=>{clearCalculator('Experiment settings changed. Calculate again to update the suggestion.');drawPlanner();};
+  clearCalculator();$('calculator-stack').value='40';$('calculator-buffer').value='1';
+  for(const key of ['stack','buffer'])$(`calculator-${key}`).oninput=()=>clearCalculator('Calculator inputs changed. Calculate again to update the suggestion.');
+  $('calculator-calculate').onclick=calculateTiming;
+  $('calculator-apply').onclick=()=>{
+    if(calculatorLocked()||!calculator)return;
+    // Recompute with the latest encoder position before applying a stored preview.
+    const r=calculateTiming();if(!r)return;
+    $('experiment-predelay').value=String(r.config.predelay_s);
+    $('experiment-timing').value=String(r.config.timing);
+    $('experiment-cycle-wait').value=String(r.config.cycle_wait_s);
+    $('planner-zen-enabled').checked=true;
+    $('planner-zen-stack').value=String(r.stack_s);
+    $('planner-zen-interval').value=String(r.interval_s);
+    $('planner-zen-offset').value=String(r.start_s);
+    clearCalculator('Suggested timings applied. Set the interval and first-stack delay in ZEN separately; no acquisition or experiment has been started.');
+    drawPlanner();
+  };
+  new ResizeObserver(()=>{if(calculator)drawPlan($('calculator-plot'),calculator.plan,calculator.overlay);}).observe($('calculator-results'));
+  $('planner-zen-enabled').checked=false;
+  $('planner-zen-stack').value='40';$('planner-zen-interval').value='60';$('planner-zen-offset').value='0';
+  for(const key of ['enabled','stack','interval','offset'])$(`planner-zen-${key}`).oninput=drawPlanner;
+  new ResizeObserver(drawPlanner).observe($('experiment-planner'));
+  $('experiment-cycle-wait').value='0';
+  $('experiment-predelay').value='0';$('experiment-cycles').value='1';$('experiment-return').checked=false;
   $('experiment-form').onsubmit=async event=>{
     event.preventDefault();
     const state=api.state(),blocked=startBlocked(state);
     if(blocked){startStatus(blocked);return;}
     // Validate here so a native number-input rejection cannot swallow START
     // before we can display a persistent explanation in the panel and log.
-    for(const key of fields){
+    for(const key of [...fields,...(mode==='quasi_static'?['predelay','cycle-wait','cycles']:[])]){
       if(key==='speed'&&mode!=='quasi_static'||key==='timing'&&mode==='sinusoidal'&&$('experiment-sweep-enabled').checked)continue;
       const input=$(`experiment-${key}`);
       if(!input.reportValidity()){
@@ -431,7 +528,7 @@ export function setupExperiments(api) {
     }
     const config={kind:mode,start_um:Number($('experiment-start').value),increment_um:Number($('experiment-increment').value),timing:Number($('experiment-timing').value),repeats:Number($('experiment-repeats').value)};
     if(mode==='sinusoidal')config.sine_control=$('experiment-control').value;
-    if(mode==='quasi_static')config.speed_um_s=Number($('experiment-speed').value);
+    if(mode==='quasi_static')Object.assign(config,{speed_um_s:Number($('experiment-speed').value),...quasiOptions()});
     if($('experiment-zen-enabled').checked){await armZen(config,state);return;}
     if(mode==='sinusoidal'&&$('experiment-sweep-enabled').checked){
       validationCancelled=false;starting=true;experimentControls();
